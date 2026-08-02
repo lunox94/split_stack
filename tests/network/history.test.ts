@@ -116,6 +116,25 @@ describe("durable match history", () => {
     ]);
   });
 
+  it("looks up a completed match outside the latest-20 window without exposing mutable state", () => {
+    const history = new HistoryMaterializer();
+    for (let serial = 1; serial <= 21; serial += 1) {
+      history.apply({ serial, payload: result(`match-${serial}`, "seat-a") });
+    }
+
+    const recovered = history.findByMatchId("match-1");
+
+    expect(recovered).toMatchObject({
+      serial: 1,
+      conflicted: false,
+      variantCount: 1,
+      result: { matchId: "match-1", outcome: "seat-a" },
+    });
+    recovered!.result.outcome = "seat-b";
+    expect(history.findByMatchId("match-1")?.result.outcome).toBe("seat-a");
+    expect(history.findByMatchId("missing")).toBeUndefined();
+  });
+
   it("bounds adversarial match and conflict variants", () => {
     const history = new HistoryMaterializer();
     for (let serial = 1; serial <= HISTORY_MAX_MATCHES + 20; serial += 1) {

@@ -5,8 +5,8 @@ Build date: 2026-08-02
 ## Artifact
 
 - File: `dist-xdc/split-stack.xdc`
-- Archive size: **265,451 bytes (259.2 KiB)**
-- Uncompressed payload: **736,132 bytes (718.9 KiB)**
+- Archive size: **270,828 bytes (264.5 KiB)**
+- Uncompressed payload: **758,397 bytes (740.6 KiB)**
 - Payload files: **7**
 - Icon: **256×256 PNG**
 

@@ -1,3 +1,4 @@
+import { cloneMatchResult } from "../domain/results";
 import type { MatchResultV1 } from "../domain/types";
 
 export interface DurableResultRecord {
@@ -35,18 +36,6 @@ export interface HistoryDiagnostics {
   matchCount: number;
   maximumVariantCount: number;
   capacityReached: boolean;
-}
-
-function cloneResult(result: MatchResultV1): MatchResultV1 {
-  const statsByPlayer: MatchResultV1["statsByPlayer"] = {};
-  for (const [playerId, stats] of Object.entries(result.statsByPlayer)) {
-    statsByPlayer[playerId] = { ...stats };
-  }
-  return {
-    ...result,
-    players: result.players.map((player) => ({ ...player })),
-    statsByPlayer,
-  };
 }
 
 function stableJson(value: unknown): string {
@@ -155,6 +144,19 @@ function conflictResult(variants: readonly MatchResultV1[]): MatchResultV1 {
   };
 }
 
+function materializeEntry(entry: ResultEntry): MaterializedResult | undefined {
+  const variants = [...entry.variants.values()];
+  const conflicted = variants.length > 1;
+  const result = conflicted ? conflictResult(variants) : variants[0];
+  if (result === undefined) return undefined;
+  return {
+    result: cloneMatchResult(result),
+    serial: entry.firstSerial,
+    conflicted,
+    variantCount: variants.length,
+  };
+}
+
 export class HistoryMaterializer {
   private readonly entries = new Map<string, ResultEntry>();
   private reachedCapacity = false;
@@ -163,7 +165,7 @@ export class HistoryMaterializer {
     if (!Number.isSafeInteger(record.serial) || record.serial < 1 || !isMatchResultV1(record.payload)) {
       return false;
     }
-    const accepted = cloneResult(record.payload);
+    const accepted = cloneMatchResult(record.payload);
     const fingerprint = stableJson(accepted);
     let entry = this.entries.get(accepted.matchId);
     if (entry === undefined) {
@@ -198,21 +200,20 @@ export class HistoryMaterializer {
     };
   }
 
+  public findByMatchId(matchId: string): MaterializedResult | undefined {
+    const entry = this.entries.get(matchId);
+    return entry === undefined ? undefined : materializeEntry(entry);
+  }
+
   public view(): HistoryView {
     const materialized: MaterializedResult[] = [];
     const tallies = new Map<string, PairTally>();
 
     for (const entry of this.entries.values()) {
-      const variants = [...entry.variants.values()];
-      const conflicted = variants.length > 1;
-      const result = conflicted ? conflictResult(variants) : variants[0];
-      if (result === undefined) continue;
-      materialized.push({
-        result: cloneResult(result),
-        serial: entry.firstSerial,
-        conflicted,
-        variantCount: variants.length,
-      });
+      const item = materializeEntry(entry);
+      if (item === undefined) continue;
+      materialized.push(item);
+      const { conflicted, result } = item;
       if (conflicted || result.outcome === "draw" || result.outcome === "desync") continue;
 
       const seatA = result.players[0];

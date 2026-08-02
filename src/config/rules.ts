@@ -82,6 +82,7 @@ export const RULES = {
     nukeRadius: 1,
     monominoRushTicks: 480,
     acidRainPieces: 3,
+    replacementQueueCap: 2,
   },
   special: {
     frequency: 10,

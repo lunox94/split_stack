@@ -44,4 +44,3 @@ describe("simplified T-Spin recognition", () => {
     expect(classifyTSpin(grid, piece, 0)).toBe("t-spin-none");
   });
 });
-

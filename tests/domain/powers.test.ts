@@ -71,5 +71,10 @@ describe("automatic powers", () => {
     ]);
     expect(queueReplacementPower([], "blackout")).toEqual([]);
   });
-});
 
+  it("bounds the replacement-mode FIFO at two pending powers", () => {
+    expect(
+      queueReplacementPower(["acid-rain", "monomino-rush"], "acid-rain"),
+    ).toEqual(["acid-rain", "monomino-rush"]);
+  });
+});

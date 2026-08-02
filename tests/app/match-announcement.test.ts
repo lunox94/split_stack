@@ -3,11 +3,13 @@ import { RULES_HASH } from "../../src/config/rules-hash";
 import { competitiveConfigHash } from "../../src/match/competitive-session";
 import type { MatchResultV1 } from "../../src/domain/types";
 import {
+  announcementMatchesChallenge,
   isMatchAnnouncementV1,
   resultMatchesAnnouncement,
   type MatchAnnouncementV1,
 } from "../../src/app/match-announcement";
 import { hashCanonicalHex } from "../../src/domain/hashing";
+import type { MaterializedChallenge } from "../../src/network/webxdc-durable";
 
 const seed = "00112233445566778899aabbccddeeff";
 
@@ -51,6 +53,27 @@ function result(): MatchResultV1 {
 }
 
 describe("durable match announcements", () => {
+  it("authorizes an announcement against the materialized challenge roster", () => {
+    const challenge: MaterializedChallenge = {
+      challengeId: "challenge-1",
+      rulesHash: RULES_HASH,
+      coordinatorPlayerId: "alice",
+      seatA: { playerId: "alice", displayName: "Alice", occupancyEventId: "created" },
+      seatB: { playerId: "bob", displayName: "Bob", occupancyEventId: "claimed" },
+      currentSeatBVacancyId: "vacancy-1",
+      closed: false,
+    };
+
+    expect(announcementMatchesChallenge(announcement(), challenge)).toBe(true);
+    expect(
+      announcementMatchesChallenge(announcement(), {
+        ...challenge,
+        seatB: { ...challenge.seatB!, playerId: "mallory" },
+      }),
+    ).toBe(false);
+    expect(announcementMatchesChallenge(announcement(), { ...challenge, seatB: null })).toBe(false);
+  });
+
   it("authenticates the deterministic config, coordinator, seats, and round", () => {
     expect(isMatchAnnouncementV1(announcement(), RULES_HASH)).toBe(true);
     expect(isMatchAnnouncementV1({ ...announcement(), seatBPlayerId: "mallory" }, RULES_HASH)).toBe(false);

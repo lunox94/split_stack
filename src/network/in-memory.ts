@@ -127,4 +127,3 @@ export class InMemoryRealtimeBus {
     this.listeners.get(to)?.(data);
   }
 }
-

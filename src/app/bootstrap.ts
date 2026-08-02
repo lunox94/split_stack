@@ -57,6 +57,7 @@ import {
 } from "./runtime-helpers";
 import { materializeRematchRound, type RematchProposalV1 } from "./rematch";
 import {
+  announcementMatchesChallenge,
   isMatchAnnouncementV1,
   resultMatchesAnnouncement,
   type MatchAnnouncementV1,
@@ -315,6 +316,10 @@ export async function bootstrap(): Promise<void> {
   let announcedConfigHash: string | null = null;
   let lastScrambleActive = false;
   let resultShownFor: string | null = null;
+  let leaveInProgress = false;
+  let lastCountdownSecond = 0;
+  let lastLocalLevel = 1;
+  let warnedUpcomingPower: PowerKind | null = null;
 
   const host = window.webxdc;
   const selfActor: LobbyActor = {
@@ -522,7 +527,7 @@ export async function bootstrap(): Promise<void> {
   };
 
   const showResult = (result: MatchResultV1, localPlayerId: string | null): void => {
-    if (resultShownFor === result.matchId) return;
+    if (resultShownFor === result.matchId && mode === "results") return;
     resultShownFor = result.matchId;
     mode = "results";
     const seatA = result.players[0];
@@ -577,6 +582,7 @@ export async function bootstrap(): Promise<void> {
   const processEffects = (effects: readonly SimulationEffect[], pan = -0.45): void => {
     for (const effect of effects) {
       if (effect.kind === "piece-locked") audio.play("lock", { pan });
+      else if (effect.kind === "t-spin") audio.play("t-spin", { pan });
       else if (effect.kind === "line-clear") {
         const cue: AudioCue = effect.rows === 1 ? "single" : effect.rows === 2 ? "double" : effect.rows === 3 ? "triple" : "four-line";
         audio.play(cue, { pan });
@@ -584,6 +590,22 @@ export async function bootstrap(): Promise<void> {
       else if (effect.kind === "hollow-cross" || effect.kind === "glitch-piece") audio.play("special-trigger", { pan });
       else if (effect.kind === "power-activated" && effect.power !== undefined) audio.play(cueForPower(effect.power), { pan });
       else if (effect.kind === "top-out" && mode === "practice" && practice !== null) showPracticeResult(practice.readSnapshot());
+    }
+  };
+
+  const processSnapshotAudio = (snapshot: SimulationSnapshot | undefined): void => {
+    if (snapshot === undefined) return;
+    if (snapshot.level > lastLocalLevel) audio.play("level-up", { pan: -0.45 });
+    lastLocalLevel = snapshot.level;
+    const warningThreshold = Math.max(1, RULES.power.threshold - 5);
+    if (
+      snapshot.player.powerCharge >= warningThreshold &&
+      warnedUpcomingPower !== snapshot.player.upcomingPower
+    ) {
+      warnedUpcomingPower = snapshot.player.upcomingPower;
+      audio.play("power-warning", { pan: -0.45 });
+    } else if (snapshot.player.powerCharge < warningThreshold) {
+      warnedUpcomingPower = null;
     }
   };
 
@@ -613,12 +635,31 @@ export async function bootstrap(): Promise<void> {
     shell.left.pane.setAttribute("aria-disabled", String(!enabled));
   };
 
+  const restoreCompletedMatch = (match: ActiveMatch, result: MatchResultV1): void => {
+    competitive?.disconnect();
+    competitive = null;
+    spectator?.channel.leave?.();
+    spectator = null;
+    practice = null;
+    activeMatch = match;
+    lastScrambleActive = false;
+    announcedConfigHash = null;
+    shell.readyButton.hidden = true;
+    shell.pausePracticeButton.hidden = true;
+    shell.touchButtons.hidden = true;
+    shell.overlay.hidden = true;
+    setInputsEnabled(false);
+    showResult(result, match.role === "spectator" ? null : selfActor.id);
+  };
+
   const startPractice = (): void => {
     leaveRuntime();
     resultShownFor = null;
     mode = "practice";
     practicePaused = false;
     practiceAccumulator = 0;
+    lastLocalLevel = 1;
+    warnedUpcomingPower = null;
     practice = createSimulation({
       seed: createRuntimeId(),
       playerId: selfActor.id,
@@ -672,6 +713,9 @@ export async function bootstrap(): Promise<void> {
     practice = null;
     lastScrambleActive = false;
     announcedConfigHash = null;
+    lastCountdownSecond = 0;
+    lastLocalLevel = 1;
+    warnedUpcomingPower = null;
     let previousRetired = false;
     const retirePrevious = (): void => {
       if (previousRetired) return;
@@ -740,6 +784,15 @@ export async function bootstrap(): Promise<void> {
         shell.overlayText.textContent = phaseText(phase, view?.countdownTicks ?? 0);
         setInputsEnabled(phase === "playing");
       },
+      onRemoteBlackout: () => {
+        audio.play("power-blackout", { pan: 0.45 });
+      },
+      onIncomingGarbage: () => {
+        audio.play("garbage-warning", { pan: 0.45 });
+      },
+      onSimulationEffects: (effects) => {
+        processEffects(effects, -0.45);
+      },
       onTerminal: (_terminal: CompetitiveTerminalState) => {
         setInputsEnabled(false);
       },
@@ -769,6 +822,10 @@ export async function bootstrap(): Promise<void> {
       activeMatch !== null &&
       (activeChallenge === undefined || activeChallenge.seatB === null)
     ) {
+      if (mode === "results") {
+        shell.rematchButton.hidden = true;
+        return;
+      }
       // A durable close/release invalidates the realtime binding immediately.
       // The open challenge may become playable again after a fresh seat claim.
       showLobby();
@@ -834,6 +891,11 @@ export async function bootstrap(): Promise<void> {
       seatBSessionId: seatBWinner.runtimeSessionId,
       duplicateRuntime,
     };
+    const completed = history.findByMatchId(next.matchId);
+    if (completed !== undefined) {
+      restoreCompletedMatch(next, completed.result);
+      return;
+    }
     const nextRoster: RuntimeRoster = {
       matchId: next.matchId,
       role: next.role,
@@ -906,8 +968,9 @@ export async function bootstrap(): Promise<void> {
     }
     history.apply({ serial, payload });
     renderHistory();
-    if (activeMatch?.matchId === payload.matchId && activeMatch.role === "spectator") {
-      showResult(payload, null);
+    const completed = history.findByMatchId(payload.matchId);
+    if (activeMatch?.matchId === payload.matchId && completed !== undefined) {
+      restoreCompletedMatch(activeMatch, completed.result);
     }
     return true;
   };
@@ -934,6 +997,8 @@ export async function bootstrap(): Promise<void> {
       lamport.observe(payload.logicalClock);
       reconcileLobby();
     } else if (isMatchAnnouncementV1(payload, RULES_HASH)) {
+      const challenge = materializeChallenge(lobbyEvents, payload.challengeId);
+      if (!announcementMatchesChallenge(payload, challenge)) return;
       appendBoundedUnique(announcements, payload, MAX_ANNOUNCEMENTS);
       lamport.observe(payload.logicalClock);
       replayPendingResults(payload.matchId);
@@ -1043,9 +1108,38 @@ export async function bootstrap(): Promise<void> {
     setInputsEnabled(!practicePaused);
   });
 
-  const leaveChallenge = (): void => {
+  const settleExplicitForfeit = async (session: CompetitiveSession): Promise<void> => {
+    try {
+      session.forfeit();
+      const deadline = performance.now() + RULES.network.missingPeerMs;
+      while (session.forfeitDeliveryStatus() === "pending") {
+        const remaining = deadline - performance.now();
+        if (remaining <= 0) break;
+        await wait(window, Math.min(RULES.network.retryMs, remaining));
+        session.pump();
+      }
+    } finally {
+      if (session.forfeitDeliveryStatus() === "pending") {
+        session.queueForfeitFallback();
+      }
+    }
+  };
+
+  const leaveChallenge = async (): Promise<void> => {
+    if (leaveInProgress) return;
+    leaveInProgress = true;
+    shell.leaveMatchButton.disabled = true;
+    shell.resultsLeaveButton.disabled = true;
+    shell.rematchButton.disabled = true;
     const match = activeMatch;
-    if (mode === "competitive") competitive?.forfeit();
+    const session = mode === "competitive" ? competitive : null;
+    if (session !== null) {
+      try {
+        await settleExplicitForfeit(session);
+      } catch {
+        // The canonical durable fallback was queued in settleExplicitForfeit.
+      }
+    }
     if (match !== null && match.role !== "spectator") {
       const occupant = match.role === "a" ? match.challenge.seatA : match.challenge.seatB;
       if (match.role === "a") {
@@ -1071,9 +1165,13 @@ export async function bootstrap(): Promise<void> {
       }
     }
     showLobby();
+    shell.leaveMatchButton.disabled = false;
+    shell.resultsLeaveButton.disabled = false;
+    shell.rematchButton.disabled = false;
+    leaveInProgress = false;
   };
-  shell.leaveMatchButton.addEventListener("click", leaveChallenge);
-  shell.resultsLeaveButton.addEventListener("click", leaveChallenge);
+  shell.leaveMatchButton.addEventListener("click", () => void leaveChallenge());
+  shell.resultsLeaveButton.addEventListener("click", () => void leaveChallenge());
   shell.rematchButton.addEventListener("click", () => {
     if (activeMatch === null) {
       startPractice();
@@ -1161,6 +1259,7 @@ export async function bootstrap(): Promise<void> {
         }
       }
       const snapshot = practice.readSnapshot();
+      processSnapshotAudio(snapshot);
       leftBoard = boardModelFromSimulation(snapshot, true, false);
       updateHud(shell.left, selfActor.displayName, snapshot);
       shell.left.blackout.hidden = true;
@@ -1168,6 +1267,19 @@ export async function bootstrap(): Promise<void> {
     } else if (mode === "competitive" && competitive !== null && activeMatch !== null) {
       competitive.pump();
       const view = competitive.view();
+      processSnapshotAudio(view.local);
+      if (view.phase === "countdown") {
+        const second = Math.max(
+          1,
+          Math.ceil(view.countdownTicks / RULES.timing.ticksPerSecond),
+        );
+        if (second !== lastCountdownSecond) {
+          lastCountdownSecond = second;
+          audio.play("countdown");
+        }
+      } else {
+        lastCountdownSecond = 0;
+      }
       const seatB = activeMatch.challenge.seatB;
       const localName = activeMatch.role === "a" ? activeMatch.challenge.seatA.displayName : seatB?.displayName ?? selfActor.displayName;
       const peerName = activeMatch.role === "a"

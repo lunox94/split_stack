@@ -77,4 +77,3 @@ export function savePreferences(storage: StoragePort, preferences: Preferences):
     // Preferences are a cache; gameplay must remain available without storage.
   }
 }
-

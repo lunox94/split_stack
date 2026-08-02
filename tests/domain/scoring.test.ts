@@ -87,4 +87,3 @@ describe("score, combo, back-to-back, attack, and charge", () => {
     });
   });
 });
-

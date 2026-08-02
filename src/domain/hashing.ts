@@ -52,4 +52,3 @@ export function hashCanonical(value: unknown): number {
 export function hashCanonicalHex(value: unknown): string {
   return hashCanonical(value).toString(16).padStart(8, "0");
 }
-

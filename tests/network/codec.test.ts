@@ -138,6 +138,19 @@ describe("realtime envelope codec", () => {
       decodeEnvelope(new TextEncoder().encode(JSON.stringify(forgedTopOut))),
     ).toMatchObject({ ok: false, error: "invalid-envelope" });
 
+    const incompleteForfeit = {
+      ...keepalive,
+      kind: "FORFEIT",
+      seq: 1,
+      payload: {
+        eventId: "forfeit-1",
+        forfeitingPlayerId: "player-a",
+      },
+    };
+    expect(
+      decodeEnvelope(new TextEncoder().encode(JSON.stringify(incompleteForfeit))),
+    ).toMatchObject({ ok: false, error: "invalid-envelope" });
+
     const config: RealtimeEnvelope<"MATCH_CONFIG"> = {
       ...keepalive,
       kind: "MATCH_CONFIG",

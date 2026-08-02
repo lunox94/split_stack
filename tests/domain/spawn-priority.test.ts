@@ -55,4 +55,3 @@ describe("spawn priority", () => {
     expect(descriptors.every((piece) => piece.source === "base")).toBe(true);
   });
 });
-

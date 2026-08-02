@@ -4,6 +4,7 @@ import type { MatchResultV1 } from "../domain/types";
 import {
   MAX_DURABLE_LOGICAL_CLOCK,
   type LobbyActor,
+  type MaterializedChallenge,
 } from "../network/webxdc-durable";
 
 export interface MatchAnnouncementV1 {
@@ -82,5 +83,20 @@ export function resultMatchesAnnouncement(
     result.players[1]?.id === announcement.seatBPlayerId &&
     (result.completedBy === announcement.seatAPlayerId ||
       result.completedBy === announcement.seatBPlayerId)
+  );
+}
+
+export function announcementMatchesChallenge(
+  announcement: MatchAnnouncementV1,
+  challenge: MaterializedChallenge | undefined,
+): boolean {
+  return (
+    challenge !== undefined &&
+    challenge.seatB !== null &&
+    announcement.challengeId === challenge.challengeId &&
+    announcement.rulesHash === challenge.rulesHash &&
+    announcement.actor.id === challenge.coordinatorPlayerId &&
+    announcement.seatAPlayerId === challenge.seatA.playerId &&
+    announcement.seatBPlayerId === challenge.seatB.playerId
   );
 }

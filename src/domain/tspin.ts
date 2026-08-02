@@ -35,4 +35,3 @@ export function classifyTSpin(
 ): ClearKind {
   return clearKindFor(completedLineCount, isTSpin(grid, active));
 }
-

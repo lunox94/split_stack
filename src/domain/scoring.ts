@@ -160,4 +160,3 @@ export function resolveClearProgress(input: ClearProgressInput): ClearProgress {
     lineCount: values.lines,
   };
 }
-

@@ -114,6 +114,11 @@ export class CriticalReliability {
     return this.outbox.size;
   }
 
+  public isEventPending(eventId: string): boolean {
+    const sequence = this.outboundEventSeq.get(eventId);
+    return sequence !== undefined && this.outbox.has(sequence);
+  }
+
   public setConnected(connected: boolean): void {
     this.connected = connected;
   }

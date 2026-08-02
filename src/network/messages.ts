@@ -141,7 +141,11 @@ export interface RealtimePayloadMap {
     finalLevel: number;
     finalStats: PlayerResultStats;
   };
-  FORFEIT: CriticalPayload & { forfeitingPlayerId: PlayerId };
+  FORFEIT: CriticalPayload & {
+    forfeitingPlayerId: PlayerId;
+    resultHash: string;
+    result: MatchResultV1;
+  };
   NETWORK_PAUSE: CriticalPayload & {
     pauseEpoch: number;
     proposedPauseTick: Tick;

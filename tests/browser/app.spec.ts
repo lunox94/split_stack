@@ -1,4 +1,7 @@
 import { expect, test, type BrowserContext, type Locator, type Page } from "@playwright/test";
+import { RULES_HASH } from "../../src/config/rules-hash";
+import { RULES } from "../../src/config/rules";
+import { hashCanonicalHex } from "../../src/domain/hashing";
 
 const APP_ORIGIN = "http://127.0.0.1:3000";
 
@@ -8,6 +11,110 @@ async function openApp(page: Page, identity = "Browser Tester"): Promise<void> {
     `/#name=${encodeURIComponent(identity)}&addr=${encodeURIComponent(`${slug}@example.test`)}`,
   );
   await expect(page.getByRole("heading", { name: "Split Stack" })).toBeVisible();
+}
+
+async function seedCompletedMatch(page: Page): Promise<void> {
+  const challengeId = "reload-challenge";
+  const matchId = `${challengeId}:round:1`;
+  const seed = "00112233445566778899aabbccddeeff";
+  const alice = { id: "alice@example.test", displayName: "Alice" };
+  const bob = { id: "bob@example.test", displayName: "Bob" };
+  const configHash = hashCanonicalHex({
+    rulesVersion: RULES.rulesVersion,
+    rulesHash: RULES_HASH,
+    seed,
+    seatAPlayerId: alice.id,
+    seatBPlayerId: bob.id,
+  });
+  const emptyStats = {
+    score: 0,
+    lines: 0,
+    garbageSent: 0,
+    powersActivated: 0,
+    tetrises: 0,
+    tSpinSingles: 0,
+    tSpinDoubles: 0,
+    tSpinTriples: 0,
+  };
+  const payloads = [
+    {
+      schema: "split-stack/lobby/v1",
+      kind: "challenge-created",
+      eventId: "challenge-created",
+      logicalClock: 1,
+      challengeId,
+      actor: alice,
+      seatBVacancyId: "vacancy-b",
+      rulesHash: RULES_HASH,
+    },
+    {
+      schema: "split-stack/lobby/v1",
+      kind: "seat-claimed",
+      eventId: "seat-b-claimed",
+      logicalClock: 2,
+      challengeId,
+      actor: bob,
+      vacancyId: "vacancy-b",
+    },
+    {
+      schema: "split-stack/session-claim/v1",
+      kind: "session-claim",
+      challengeId,
+      occupancyEventId: "challenge-created",
+      runtimeSessionId: "old-runtime-a",
+      actor: alice,
+      logicalClock: 3,
+      eventId: "seat-a-session",
+    },
+    {
+      schema: "split-stack/session-claim/v1",
+      kind: "session-claim",
+      challengeId,
+      occupancyEventId: "seat-b-claimed",
+      runtimeSessionId: "old-runtime-b",
+      actor: bob,
+      logicalClock: 4,
+      eventId: "seat-b-session",
+    },
+    {
+      schema: "split-stack/match-announcement/v1",
+      eventId: "round-one-announcement",
+      logicalClock: 5,
+      challengeId,
+      matchId,
+      round: 1,
+      rulesHash: RULES_HASH,
+      configHash,
+      seed,
+      seedHash: hashCanonicalHex({ seed }),
+      seatAPlayerId: alice.id,
+      seatBPlayerId: bob.id,
+      actor: alice,
+    },
+    {
+      schema: "split-stack/result/v1",
+      matchId,
+      seedHash: hashCanonicalHex({ seed }),
+      players: [alice, bob],
+      outcome: "seat-a",
+      reason: "top-out",
+      durationTicks: 600,
+      finalLevel: 1,
+      statsByPlayer: {
+        [alice.id]: { ...emptyStats, score: 2_400, lines: 12 },
+        [bob.id]: { ...emptyStats, topOutTick: 600 },
+      },
+      completedBy: alice.id,
+    },
+  ];
+  const updates = payloads.map((payload, index) => ({
+    payload,
+    serial: index + 1,
+    _sender: index === 1 || index === 3 ? bob.id : alice.id,
+  }));
+  await page.addInitScript((records) => {
+    window.localStorage.setItem("__xdcUpdatesKey__", JSON.stringify(records));
+  }, updates);
 }
 
 function localScore(page: Page): Locator {
@@ -151,6 +258,68 @@ test("versus boards stay visible, side by side, and equal at 360 by 640", async 
   await seatB.close();
 });
 
+test("versus boards remain equal and side by side in landscape", async ({ context, page }) => {
+  await page.setViewportSize({ width: 640, height: 360 });
+  const { seatA, seatB } = await openVersusPair(context, page);
+  const left = seatA.getByRole("application", { name: "Your board" });
+  const right = seatA.getByRole("application", { name: "Opponent board" });
+
+  const [leftBox, rightBox] = await Promise.all([left.boundingBox(), right.boundingBox()]);
+  expect(leftBox).not.toBeNull();
+  expect(rightBox).not.toBeNull();
+  expect(leftBox!.width).toBeCloseTo(rightBox!.width, 0);
+  expect(leftBox!.height).toBeCloseTo(rightBox!.height, 0);
+  expect(rightBox!.x).toBeGreaterThan(leftBox!.x + leftBox!.width - 1);
+  expect(rightBox!.y).toBeCloseTo(leftBox!.y, 0);
+  expect(rightBox!.x + rightBox!.width).toBeLessThanOrEqual(640.5);
+  expect(rightBox!.y + rightBox!.height).toBeLessThanOrEqual(360.5);
+
+  await seatB.close();
+});
+
+test("a third participant joins an active challenge as a read-only spectator", async ({
+  context,
+  page,
+}) => {
+  const { seatA, seatB } = await openVersusPair(context, page);
+  await seatA.getByRole("button", { name: "Ready", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready", exact: true }).click();
+
+  const spectator = await context.newPage();
+  await spectator.goto("/#name=Charlie&addr=charlie%40example.test");
+  await expect(spectator.getByRole("application", { name: "Seat A board" })).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(spectator.getByRole("application", { name: "Seat B board" })).toBeVisible();
+  await expect(spectator.locator('.player-pane[data-side="left"]')).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+
+  await spectator.close();
+  await seatB.close();
+});
+
+test("leaving an active match records a forfeit before releasing the seat", async ({
+  context,
+  page,
+}) => {
+  const { seatA, seatB } = await openVersusPair(context, page);
+  await seatA.getByRole("button", { name: "Ready", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready", exact: true }).click();
+  await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
+
+  await seatB.getByRole("button", { name: "Leave match" }).click();
+
+  await expect(seatA.getByRole("heading", { name: "Victory" })).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(seatA.getByRole("button", { name: "Rematch" })).toBeHidden();
+  await expect(seatB.getByRole("heading", { name: "Split Stack" })).toBeVisible();
+
+  await seatB.close();
+});
+
 test("a durably confirmed newer runtime replaces a duplicate and a seat release returns the peer to lobby", async ({
   context,
   page,
@@ -175,6 +344,26 @@ test("a durably confirmed newer runtime replaces a duplicate and a seat release 
 
   await olderSeatB.close();
   await newerSeatB.close();
+});
+
+test("a completed competitive match reloads into results and keeps rematch available", async ({ page }) => {
+  await seedCompletedMatch(page);
+  await page.goto("/#name=Alice&addr=alice%40example.test");
+  await expect(page.getByRole("main", { name: "Split Stack" })).toBeVisible();
+
+  const victory = page.getByRole("heading", { name: "Victory" });
+  const rematch = page.getByRole("button", { name: "Rematch" });
+  await expect(victory).toBeVisible({ timeout: 15_000 });
+  await expect(rematch).toBeVisible();
+
+  await page.reload();
+
+  await expect(victory).toBeVisible({ timeout: 15_000 });
+  await expect(rematch).toBeVisible();
+  await rematch.click();
+  await expect(page.getByRole("application", { name: "Your board" })).toBeVisible({
+    timeout: 15_000,
+  });
 });
 
 test("reduced-effects preference is applied immediately and persists", async ({ page }) => {

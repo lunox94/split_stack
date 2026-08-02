@@ -142,6 +142,7 @@ export function queueReplacementPower(
   power: PowerKind,
 ): Array<"monomino-rush" | "acid-rain"> {
   if (power !== "monomino-rush" && power !== "acid-rain") return [...pending];
+  if (pending.length >= RULES.power.replacementQueueCap) return [...pending];
   return [...pending, power];
 }
 

@@ -421,7 +421,7 @@ export function isPlayerSnapshot(value: unknown): value is PlayerSnapshotV1 {
     !candidate.incomingGarbage.every(isGarbagePacket) ||
     typeof candidate.holdUsed !== "boolean" ||
     !Array.isArray(candidate.pendingReplacementModes) ||
-    candidate.pendingReplacementModes.length > 2 ||
+    candidate.pendingReplacementModes.length > RULES.power.replacementQueueCap ||
     !candidate.pendingReplacementModes.every((mode) =>
       ["monomino-rush", "acid-rain"].includes(String(mode)),
     ) ||

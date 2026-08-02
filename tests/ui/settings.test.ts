@@ -43,4 +43,3 @@ describe("local preferences", () => {
     expect(loadPreferences(storage, false)).toEqual(DEFAULT_PREFERENCES);
   });
 });
-

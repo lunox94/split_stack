@@ -114,4 +114,3 @@ export function resolveSpecialTriggers(
   }
   return { grid, garbageCoreEvents, glitchEvents, destroyedCells };
 }
-

@@ -72,6 +72,28 @@ describe("simulation facade", () => {
     expect(snapshot.player.comboIndex).toBe(0);
   });
 
+  it("emits a distinct T-Spin effect for audio and presentation", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    player.grid[20]![3] = { kind: "garbage" };
+    player.active = spawnPiece(player.grid, { source: "base", shape: "T" });
+    player.active!.x = 3;
+    player.active!.y = 20;
+    player.active!.lastSuccessfulAction = "rotate-cw";
+    player.active!.lockTicksRemaining = 1;
+    const simulation = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: true,
+      initialPlayer: player,
+    });
+
+    const effects = simulation.tick(1);
+
+    expect(effects).toContainEqual(expect.objectContaining({ kind: "t-spin" }));
+    expect(simulation.readSnapshot().player.score).toBe(400);
+  });
+
   it("executes the approved lock resolution phases in exact order", () => {
     const player = createPlayerState("a", SEED);
     player.grid = createBoard();
@@ -176,7 +198,7 @@ describe("simulation facade", () => {
     });
   });
 
-  it("preserves the event identity of a Garbage Core row that survives cancellation", () => {
+  it("combines a surviving Garbage Core contribution into the resolution packet", () => {
     const player = createPlayerState("a", SEED);
     player.grid = createBoard();
     for (let column = 0; column < 10; column += 1) {
@@ -203,13 +225,13 @@ describe("simulation facade", () => {
       {
         kind: "garbage-attack",
         rows: 1,
-        eventId: "a:0:1:lock:garbage-core:2",
+        eventId: "a:0:1:lock:garbage",
       },
     ]);
     expect(simulation.readSnapshot().player.stats.garbageSent).toBe(1);
   });
 
-  it("keeps ordinary rows aggregated while emitting each Garbage Core as its own row", () => {
+  it("combines every uncanceled row from one resolution into one attack packet", () => {
     const player = createPlayerState("a", SEED);
     player.grid = createBoard();
     for (let row = 18; row < 22; row += 1) {
@@ -236,9 +258,7 @@ describe("simulation facade", () => {
       .filter((effect) => effect.kind === "garbage-attack");
 
     expect(attacks).toEqual([
-      { kind: "garbage-attack", rows: 2, eventId: "a:0:1:lock:garbage" },
-      { kind: "garbage-attack", rows: 1, eventId: "a:0:1:lock:garbage-core:1" },
-      { kind: "garbage-attack", rows: 1, eventId: "a:0:1:lock:garbage-core:2" },
+      { kind: "garbage-attack", rows: 4, eventId: "a:0:1:lock:garbage" },
     ]);
     expect(simulation.readSnapshot().player.stats.garbageSent).toBe(4);
   });

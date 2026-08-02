@@ -27,4 +27,3 @@ describe("board view projection", () => {
     expect(boardModelFromSimulation(snapshot, false, true).cells).toEqual([]);
   });
 });
-

@@ -50,4 +50,3 @@ describe("deterministic randomness", () => {
     expect(() => new Xoshiro128StarStar([0, 0, 0, 0])).toThrow(/nonzero/i);
   });
 });
-

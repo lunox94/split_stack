@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { RULES } from "../../src/config/rules";
 import type { MatchResultV1 } from "../../src/domain/types";
+import type { SimulationEffect } from "../../src/domain/simulation";
 import { encodeEnvelope } from "../../src/network/codec";
 import { InMemoryRealtimeBus, ManualClock } from "../../src/network/in-memory";
 import type { RealtimeEnvelope } from "../../src/network/messages";
@@ -12,6 +13,8 @@ import {
 function createPair(overrides: {
   onAForfeitWin?: (playerId: string) => void;
   onABlackout?: (ownerPlayerId: string) => void;
+  onAIncomingGarbage?: (rows: number, eventId: string) => void;
+  onASimulationEffects?: (effects: readonly SimulationEffect[]) => void;
   onAResultConfirmed?: (result: MatchResultV1) => void;
   onBResultConfirmed?: (result: MatchResultV1) => void;
   onADesynchronization?: (reason: string) => void;
@@ -39,6 +42,12 @@ function createPair(overrides: {
     ...(overrides.onABlackout === undefined
       ? {}
       : { onRemoteBlackout: overrides.onABlackout }),
+    ...(overrides.onAIncomingGarbage === undefined
+      ? {}
+      : { onIncomingGarbage: overrides.onAIncomingGarbage }),
+    ...(overrides.onASimulationEffects === undefined
+      ? {}
+      : { onSimulationEffects: overrides.onASimulationEffects }),
     ...(overrides.onAResultConfirmed === undefined
       ? {}
       : { onResultConfirmed: overrides.onAResultConfirmed }),
@@ -93,6 +102,24 @@ describe("CompetitiveSession", () => {
     expect(pair.a.view().phase).toBe("lobby");
 
     advanceBoth(pair, RULES.network.keepaliveMs);
+
+    expect(pair.a.view().phase).toBe("countdown");
+    expect(pair.b.view().phase).toBe("countdown");
+  });
+
+  it("returns to the lobby after a pre-match visibility interruption and can still ready", () => {
+    const pair = createPair();
+    pair.a.start();
+    pair.b.start();
+
+    pair.a.setHidden(true);
+    expect(pair.a.view().phase).toBe("network-pause");
+
+    pair.a.setHidden(false);
+    expect(pair.a.view().phase).toBe("lobby");
+
+    pair.a.setReady(true);
+    pair.b.setReady(true);
 
     expect(pair.a.view().phase).toBe("countdown");
     expect(pair.b.view().phase).toBe("countdown");
@@ -267,7 +294,8 @@ describe("CompetitiveSession", () => {
 
   it("routes ordered critical effects into the local simulation and UI callbacks", () => {
     const onBlackout = vi.fn();
-    const pair = createPair({ onABlackout: onBlackout });
+    const onIncomingGarbage = vi.fn();
+    const pair = createPair({ onABlackout: onBlackout, onAIncomingGarbage: onIncomingGarbage });
     ready(pair);
     advanceBoth(pair, 3_000);
 
@@ -309,6 +337,20 @@ describe("CompetitiveSession", () => {
       remainingTicks: RULES.power.scrambleTicks,
     });
     expect(onBlackout).toHaveBeenCalledWith("player-b", "b:blackout:1");
+    expect(onIncomingGarbage).toHaveBeenCalledWith(2, "b:garbage:1");
+  });
+
+  it("reports effects produced by automatic simulation ticks", () => {
+    const onEffects = vi.fn<(effects: readonly SimulationEffect[]) => void>();
+    const pair = createPair({ onASimulationEffects: onEffects });
+    ready(pair);
+    advanceBoth(pair, 3_000);
+
+    advanceBoth(pair, 17_500, 100);
+
+    expect(onEffects.mock.calls.flatMap(([effects]) => effects)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: "piece-locked" })]),
+    );
   });
 
   it("measures garbage warning from the attack's shared match tick", () => {
@@ -778,5 +820,83 @@ describe("CompetitiveSession", () => {
         completedBy: "player-b",
       }),
     );
+  });
+
+  it("retries a dropped explicit forfeit before reporting canonical delivery", () => {
+    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const onBResult = vi.fn<(result: MatchResultV1) => void>();
+    const pair = createPair({
+      onAResultConfirmed: onAResult,
+      onBResultConfirmed: onBResult,
+    });
+    ready(pair);
+    advanceBoth(pair, 3_000);
+    pair.bus.dropNext("runtime-b", "runtime-a");
+
+    pair.b.forfeit();
+
+    expect(pair.b.forfeitDeliveryStatus()).toBe("pending");
+    expect(onAResult).not.toHaveBeenCalled();
+    expect(onBResult).not.toHaveBeenCalled();
+
+    pair.bClock.advance(RULES.network.retryMs - 1);
+    pair.b.pump();
+    expect(pair.b.forfeitDeliveryStatus()).toBe("pending");
+    expect(onAResult).not.toHaveBeenCalled();
+
+    pair.bClock.advance(1);
+    pair.b.pump();
+
+    expect(pair.b.forfeitDeliveryStatus()).toBe("acknowledged");
+    expect(onAResult).toHaveBeenCalledTimes(1);
+    expect(onBResult).not.toHaveBeenCalled();
+    expect(pair.a.view().result).toEqual(pair.b.view().result);
+    expect(pair.a.view().result).toMatchObject({
+      outcome: "seat-a",
+      reason: "forfeit",
+      completedBy: "player-b",
+    });
+    expect(pair.b.queueForfeitFallback()).toBe(false);
+  });
+
+  it("timestamps an explicit forfeit at its canonical simulation snapshot", () => {
+    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const pair = createPair({ onAResultConfirmed: onAResult });
+    ready(pair);
+    advanceBoth(pair, 3_000);
+    pair.bClock.advance(100);
+
+    pair.b.forfeit();
+
+    expect(pair.b.forfeitDeliveryStatus()).toBe("acknowledged");
+    expect(onAResult).toHaveBeenCalledTimes(1);
+    expect(onAResult).toHaveBeenCalledWith(pair.b.view().result);
+  });
+
+  it("queues one canonical self-loss fallback when explicit forfeit cannot be acknowledged", () => {
+    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const onBResult = vi.fn<(result: MatchResultV1) => void>();
+    const pair = createPair({
+      onAResultConfirmed: onAResult,
+      onBResultConfirmed: onBResult,
+    });
+    ready(pair);
+    advanceBoth(pair, 3_000);
+    pair.a.disconnect();
+
+    pair.b.forfeit();
+
+    expect(pair.b.forfeitDeliveryStatus()).toBe("pending");
+    expect(pair.b.queueForfeitFallback()).toBe(true);
+    expect(pair.b.queueForfeitFallback()).toBe(false);
+    expect(pair.b.forfeitDeliveryStatus()).toBe("fallback-queued");
+    expect(onAResult).not.toHaveBeenCalled();
+    expect(onBResult).toHaveBeenCalledTimes(1);
+    expect(onBResult).toHaveBeenCalledWith(pair.b.view().result);
+    expect(pair.b.view().result).toMatchObject({
+      outcome: "seat-a",
+      reason: "forfeit",
+      completedBy: "player-b",
+    });
   });
 });

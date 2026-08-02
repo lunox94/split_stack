@@ -16,6 +16,6 @@ describe("canonical hashing", () => {
 
   it("pins the version-one rules hash", () => {
     expect(RULES_HASH).toMatch(/^[0-9a-f]{8}$/);
-    expect(RULES_HASH).toBe("cbff00b2");
+    expect(RULES_HASH).toBe("e7d8fc73");
   });
 });

@@ -7,8 +7,8 @@ bundle contains or was produced with the following third-party work.
 
 ### Three.js 0.162.0
 
-Copyright © 2010–2024 three.js authors  
-Source: https://github.com/mrdoob/three.js  
+Copyright © 2010–2024 three.js authors
+Source: https://github.com/mrdoob/three.js
 License: MIT
 
 > Permission is hereby granted, free of charge, to any person obtaining a copy

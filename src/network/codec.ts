@@ -283,7 +283,12 @@ function isValidPayload(kind: MessageKind, payload: unknown): boolean {
         isPlayerResultStats(payload.finalStats)
       );
     case "FORFEIT":
-      return hasEventId(payload) && isBoundedId(payload.forfeitingPlayerId);
+      return (
+        hasEventId(payload) &&
+        isBoundedId(payload.forfeitingPlayerId) &&
+        isBoundedId(payload.resultHash) &&
+        isMatchResultV1(payload.result)
+      );
     case "NETWORK_PAUSE":
       return (
         hasEventId(payload) &&
@@ -324,7 +329,11 @@ function isValidEnvelope(value: unknown): value is RealtimeEnvelope {
         (value.payload.playerId !== value.senderId ||
           !isRecord(value.payload.finalStats) ||
           value.payload.finalStats.topOutTick !== value.matchTick)) ||
-      (kind === "FORFEIT" && value.payload.forfeitingPlayerId !== value.senderId) ||
+      (kind === "FORFEIT" &&
+        (value.payload.forfeitingPlayerId !== value.senderId ||
+          !isRecord(value.payload.result) ||
+          value.payload.result.matchId !== value.matchId ||
+          value.payload.result.completedBy !== value.senderId)) ||
       (kind === "BLACKOUT_START" && value.payload.ownerPlayerId !== value.senderId) ||
       (kind === "MATCH_CONFIG" && value.payload.coordinatorPlayerId !== value.senderId) ||
       (kind === "RESUME_STATE" &&

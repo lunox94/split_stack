@@ -72,4 +72,3 @@ describe("garbage", () => {
     expect(unsafe.topOut).toBe(true);
   });
 });
-

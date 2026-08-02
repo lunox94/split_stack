@@ -69,6 +69,7 @@ export type ResolutionPhase =
 export interface SimulationEffect {
   kind:
     | "piece-locked"
+    | "t-spin"
     | "line-clear"
     | "garbage-attack"
     | "hollow-cross"
@@ -397,6 +398,9 @@ class LocalSimulation implements Simulation {
     this.#player.backToBack = progress.backToBack;
     this.#player.powerCharge += progress.charge;
     this.#recordClearStats(clearKind);
+    if (clearKind.startsWith("t-spin")) {
+      effects.push({ kind: "t-spin" });
+    }
     if (progress.lineCount > 0) {
       effects.push({ kind: "line-clear", rows: progress.lineCount, value: progress.score });
     }
@@ -414,20 +418,13 @@ class LocalSimulation implements Simulation {
     this.#player.incomingGarbage = canceled.incoming;
 
     this.#lastTrace.push("emit-attacks");
-    const canceledRows = totalAttack - canceled.outgoingRows;
-    const ordinaryRows = Math.max(0, progress.attackRows - canceledRows);
-    const canceledCoreRows = Math.max(0, canceledRows - progress.attackRows);
-    const garbageCoreEvents = specials.garbageCoreEvents.slice(canceledCoreRows);
-    if (ordinaryRows > 0) {
+    if (canceled.outgoingRows > 0) {
       effects.push({
         kind: "garbage-attack",
-        rows: ordinaryRows,
+        rows: canceled.outgoingRows,
         eventId: `${lockEventId}:garbage`,
       });
     }
-    garbageCoreEvents.forEach((eventId) => {
-      effects.push({ kind: "garbage-attack", rows: 1, eventId });
-    });
     this.#player.stats.garbageSent += canceled.outgoingRows;
     specials.glitchEvents.forEach((eventId) => {
       effects.push({ kind: "glitch-piece", eventId });

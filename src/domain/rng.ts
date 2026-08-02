@@ -113,4 +113,3 @@ export class Xoshiro128StarStar {
 export function createNamedRng(seed: string, streamName: string): Xoshiro128StarStar {
   return new Xoshiro128StarStar(deriveNamedState(seed, streamName));
 }
-

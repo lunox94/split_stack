@@ -1,5 +1,6 @@
 import { RULES } from "../config/rules";
 import { canonicalize, hashCanonicalHex } from "../domain/hashing";
+import { cloneMatchResult as cloneResult } from "../domain/results";
 import {
   createSimulation,
   type Simulation,
@@ -80,6 +81,8 @@ export interface CompetitiveSessionOptions {
   onPhaseChange?: (phase: CompetitivePhase) => void;
   onForfeitWin?: (forfeitingPlayerId: PlayerId) => void;
   onRemoteBlackout?: (ownerPlayerId: PlayerId, eventId: string) => void;
+  onIncomingGarbage?: (rows: number, eventId: string) => void;
+  onSimulationEffects?: (effects: readonly SimulationEffect[]) => void;
   onPeerTopOut?: (playerId: PlayerId, tick: Tick) => void;
   onTerminal?: (terminal: CompetitiveTerminalState) => void;
   /**
@@ -110,6 +113,12 @@ export interface CompetitiveSessionView {
   result?: MatchResultV1;
 }
 
+export type ForfeitDeliveryStatus =
+  | "not-started"
+  | "pending"
+  | "acknowledged"
+  | "fallback-queued";
+
 interface FinalPlayerClaim {
   stats: PlayerResultStats;
 }
@@ -121,18 +130,6 @@ interface ResultConfirmation {
 
 function cloneStats(stats: PlayerResultStats): PlayerResultStats {
   return { ...stats };
-}
-
-function cloneResult(result: MatchResultV1): MatchResultV1 {
-  const statsByPlayer: MatchResultV1["statsByPlayer"] = {};
-  for (const [playerId, stats] of Object.entries(result.statsByPlayer)) {
-    statsByPlayer[playerId] = cloneStats(stats);
-  }
-  return {
-    ...result,
-    players: result.players.map((player) => ({ ...player })),
-    statsByPlayer,
-  };
 }
 
 function statsFromSnapshot(snapshot: SimulationSnapshot | PlayerSnapshotV1): PlayerResultStats {
@@ -235,6 +232,9 @@ export class CompetitiveSession {
   private remoteResumeTick: Tick | null = null;
   private peerReturnNoted = false;
   private forfeitRecorded = false;
+  private explicitForfeitEventId: string | null = null;
+  private explicitForfeitResult: MatchResultV1 | null = null;
+  private explicitForfeitFallbackQueued = false;
   private localTopOutTick: Tick | null = null;
   private peerTopOutTick: Tick | null = null;
   private terminal: CompetitiveTerminalState | null = null;
@@ -298,11 +298,19 @@ export class CompetitiveSession {
 
   public forfeit(): void {
     if (this.phase === "finished" || this.config === null) return;
+    const result = this.buildExplicitForfeitResult();
+    if (result === null) return;
+    const eventId = this.nextEventId("forfeit");
+    this.explicitForfeitEventId = eventId;
+    this.explicitForfeitResult = cloneResult(result);
+    this.confirmedResult = cloneResult(result);
     this.reliability.sendCritical(
       "FORFEIT",
       {
-        eventId: this.nextEventId("forfeit"),
+        eventId,
         forfeitingPlayerId: this.options.identity.senderId,
+        resultHash: hashCanonicalHex(result),
+        result: cloneResult(result),
       },
       this.currentTick(),
     );
@@ -314,6 +322,28 @@ export class CompetitiveSession {
       peerTopOutTick: this.peerTopOutTick,
     });
     this.setPhase("finished");
+  }
+
+  public forfeitDeliveryStatus(): ForfeitDeliveryStatus {
+    if (this.explicitForfeitEventId === null) return "not-started";
+    if (this.explicitForfeitFallbackQueued) return "fallback-queued";
+    return this.reliability.isEventPending(this.explicitForfeitEventId)
+      ? "pending"
+      : "acknowledged";
+  }
+
+  public queueForfeitFallback(): boolean {
+    if (
+      this.forfeitDeliveryStatus() !== "pending" ||
+      this.explicitForfeitResult === null ||
+      this.durableResultEmitted
+    ) {
+      return false;
+    }
+    this.explicitForfeitFallbackQueued = true;
+    this.durableResultEmitted = true;
+    this.options.onResultConfirmed?.(cloneResult(this.explicitForfeitResult));
+    return true;
   }
 
   public pump(): void {
@@ -380,7 +410,16 @@ export class CompetitiveSession {
 
   public setHidden(hidden: boolean): void {
     if (hidden) this.enterNetworkPause(true);
-    else if (this.phase === "network-pause") this.sendKeepalive(true);
+    else if (this.phase === "network-pause") {
+      if (this.config === null && this.simulation === null) {
+        this.pauseEpoch = 0;
+        this.pauseTick = 0;
+        this.missingSinceMs = null;
+        this.peerReturnNoted = false;
+        this.setPhase("lobby");
+      }
+      this.sendKeepalive(true);
+    }
   }
 
   public view(): CompetitiveSessionView {
@@ -842,6 +881,7 @@ export class CompetitiveSession {
       const effects = simulation.tick(1);
       this.recordSimulationCheckpoint();
       this.publishEffects(effects);
+      if (effects.length > 0) this.options.onSimulationEffects?.(effects);
       snapshot = simulation.readSnapshot();
       this.publishSnapshotIfDue(snapshot);
     }
@@ -952,6 +992,10 @@ export class CompetitiveSession {
       case "GARBAGE_ATTACK": {
         const message = envelope as RealtimeEnvelope<"GARBAGE_ATTACK">;
         if (message.payload.targetPlayerId === this.options.identity.senderId) {
+          this.options.onIncomingGarbage?.(
+            message.payload.rows,
+            message.payload.eventId,
+          );
           this.simulation?.receiveGarbage(
             message.payload.rows,
             message.payload.eventId,
@@ -1027,8 +1071,11 @@ export class CompetitiveSession {
       }
       case "FORFEIT": {
         const message = envelope as RealtimeEnvelope<"FORFEIT">;
-        if (message.payload.forfeitingPlayerId === this.options.peer.senderId) {
-          this.recordForfeitWin();
+        if (
+          message.payload.forfeitingPlayerId === this.options.peer.senderId &&
+          this.isValidExplicitForfeit(message)
+        ) {
+          this.recordForfeitWin(message.payload.result);
         }
         return;
       }
@@ -1525,7 +1572,65 @@ export class CompetitiveSession {
     this.options.onResultConfirmed?.(cloneResult(result));
   }
 
-  private recordForfeitWin(): void {
+  private buildExplicitForfeitResult(): MatchResultV1 | null {
+    if (this.config === null) return null;
+    const localSnapshot = this.simulation?.readSnapshot();
+    if (localSnapshot === undefined) return null;
+    const remoteSnapshot = this.remoteSnapshots.latest(this.options.peer.senderId);
+    const localClaim = this.captureLocalFinalClaim();
+    if (localClaim === null) return null;
+    const peerClaim: FinalPlayerClaim = remoteSnapshot === undefined
+      ? { stats: emptyResultStats() }
+      : { stats: statsFromSnapshot(remoteSnapshot) };
+    const seatA = this.seatA();
+    const seatB = this.seatB();
+    const seatAClaim = this.options.seat === "a" ? localClaim : peerClaim;
+    const seatBClaim = this.options.seat === "b" ? localClaim : peerClaim;
+    const durationTicks = localSnapshot.tick;
+    return {
+      schema: "split-stack/result/v1",
+      matchId: this.options.matchId,
+      seedHash: hashCanonicalHex({ seed: this.config.seed }),
+      players: [
+        { id: seatA.senderId, displayName: seatA.displayName },
+        { id: seatB.senderId, displayName: seatB.displayName },
+      ],
+      outcome: this.options.seat === "a" ? "seat-b" : "seat-a",
+      reason: "forfeit",
+      durationTicks,
+      finalLevel: Math.floor(durationTicks / RULES.timing.levelTicks) + 1,
+      statsByPlayer: {
+        [seatA.senderId]: cloneStats(seatAClaim.stats),
+        [seatB.senderId]: cloneStats(seatBClaim.stats),
+      },
+      completedBy: this.options.identity.senderId,
+    };
+  }
+
+  private isValidExplicitForfeit(envelope: RealtimeEnvelope<"FORFEIT">): boolean {
+    if (this.config === null) return false;
+    const result = envelope.payload.result;
+    const seatA = this.seatA();
+    const seatB = this.seatB();
+    const expectedOutcome = this.options.seat === "a" ? "seat-a" : "seat-b";
+    return (
+      envelope.payload.resultHash === hashCanonicalHex(result) &&
+      result.matchId === this.options.matchId &&
+      result.seedHash === hashCanonicalHex({ seed: this.config.seed }) &&
+      result.players[0]?.id === seatA.senderId &&
+      result.players[0]?.displayName === seatA.displayName &&
+      result.players[1]?.id === seatB.senderId &&
+      result.players[1]?.displayName === seatB.displayName &&
+      result.outcome === expectedOutcome &&
+      result.reason === "forfeit" &&
+      result.durationTicks === envelope.matchTick &&
+      result.finalLevel ===
+        Math.floor(result.durationTicks / RULES.timing.levelTicks) + 1 &&
+      result.completedBy === envelope.senderId
+    );
+  }
+
+  private recordForfeitWin(canonicalResult?: MatchResultV1): void {
     if (this.forfeitRecorded || this.terminal !== null) return;
     this.forfeitRecorded = true;
     this.simulation?.setPaused(true);
@@ -1537,7 +1642,13 @@ export class CompetitiveSession {
     });
     this.setPhase("finished");
     this.options.onForfeitWin?.(this.options.peer.senderId);
-    this.emitForfeitResult();
+    if (canonicalResult === undefined) {
+      this.emitForfeitResult();
+    } else if (!this.durableResultEmitted) {
+      this.confirmedResult = cloneResult(canonicalResult);
+      this.durableResultEmitted = true;
+      this.options.onResultConfirmed?.(cloneResult(canonicalResult));
+    }
   }
 
   private finishForTopOut(): void {
