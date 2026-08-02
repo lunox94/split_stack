@@ -1,0 +1,11 @@
+node_modules/
+dist/
+dist-xdc/
+*.xdc
+coverage/
+playwright-report/
+test-results/
+*.tsbuildinfo
+*.log
+.vite/
+.DS_Store

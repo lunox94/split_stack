@@ -1,0 +1,4 @@
+name = "Split Stack"
+# Replace this placeholder with the canonical public source repository before
+# distributing a release build.
+source_code_url = "REPLACE_WITH_FINAL_SOURCE_REPOSITORY"

@@ -1,0 +1,32 @@
+{
+  "name": "split-stack",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite --port 3000",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:browser": "playwright test",
+    "verify:xdc": "node scripts/verify-xdc.mjs && vitest run tests/packaging/xdc.test.ts",
+    "check": "npm run typecheck && npm run test && npm run build && npm run verify:xdc"
+  },
+  "dependencies": {
+    "three": "0.162.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.2",
+    "@types/node": "24.3.0",
+    "@types/three": "0.162.0",
+    "@vitest/coverage-v8": "4.1.10",
+    "@webxdc/vite-plugins": "1.6.0",
+    "jsdom": "26.1.0",
+    "typescript": "5.9.2",
+    "vite": "8.2.0",
+    "vitest": "4.1.10"
+  }
+}
