@@ -1,4 +1,2 @@
 name = "Split Stack"
-# Replace this placeholder with the canonical public source repository before
-# distributing a release build.
-source_code_url = "REPLACE_WITH_FINAL_SOURCE_REPOSITORY"
+source_code_url = "https://github.com/lunox94/split_stack"

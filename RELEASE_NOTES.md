@@ -5,8 +5,9 @@ Build date: 2026-08-02
 ## Artifact
 
 - File: `dist-xdc/split-stack.xdc`
-- Archive size: **270,828 bytes (264.5 KiB)**
-- Uncompressed payload: **758,397 bytes (740.6 KiB)**
+- Archive size: **270,747 bytes (264.4 KiB)**
+- SHA-256: `fe5de4092601ec979f72db4dc1fab01d70ec50015deb6e3d8109a8f5b8ebf66e`
+- Uncompressed payload: **758,289 bytes (740.5 KiB)**
 - Payload files: **7**
 - Icon: **256×256 PNG**
 
@@ -28,8 +29,7 @@ source maps, packaged `webxdc.js`, and static external network targets.
 
 ## Distribution note
 
-Replace `REPLACE_WITH_FINAL_SOURCE_REPOSITORY` in `public/manifest.toml` with
-the canonical public source URL before distributing this artifact as a public
-release, then rebuild and rerun the verifier. Current Delta Chat desktop,
-Android, and iOS smoke tests remain part of the release-operator checklist when
-those devices are available.
+The Webxdc manifest links to the canonical public source repository at
+`https://github.com/lunox94/split_stack`. Current Delta Chat desktop, Android,
+and iOS smoke tests remain part of the release-operator checklist when those
+devices are available.

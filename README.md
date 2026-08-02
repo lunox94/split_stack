@@ -66,8 +66,8 @@ records resolutions for platform constraints and specification ambiguities.
 
 ## Build a Webxdc release
 
-Before public distribution, replace `REPLACE_WITH_FINAL_SOURCE_REPOSITORY` in
-`public/manifest.toml` with the canonical source repository URL. Then run:
+The Webxdc manifest links to the canonical public source repository at
+`https://github.com/lunox94/split_stack`. Build and verify a release with:
 
 ```sh
 npm run build
