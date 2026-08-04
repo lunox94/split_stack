@@ -2,6 +2,7 @@ import { expect, test, type BrowserContext, type Locator, type Page } from "@pla
 import { RULES_HASH } from "../../src/config/rules-hash";
 import { RULES } from "../../src/config/rules";
 import { hashCanonicalHex } from "../../src/domain/hashing";
+import { NETWORK_DIAGNOSTICS_STORAGE_KEY } from "../../src/network/diagnostics";
 
 const APP_ORIGIN = "http://127.0.0.1:3000";
 
@@ -159,6 +160,115 @@ async function openVersusPair(
   return { seatA: seatAPage, seatB: seatBPage };
 }
 
+async function enforceSingleRealtimeListener(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    const lifecycle = {
+      joins: 0,
+      leaves: 0,
+      listeners: 0,
+      active: 0,
+      maxActive: 0,
+    };
+    (window as unknown as { __splitStackRealtimeLifecycle: typeof lifecycle })
+      .__splitStackRealtimeLifecycle = lifecycle;
+    let failNextJoin = false;
+    (
+      window as unknown as {
+        __splitStackFailNextRealtimeJoin: () => void;
+      }
+    ).__splitStackFailNextRealtimeJoin = () => {
+      failNextJoin = true;
+    };
+    let installedHost: WebxdcHost | undefined;
+    Object.defineProperty(window, "webxdc", {
+      configurable: true,
+      get: () => installedHost,
+      set: (host: WebxdcHost) => {
+        host.sendUpdateInterval = 0;
+        const join = host.joinRealtimeChannel?.bind(host);
+        let backingChannel: WebxdcRealtimeChannel | undefined;
+        if (join !== undefined) {
+          host.joinRealtimeChannel = () => {
+            lifecycle.joins += 1;
+            if (lifecycle.active > 0) {
+              throw new Error("realtime listener already exists");
+            }
+            if (failNextJoin) {
+              failNextJoin = false;
+              throw new Error("realtime channel temporarily unavailable");
+            }
+            const channel = (backingChannel ??= join());
+            lifecycle.active += 1;
+            lifecycle.maxActive = Math.max(lifecycle.maxActive, lifecycle.active);
+            let facadeActive = true;
+            return {
+              setListener: (listener) => {
+                if (!facadeActive) throw new Error("realtime listener has left");
+                lifecycle.listeners += 1;
+                channel.setListener((data) => {
+                  if (facadeActive) listener(data);
+                });
+              },
+              send: (data) => {
+                if (!facadeActive) throw new Error("realtime listener has left");
+                channel.send(data);
+              },
+              leave: () => {
+                if (!facadeActive) return;
+                facadeActive = false;
+                lifecycle.leaves += 1;
+                lifecycle.active -= 1;
+              },
+            };
+          };
+        }
+        installedHost = host;
+      },
+    });
+  });
+}
+
+async function installMonotonicOffset(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    const realNow = performance.now.bind(performance);
+    let offsetMs = 0;
+    Object.defineProperty(performance, "now", {
+      configurable: true,
+      value: () => realNow() + offsetMs,
+    });
+    (
+      window as unknown as {
+        __splitStackAdvanceMonotonic: (milliseconds: number) => void;
+      }
+    ).__splitStackAdvanceMonotonic = (milliseconds) => {
+      offsetMs += milliseconds;
+    };
+  });
+}
+
+async function advanceMonotonic(page: Page, milliseconds: number): Promise<void> {
+  await page.evaluate((amount) => {
+    (
+      window as unknown as {
+        __splitStackAdvanceMonotonic: (milliseconds: number) => void;
+      }
+    ).__splitStackAdvanceMonotonic(amount);
+  }, milliseconds);
+}
+
+async function setVisibilityState(
+  page: Page,
+  visibilityState: "hidden" | "visible",
+): Promise<void> {
+  await page.evaluate((state) => {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: state,
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }, visibilityState);
+}
+
 test("lobby keeps help opt-in and exposes the complete settings surface", async ({ page }) => {
   await openApp(page);
 
@@ -244,6 +354,119 @@ test("gesture controls accept a hard-drop flick over the opponent board", async 
 
   await expectScoreAbove(localScore(seatA), baseline);
   await seatB.close();
+});
+
+test("replaces a silent competitive channel without registering a second listener", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(45_000);
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await installMonotonicOffset(context);
+  await enforceSingleRealtimeListener(context);
+
+  const { seatA, seatB } = await openVersusPair(context, page);
+  await seatA.getByRole("button", { name: "Ready", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready", exact: true }).click();
+  await expect(seatA.getByText(/match starts in/i)).toBeVisible({ timeout: 10_000 });
+  await expect(seatB.getByText(/match starts in/i)).toBeVisible({ timeout: 10_000 });
+  await Promise.all([advanceMonotonic(seatA, 4_000), advanceMonotonic(seatB, 4_000)]);
+  await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
+
+  await seatB.close();
+  await advanceMonotonic(seatA, RULES.network.missingPeerMs + 1);
+  await expect(seatA.getByText(/connection unstable/i)).toBeVisible({ timeout: 5_000 });
+  await advanceMonotonic(
+    seatA,
+    RULES.network.reconnectingMs - RULES.network.missingPeerMs,
+  );
+  await expect(seatA.getByText(/reconnecting/i)).toBeVisible({ timeout: 5_000 });
+
+  await expect
+    .poll(
+      () =>
+        seatA.evaluate(
+          () =>
+            (
+              window as unknown as {
+                __splitStackRealtimeLifecycle: { joins: number };
+              }
+            ).__splitStackRealtimeLifecycle.joins,
+        ),
+      { timeout: 5_000 },
+    )
+    .toBe(2);
+  expect(
+    await seatA.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __splitStackRealtimeLifecycle: {
+              joins: number;
+              leaves: number;
+              listeners: number;
+              active: number;
+              maxActive: number;
+            };
+          }
+        ).__splitStackRealtimeLifecycle,
+    ),
+  ).toEqual({ joins: 2, leaves: 1, listeners: 2, active: 1, maxActive: 1 });
+
+  await seatA.evaluate(() => {
+    (
+      window as unknown as {
+        __splitStackFailNextRealtimeJoin: () => void;
+      }
+    ).__splitStackFailNextRealtimeJoin();
+  });
+  await setVisibilityState(seatA, "hidden");
+  await setVisibilityState(seatA, "visible");
+  await advanceMonotonic(seatA, RULES.network.reconnectingMs);
+
+  await expect
+    .poll(
+      () =>
+        seatA.evaluate(
+          () =>
+            (
+              window as unknown as {
+                __splitStackRealtimeLifecycle: { joins: number };
+              }
+            ).__splitStackRealtimeLifecycle.joins,
+        ),
+      { timeout: 5_000 },
+    )
+    .toBe(4);
+  expect(pageErrors).toEqual([]);
+  expect(
+    await seatA.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __splitStackRealtimeLifecycle: {
+              joins: number;
+              leaves: number;
+              listeners: number;
+              active: number;
+              maxActive: number;
+            };
+          }
+        ).__splitStackRealtimeLifecycle,
+    ),
+  ).toEqual({ joins: 4, leaves: 2, listeners: 3, active: 1, maxActive: 1 });
+  expect(
+    await seatA.evaluate((storageKey) => {
+      const serialized = window.localStorage.getItem(storageKey);
+      if (serialized === null) return [];
+      const snapshot = JSON.parse(serialized) as {
+        incidents: Array<{ events: Array<{ kind: string }> }>;
+      };
+      const latest = snapshot.incidents[snapshot.incidents.length - 1];
+      return latest?.events.map((event) => event.kind) ?? [];
+    }, NETWORK_DIAGNOSTICS_STORAGE_KEY),
+  ).toContain("channel-replacement-failed");
 });
 
 test("versus boards stay visible, side by side, and equal at 360 by 640", async ({
@@ -352,11 +575,80 @@ test("leaving an active match records a forfeit before releasing the seat", asyn
   await seatB.close();
 });
 
+test("leaving during a failed realtime join closes the challenge and cancels its retry", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(35_000);
+  await enforceSingleRealtimeListener(context);
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+
+  await openApp(page, "Alice");
+  await page.getByRole("button", { name: "Create challenge" }).click();
+  await expect(page.getByRole("status")).toContainText(/waiting for an opponent/i);
+
+  const seatB = await context.newPage();
+  await openApp(seatB, "Bob");
+  const joinButton = seatB.getByRole("button", { name: "Join challenge" });
+  await expect(joinButton).toBeEnabled();
+  await page.evaluate(() => {
+    (
+      window as unknown as {
+        __splitStackFailNextRealtimeJoin: () => void;
+      }
+    ).__splitStackFailNextRealtimeJoin();
+  });
+  await joinButton.click();
+
+  await expect(
+    page.getByText("Live play is unavailable here. You can still use Practice."),
+  ).toBeVisible({ timeout: 15_000 });
+  await page.getByRole("button", { name: "Leave match" }).click();
+  await expect(page.getByRole("heading", { name: "Split Stack" })).toBeVisible();
+  await expect(seatB.getByRole("heading", { name: "Split Stack" })).toBeVisible({
+    timeout: 15_000,
+  });
+
+  const joinsAfterLeave = await page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __splitStackRealtimeLifecycle: { joins: number };
+        }
+      ).__splitStackRealtimeLifecycle.joins,
+  );
+  await page.waitForTimeout(RULES.network.reconnectingMs + 500);
+  expect(
+    await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __splitStackRealtimeLifecycle: { joins: number };
+          }
+        ).__splitStackRealtimeLifecycle.joins,
+    ),
+  ).toBe(joinsAfterLeave);
+  expect(pageErrors).toEqual([]);
+
+  await seatB.close();
+});
+
 test("a durably confirmed newer runtime replaces a duplicate and a seat release returns the peer to lobby", async ({
   context,
   page,
 }) => {
+  await enforceSingleRealtimeListener(context);
   const { seatA, seatB: olderSeatB } = await openVersusPair(context, page);
+  const olderSeatBErrors: string[] = [];
+  olderSeatB.on("pageerror", (error) => olderSeatBErrors.push(error.message));
+  await olderSeatB.evaluate(() => {
+    (
+      window as unknown as {
+        __splitStackFailNextRealtimeJoin: () => void;
+      }
+    ).__splitStackFailNextRealtimeJoin();
+  });
   const newerSeatB = await context.newPage();
   await newerSeatB.goto("/#name=Bob&addr=bob%40example.test");
   await expect(newerSeatB.getByRole("main", { name: "Split Stack" })).toBeVisible();
@@ -367,12 +659,27 @@ test("a durably confirmed newer runtime replaces a duplicate and a seat release 
   await expect(olderSeatB.getByText(/newer open Split Stack session/i)).toBeVisible({
     timeout: 15_000,
   });
+  await expect
+    .poll(
+      () =>
+        olderSeatB.evaluate(
+          () =>
+            (
+              window as unknown as {
+                __splitStackRealtimeLifecycle: { joins: number };
+              }
+            ).__splitStackRealtimeLifecycle.joins,
+        ),
+      { timeout: 10_000 },
+    )
+    .toBe(3);
 
   await newerSeatB.getByRole("button", { name: "Leave match" }).click();
   await expect(seatA.getByRole("heading", { name: "Split Stack" })).toBeVisible({
     timeout: 15_000,
   });
   await expect(seatA.getByRole("status")).toContainText(/waiting for an opponent/i);
+  expect(olderSeatBErrors).toEqual([]);
 
   await olderSeatB.close();
   await newerSeatB.close();

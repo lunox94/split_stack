@@ -109,8 +109,12 @@ export interface CompetitiveSessionOptions {
    */
   onResultConfirmed?: (result: MatchResultV1) => void;
   onDesynchronization?: (reason: string) => void;
-  /** Requests that the host replace the realtime channel after sustained silence. */
-  onTransportRecoveryNeeded?: () => void;
+  /**
+   * Requests that the host replace the realtime channel after sustained silence.
+   * Return false when the host could not install a replacement so the failure
+   * can be recorded without escaping the pump.
+   */
+  onTransportRecoveryNeeded?: () => boolean | void;
   diagnostics?: NetworkDiagnostics;
 }
 
@@ -482,12 +486,29 @@ export class CompetitiveSession {
   public attachTransport(transport: CompetitiveRealtimeTransport): void {
     if (this.channelConnected) throw new Error("Realtime transport is already connected");
     this.transport = transport;
+    try {
+      this.installListener();
+    } catch (error) {
+      try {
+        transport.leave();
+      } catch {
+        // Preserve the listener-install failure that rejected this transport.
+      }
+      throw error;
+    }
     this.channelConnected = true;
     this.reliability.setConnected(true);
     this.recordDiagnostic({ kind: "channel-attached" });
-    this.installListener();
     this.sendHello();
     this.sendKeepalive(true);
+  }
+
+  public noteTransportRecoveryFailure(attempt?: number): void {
+    this.recordDiagnostic({
+      kind: "channel-replacement-failed",
+      silenceMs: Math.floor(this.liveness.silentForMs()),
+      ...(attempt === undefined ? {} : { attempt }),
+    });
   }
 
   public setHidden(hidden: boolean): void {
@@ -1630,7 +1651,13 @@ export class CompetitiveSession {
       silenceMs: Math.floor(this.liveness.silentForMs()),
       attempt: this.recoveryAttempt,
     });
-    this.options.onTransportRecoveryNeeded?.();
+    let failed = false;
+    try {
+      failed = this.options.onTransportRecoveryNeeded?.() === false;
+    } catch {
+      failed = true;
+    }
+    if (failed) this.noteTransportRecoveryFailure(this.recoveryAttempt);
   }
 
   private restartResumeHandshake(): void {

@@ -78,8 +78,11 @@ rules version 2 and must change together with the peer rules hash.
 - Each occupied seat also publishes a bounded durable runtime-session claim.
   The newest convergent claim must echo through the durable listener before it
   controls the seat; an older duplicate remains a read-only spectator. A
-  visibility or WebGL recovery acquires a replacement realtime channel before
-  retiring the previous one.
+  visibility, WebGL, liveness, role, or runtime-session transition retires the
+  current realtime channel before joining its replacement because Webxdc
+  rejects overlapping joins.
+  Failed replacement callbacks are contained and recorded, and the normal
+  recovery cadence retries them while the session remains detached.
 - Critical ACKs name `(senderId, sessionId)` explicitly; bare sequence numbers
   are never treated as globally unique.
 - Realtime `MATCH_CONFIG` is the live acknowledged authority. A compact durable
