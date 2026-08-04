@@ -15,6 +15,194 @@ async function openApp(page: Page, identity = "Browser Tester"): Promise<void> {
   await page.waitForLoadState("networkidle");
 }
 
+interface MarkedCellRenderMetrics {
+  readonly darkBadgeCoverage: number;
+  readonly accentGlyphCoverage: number;
+  readonly haloLuminance: {
+    readonly near: number;
+    readonly middle: number;
+    readonly far: number;
+    readonly background: number;
+  };
+}
+
+async function readMarkedCellRenderMetrics(
+  page: Page,
+): Promise<MarkedCellRenderMetrics> {
+  return page.evaluate(async () => {
+    const rendererUrl = "/src/render/renderer.ts";
+    const { ThreeRenderer } = await import(rendererUrl);
+    const canvas = document.createElement("canvas");
+    canvas.style.cssText =
+      "position:fixed;inset:0;width:400px;height:800px;z-index:9999";
+    document.body.append(canvas);
+
+    const renderer = new ThreeRenderer(canvas, { initialQuality: "full" });
+    renderer.render({
+      mode: "practice",
+      left: {
+        playerId: "visual-test",
+        cells: [{
+          column: 4,
+          row: 12,
+          kind: "J",
+          role: "settled",
+          special: "blackout",
+        }],
+        focused: true,
+        concealed: false,
+      },
+      right: null,
+    }, 275);
+
+    const gl = canvas.getContext("webgl2");
+    if (gl === null) throw new Error("WebGL2 unavailable in browser test");
+    gl.finish();
+    const width = gl.drawingBufferWidth;
+    const height = gl.drawingBufferHeight;
+    const pixels = new Uint8Array(width * height * 4);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+
+    const viewport = renderer.layout.left;
+    const centerCssX = viewport.boardX + (4 + 0.5) * viewport.cellSize;
+    const centerCssY = viewport.boardY + (12 - 2 + 0.5) * viewport.cellSize;
+    const scaleX = width / canvas.clientWidth;
+    const scaleY = height / canvas.clientHeight;
+    const centerX = centerCssX * scaleX;
+    const centerY = height - centerCssY * scaleY;
+    const pixelLuminance = (x: number, y: number): number => {
+      const offset = (y * width + x) * 4;
+      return pixels[offset]! * 0.2126 +
+        pixels[offset + 1]! * 0.7152 +
+        pixels[offset + 2]! * 0.0722;
+    };
+    const halfSpan = viewport.cellSize * 0.41 * Math.min(scaleX, scaleY);
+    let darkPixels = 0;
+    let sampledPixels = 0;
+
+    for (let y = Math.floor(centerY - halfSpan); y <= Math.ceil(centerY + halfSpan); y += 1) {
+      for (let x = Math.floor(centerX - halfSpan); x <= Math.ceil(centerX + halfSpan); x += 1) {
+        if (pixelLuminance(x, y) < 64) darkPixels += 1;
+        sampledPixels += 1;
+      }
+    }
+
+    const glyphRadius = viewport.cellSize * 0.3 * Math.min(scaleX, scaleY);
+    let accentPixels = 0;
+    let glyphPixels = 0;
+    for (let y = Math.floor(centerY - glyphRadius); y <= Math.ceil(centerY + glyphRadius); y += 1) {
+      for (let x = Math.floor(centerX - glyphRadius); x <= Math.ceil(centerX + glyphRadius); x += 1) {
+        if ((x - centerX) ** 2 + (y - centerY) ** 2 > glyphRadius ** 2) continue;
+        const offset = (y * width + x) * 4;
+        const accentDistance = Math.hypot(
+          pixels[offset]! - 155,
+          pixels[offset + 1]! - 123,
+          pixels[offset + 2]! - 255,
+        );
+        if (accentDistance < 72) accentPixels += 1;
+        glyphPixels += 1;
+      }
+    }
+
+    const sampleLuminance = (cellOffset: number): number => {
+      const sampleX = Math.round(
+        centerX + viewport.cellSize * cellOffset * scaleX,
+      );
+      const sampleY = Math.round(centerY);
+      const radius = Math.max(1, Math.round(Math.min(scaleX, scaleY)));
+      let total = 0;
+      let count = 0;
+      for (let y = sampleY - radius; y <= sampleY + radius; y += 1) {
+        for (let x = sampleX - radius; x <= sampleX + radius; x += 1) {
+          total += pixelLuminance(x, y);
+          count += 1;
+        }
+      }
+      return total / count;
+    };
+
+    const metrics = {
+      darkBadgeCoverage: darkPixels / sampledPixels,
+      accentGlyphCoverage: accentPixels / glyphPixels,
+      haloLuminance: {
+        near: sampleLuminance(0.55),
+        middle: sampleLuminance(0.68),
+        far: sampleLuminance(0.8),
+        background: sampleLuminance(1),
+      },
+    };
+    renderer.dispose();
+    canvas.remove();
+    return metrics;
+  });
+}
+
+async function readMarkedCellOrderDifference(page: Page): Promise<number> {
+  return page.evaluate(async () => {
+    const rendererUrl = "/src/render/renderer.ts";
+    const { ThreeRenderer } = await import(rendererUrl);
+    const canvas = document.createElement("canvas");
+    canvas.style.cssText =
+      "position:fixed;inset:0;width:400px;height:800px;z-index:9999";
+    document.body.append(canvas);
+    const renderer = new ThreeRenderer(canvas, { initialQuality: "full" });
+    const bright = {
+      column: 3,
+      row: 12,
+      kind: "J",
+      role: "settled",
+      special: "blackout",
+      specialEmphasis: 1,
+    } as const;
+    const dim = {
+      column: 6,
+      row: 12,
+      kind: "J",
+      role: "settled",
+      special: "blackout",
+      specialEmphasis: 0.2,
+    } as const;
+    const frame = (cells: readonly [typeof bright, typeof dim] | readonly [typeof dim, typeof bright]) => ({
+      mode: "practice" as const,
+      left: {
+        playerId: "visual-order-test",
+        cells,
+        focused: true,
+        concealed: false,
+      },
+      right: null,
+    });
+    const gl = canvas.getContext("webgl2");
+
+    renderer.render(frame([bright, dim]), 825);
+    if (gl === null) throw new Error("WebGL2 unavailable in browser test");
+    gl.finish();
+    const width = gl.drawingBufferWidth;
+    const height = gl.drawingBufferHeight;
+    const first = new Uint8Array(width * height * 4);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, first);
+
+    renderer.render(frame([dim, bright]), 1_925);
+    gl.finish();
+    const second = new Uint8Array(width * height * 4);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, second);
+
+    let changedPixels = 0;
+    for (let offset = 0; offset < first.length; offset += 4) {
+      if (
+        Math.abs(first[offset]! - second[offset]!) > 1 ||
+        Math.abs(first[offset + 1]! - second[offset + 1]!) > 1 ||
+        Math.abs(first[offset + 2]! - second[offset + 2]!) > 1
+      ) {
+        changedPixels += 1;
+      }
+    }
+    renderer.dispose();
+    canvas.remove();
+    return changedPixels / (width * height);
+  });
+}
+
 async function seedCompletedMatch(page: Page): Promise<void> {
   const challengeId = "reload-challenge";
   const matchId = `${challengeId}:round:1`;
@@ -316,6 +504,34 @@ test("lobby keeps help opt-in and exposes the complete settings surface", async 
   await expect(page.getByLabel("Gameplay tips")).not.toBeChecked();
   await page.getByRole("button", { name: "Clear diagnostics" }).click();
   await expect(page.getByText("Diagnostics cleared.")).toBeVisible();
+});
+
+test("gameplay marked cells match the guide badge and soft halo", async ({ page }) => {
+  await openApp(page);
+  const {
+    accentGlyphCoverage,
+    darkBadgeCoverage,
+    haloLuminance,
+  } = await readMarkedCellRenderMetrics(page);
+  const minimumFalloffStep = Math.min(
+    haloLuminance.near - haloLuminance.middle,
+    haloLuminance.middle - haloLuminance.far,
+    haloLuminance.far - haloLuminance.background,
+  );
+
+  // The guide reference has roughly 43% dark-center coverage. Keep the
+  // gameplay badge above 65% of that reference under real WebGL lighting.
+  expect(darkBadgeCoverage).toBeGreaterThanOrEqual(0.28);
+  // Sample only the inner 60% of the badge so the circular accent rim cannot
+  // satisfy this assertion when the canonical glyph is missing.
+  expect(accentGlyphCoverage).toBeGreaterThanOrEqual(0.03);
+  expect(minimumFalloffStep).toBeGreaterThan(1);
+});
+
+test("simultaneous marked-cell pulses are independent of render order", async ({ page }) => {
+  await openApp(page);
+
+  expect(await readMarkedCellOrderDifference(page)).toBeLessThan(0.0001);
 });
 
 test("Practice accepts keyboard and compact touch-button actions", async ({ page }) => {

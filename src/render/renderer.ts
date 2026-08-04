@@ -34,6 +34,7 @@ import {
   type PresentationFrame,
 } from "./presentation-timeline";
 import {
+  SPECIAL_ACCENT_COLORS,
   SPECIAL_ACCENT_HEX,
   SPECIAL_ICON_PATHS,
 } from "./special-icons";
@@ -323,6 +324,13 @@ interface EffectRectOptions {
   readonly additive?: boolean;
   readonly z?: number;
   readonly countsTowardPresentationLimit?: boolean;
+  readonly instanceIntensity?: number;
+}
+
+interface EffectTextureOptions {
+  readonly additive?: boolean;
+  readonly z?: number;
+  readonly instanceIntensity?: number;
 }
 
 function createAcidDropGeometry(): ShapeGeometry {
@@ -348,6 +356,10 @@ function createUnitPanelGeometry(): BufferGeometry {
       [-0.5, -0.5, 0, 0.5, -0.5, 0, 0.5, 0.5, 0, -0.5, 0.5, 0],
       3,
     ),
+  );
+  geometry.setAttribute(
+    "uv",
+    new Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2),
   );
   geometry.setIndex([0, 1, 2, 0, 2, 3]);
   return geometry;
@@ -420,6 +432,7 @@ export class ThreeRenderer {
   readonly #matrix = new Matrix4();
   readonly #position = new Vector3();
   readonly #scale = new Vector3();
+  readonly #instanceColor = new Color();
   readonly #quality: QualityController;
   readonly #markedCellPulses = new MarkedCellPulseTracker();
   readonly #panels: readonly [BoardPanel, BoardPanel];
@@ -507,18 +520,10 @@ export class ThreeRenderer {
     if (this.#palette === palette) return;
     this.#palette = palette;
     for (const [key, pool] of this.#pools) {
-      const [kind, role, special] = key.split(":") as [
-        RenderCellKind,
-        RenderCellRole,
-        string,
-      ];
+      const [kind] = key.split(":") as [RenderCellKind];
       const color = new Color(this.#colors()[kind]);
       pool.material.color.copy(color);
-      pool.material.emissive.setHex(
-        special === "ordinary"
-          ? 0x000000
-          : SPECIAL_ACCENT_HEX[special as SpecialKind],
-      );
+      pool.material.emissive.setHex(0x000000);
       pool.material.needsUpdate = true;
     }
   }
@@ -536,22 +541,7 @@ export class ThreeRenderer {
     this.#frameTimestampMs = timestampMs;
     const decoratedFrame = this.#markedCellPulses.decorateFrame(frame, timestampMs);
     this.#resize(decoratedFrame.mode);
-    for (const [key, pool] of this.#pools) {
-      pool.mesh.count = 0;
-      if (!key.endsWith(":ordinary")) {
-        const [, role, special] = key.split(":") as [
-          RenderCellKind,
-          RenderCellRole,
-          SpecialKind,
-        ];
-        pool.material.emissiveIntensity = markedCellPresentationAt(
-          special,
-          role,
-          this.#markedCellQuality(),
-          timestampMs,
-        ).emissiveIntensity;
-      }
-    }
+    for (const pool of this.#pools.values()) pool.mesh.count = 0;
     for (const pool of this.#effectPools.values()) pool.mesh.count = 0;
     this.#effectInstanceCount = 0;
     this.#scene.position.set(0, 0, 0);
@@ -573,6 +563,9 @@ export class ThreeRenderer {
     }
     for (const pool of this.#effectPools.values()) {
       pool.mesh.instanceMatrix.needsUpdate = true;
+      if (pool.mesh.instanceColor !== null) {
+        pool.mesh.instanceColor.needsUpdate = true;
+      }
     }
     this.#renderer.render(this.#scene, this.#camera);
   }
@@ -705,17 +698,20 @@ export class ThreeRenderer {
         this.#frameTimestampMs,
         cell.specialEmphasis,
       );
-      const emphasisKey = (cell.specialEmphasis ?? 0) > 0 ? "emphasis" : "base";
       const haloZ = cell.role === "active" ? 0.45 : -0.2;
-      this.#drawEffectRect(
-        `special-halo-${cell.role}-${cell.special}-${emphasisKey}`,
-        presentation.accent,
+      this.#drawEffectTexture(
+        `special-halo-${cell.role}-${cell.special}`,
+        this.#specialHaloTexture(cell.special),
         x,
         y,
-        viewport.cellSize * presentation.haloScale,
-        viewport.cellSize * presentation.haloScale,
-        presentation.haloOpacity,
-        { z: haloZ, countsTowardPresentationLimit: false },
+        viewport.cellSize * presentation.haloScale * 1.6,
+        viewport.cellSize * presentation.haloScale * 1.6,
+        1,
+        {
+          z: haloZ,
+          additive: true,
+          instanceIntensity: presentation.haloOpacity,
+        },
       );
       const span = viewport.cellSize * presentation.rimScale;
       const edge = viewport.cellSize * (cell.role === "ghost" ? 0.035 : 0.07);
@@ -726,16 +722,32 @@ export class ThreeRenderer {
         [x + span / 2, y, edge, span],
       ] as const) {
         this.#drawEffectRect(
-          `special-rim-${cell.role}-${cell.special}-${emphasisKey}`,
+          `special-rim-${cell.role}-${cell.special}`,
           presentation.accent,
           rimX,
           rimY,
           width,
           height,
-          presentation.rimOpacity,
+          1,
           {
             z: cell.role === "active" ? 1.2 : 0.65,
             countsTowardPresentationLimit: false,
+            instanceIntensity: presentation.rimOpacity,
+          },
+        );
+      }
+      if (cell.role !== "ghost") {
+        this.#drawEffectTexture(
+          `special-badge-${cell.special}`,
+          this.#specialBadgeTexture(cell.special),
+          x,
+          y,
+          viewport.cellSize,
+          viewport.cellSize,
+          1,
+          {
+            z: viewport.cellSize * 0.1 +
+              (cell.role === "active" ? 0.7 : 0),
           },
         );
       }
@@ -1193,13 +1205,61 @@ export class ThreeRenderer {
       instanceLimit,
     );
     if (pool.mesh.count >= instanceLimit) return;
-    pool.material.opacity = Math.max(0, Math.min(1, opacity));
+    const intensity = options.instanceIntensity;
+    pool.material.opacity = intensity === undefined
+      ? Math.max(0, Math.min(1, opacity))
+      : 1;
     this.#position.set(x, y, options.z ?? 3);
     this.#scale.set(Math.max(0.01, width), Math.max(0.01, height), 1);
     this.#matrix.compose(this.#position, this.#camera.quaternion, this.#scale);
     pool.mesh.setMatrixAt(pool.mesh.count, this.#matrix);
+    if (intensity !== undefined) {
+      const value = Math.max(0, Math.min(1, intensity));
+      this.#instanceColor.setRGB(value, value, value);
+      pool.mesh.setColorAt(pool.mesh.count, this.#instanceColor);
+    } else if (pool.mesh.instanceColor !== null) {
+      this.#instanceColor.setRGB(1, 1, 1);
+      pool.mesh.setColorAt(pool.mesh.count, this.#instanceColor);
+    }
     pool.mesh.count += 1;
     if (countsTowardPresentationLimit) this.#effectInstanceCount += 1;
+  }
+
+  #drawEffectTexture(
+    key: string,
+    texture: Texture,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    opacity: number,
+    options: EffectTextureOptions = {},
+  ): void {
+    const pool = this.#effectPoolFor(
+      key,
+      0xffffff,
+      options.additive ?? false,
+      MAX_INSTANCES_PER_POOL,
+      texture,
+    );
+    if (pool.mesh.count >= MAX_INSTANCES_PER_POOL) return;
+    const intensity = options.instanceIntensity;
+    pool.material.opacity = intensity === undefined
+      ? Math.max(0, Math.min(1, opacity))
+      : 1;
+    this.#position.set(x, y, options.z ?? 3);
+    this.#scale.set(Math.max(0.01, width), Math.max(0.01, height), 1);
+    this.#matrix.compose(this.#position, this.#camera.quaternion, this.#scale);
+    pool.mesh.setMatrixAt(pool.mesh.count, this.#matrix);
+    if (intensity !== undefined) {
+      const value = Math.max(0, Math.min(1, intensity));
+      this.#instanceColor.setRGB(value, value, value);
+      pool.mesh.setColorAt(pool.mesh.count, this.#instanceColor);
+    } else if (pool.mesh.instanceColor !== null) {
+      this.#instanceColor.setRGB(1, 1, 1);
+      pool.mesh.setColorAt(pool.mesh.count, this.#instanceColor);
+    }
+    pool.mesh.count += 1;
   }
 
   #effectPoolFor(
@@ -1207,6 +1267,7 @@ export class ThreeRenderer {
     color: number,
     additive: boolean,
     instanceLimit: number,
+    texture?: Texture,
   ): EffectPool {
     const poolKey = `${key}:${additive ? "add" : "normal"}:${instanceLimit}`;
     const existing = this.#effectPools.get(poolKey);
@@ -1216,6 +1277,8 @@ export class ThreeRenderer {
       transparent: true,
       opacity: 0.65,
       depthWrite: false,
+      map: texture ?? null,
+      toneMapped: texture === undefined,
       ...(additive ? { blending: AdditiveBlending } : {}),
     });
     const mesh = new InstancedMesh(
@@ -1239,23 +1302,11 @@ export class ThreeRenderer {
 
     const baseColor = new Color(this.#colors()[cell.kind]);
     const isGhost = cell.role === "ghost";
-    const isSpecial = cell.special !== undefined;
-    const texture = isGhost ? null : this.#patternTexture(cell.kind, cell.special);
+    const texture = isGhost ? null : this.#patternTexture(cell.kind);
     const material = new MeshStandardMaterial({
       color: baseColor,
       map: texture,
-      emissive: isSpecial
-        ? SPECIAL_ACCENT_HEX[cell.special!]
-        : 0x000000,
-      emissiveMap: isSpecial ? texture : null,
-      emissiveIntensity: isSpecial
-        ? markedCellPresentationAt(
-            cell.special!,
-            cell.role,
-            this.#markedCellQuality(),
-            this.#frameTimestampMs,
-          ).emissiveIntensity
-        : 1,
+      emissive: 0x000000,
       metalness: cell.kind === "garbage" ? 0.58 : 0.22,
       roughness: cell.kind === "garbage" ? 0.78 : 0.42,
       transparent: isGhost,
@@ -1287,11 +1338,8 @@ export class ThreeRenderer {
     return this.#staticMarkedCells ? "reduced" : this.#quality.profile.effects;
   }
 
-  #patternTexture(
-    kind: RenderCellKind,
-    special: SpecialKind | undefined,
-  ): Texture | null {
-    const textureKey = `${kind}:${special ?? "ordinary"}`;
+  #patternTexture(kind: RenderCellKind): Texture | null {
+    const textureKey = `pattern:${kind}`;
     const existing = this.#textures.get(textureKey);
     if (existing !== undefined) return existing;
     const canvas = this.#canvas.ownerDocument.createElement("canvas");
@@ -1395,31 +1443,75 @@ export class ThreeRenderer {
         break;
     }
 
-    if (special !== undefined) {
-      // Match the DOM guide/preview badge: dark disc, bright canonical glyph.
-      // The marked material's accent emissive map colors the bright strokes.
-      context.fillStyle = "rgba(9, 12, 22, 0.92)";
-      context.strokeStyle = "rgba(255, 255, 255, 0.86)";
-      context.lineWidth = 5;
-      context.beginPath();
-      context.arc(32, 32, 16, 0, Math.PI * 2);
-      context.fill();
-      context.stroke();
-      context.strokeStyle = "rgba(255, 255, 255, 0.96)";
-      context.fillStyle = "rgba(255, 255, 255, 0.96)";
-      context.lineCap = "round";
-      context.lineJoin = "round";
-      context.lineWidth = 5;
-      context.stroke(new Path2D(SPECIAL_ICON_PATHS[special]));
-    }
+    const texture = new CanvasTexture(canvas);
+    texture.colorSpace = SRGBColorSpace;
+    texture.wrapS = RepeatWrapping;
+    texture.wrapT = RepeatWrapping;
+    texture.repeat.set(1.25, 1.25);
+    this.#textures.set(textureKey, texture);
+    return texture;
+  }
+
+  #specialBadgeTexture(special: SpecialKind): Texture {
+    const textureKey = `special-badge:${special}`;
+    const existing = this.#textures.get(textureKey);
+    if (existing !== undefined) return existing;
+    const canvas = this.#canvas.ownerDocument.createElement("canvas");
+    canvas.width = 64;
+    canvas.height = 64;
+    const context = canvas.getContext("2d");
+    if (context === null) throw new Error("Canvas 2D unavailable for special badge");
+
+    context.fillStyle = "rgba(5, 8, 16, 0.98)";
+    context.strokeStyle = SPECIAL_ACCENT_COLORS[special];
+    context.lineWidth = 3;
+    context.beginPath();
+    context.arc(32, 32, 26, 0, Math.PI * 2);
+    context.fill();
+    context.stroke();
+    context.strokeStyle = SPECIAL_ACCENT_COLORS[special];
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    context.lineWidth = 5;
+    context.save();
+    context.translate(5.76, 5.76);
+    context.scale(0.82, 0.82);
+    context.stroke(new Path2D(SPECIAL_ICON_PATHS[special]));
+    context.restore();
 
     const texture = new CanvasTexture(canvas);
     texture.colorSpace = SRGBColorSpace;
-    if (special === undefined) {
-      texture.wrapS = RepeatWrapping;
-      texture.wrapT = RepeatWrapping;
-      texture.repeat.set(1.25, 1.25);
-    }
+    this.#textures.set(textureKey, texture);
+    return texture;
+  }
+
+  #specialHaloTexture(special: SpecialKind): Texture {
+    const textureKey = `special-halo:${special}`;
+    const existing = this.#textures.get(textureKey);
+    if (existing !== undefined) return existing;
+    const canvas = this.#canvas.ownerDocument.createElement("canvas");
+    canvas.width = 128;
+    canvas.height = 128;
+    const context = canvas.getContext("2d");
+    if (context === null) throw new Error("Canvas 2D unavailable for special halo");
+
+    const accent = SPECIAL_ACCENT_HEX[special];
+    const red = accent >> 16 & 0xff;
+    const green = accent >> 8 & 0xff;
+    const blue = accent & 0xff;
+    const rgba = (alpha: number): string =>
+      `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+    const gradient = context.createRadialGradient(64, 64, 26, 64, 64, 64);
+    gradient.addColorStop(0, rgba(0.78));
+    gradient.addColorStop(0.28, rgba(0.52));
+    gradient.addColorStop(0.58, rgba(0.22));
+    gradient.addColorStop(0.82, rgba(0.08));
+    gradient.addColorStop(1, rgba(0));
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, 128, 128);
+
+    const texture = new CanvasTexture(canvas);
+    texture.colorSpace = SRGBColorSpace;
     this.#textures.set(textureKey, texture);
     return texture;
   }

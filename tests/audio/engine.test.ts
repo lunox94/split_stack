@@ -35,6 +35,9 @@ function fakeAudioContext(): AudioContext & {
     sampleRate: 44_100,
     state: "running" as AudioContextState,
     createGain: vi.fn(() => connectable({ gain: parameter() })),
+    createWaveShaper: vi.fn(() =>
+      connectable({ curve: null, oversample: "none" })
+    ),
     createStereoPanner: vi.fn(() => connectable({ pan: parameter() })),
     createOscillator: vi.fn(() =>
       connectable({

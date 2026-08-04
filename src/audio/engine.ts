@@ -34,6 +34,20 @@ const DEFAULT_MUSIC_SAMPLE_RATE = 44_100;
 const MUSIC_CHUNK_SAMPLES = 8_192;
 const MUSIC_LEAD_SECONDS = 0.025;
 const MUSIC_SCHEDULE_AHEAD_SECONDS = 0.38;
+const EFFECTS_MAKEUP_GAIN = 6;
+const EFFECTS_LIMIT = 0.8;
+const EFFECTS_LIMITER_CURVE_SIZE = 2_049;
+
+function effectsLimiterCurve(): Float32Array<ArrayBuffer> {
+  const curve = new Float32Array(
+    new ArrayBuffer(EFFECTS_LIMITER_CURVE_SIZE * Float32Array.BYTES_PER_ELEMENT),
+  );
+  for (let index = 0; index < curve.length; index += 1) {
+    const input = index / (curve.length - 1) * 2 - 1;
+    curve[index] = EFFECTS_LIMIT * Math.tanh(input / EFFECTS_LIMIT);
+  }
+  return curve;
+}
 
 const fetchModule: ModuleLoader = async (assetUrl) => {
   const response = await fetch(assetUrl);
@@ -49,6 +63,8 @@ export class AudioEngine {
   readonly #moduleCache = new Map<string, Promise<ArrayBuffer>>();
   #context: AudioContext | null = null;
   #effectsBus: GainNode | null = null;
+  #effectsMakeup: GainNode | null = null;
+  #effectsLimiter: WaveShaperNode | null = null;
   #musicBus: GainNode | null = null;
   #effectsMuted = false;
   #effectsVolume = 0.8;
@@ -81,14 +97,27 @@ export class AudioEngine {
       try {
         this.#context = this.#contextFactory();
         this.#effectsBus = this.#context.createGain();
+        this.#effectsMakeup = this.#context.createGain();
+        this.#effectsLimiter = this.#context.createWaveShaper();
         this.#musicBus = this.#context.createGain();
-        this.#effectsBus.connect(this.#context.destination);
+        this.#effectsMakeup.gain.setValueAtTime(
+          EFFECTS_MAKEUP_GAIN,
+          this.#context.currentTime,
+        );
+        this.#effectsLimiter.curve = effectsLimiterCurve();
+        this.#effectsLimiter.oversample = "4x";
+        this.#effectsMakeup
+          .connect(this.#effectsLimiter)
+          .connect(this.#effectsBus)
+          .connect(this.#context.destination);
         this.#musicBus.connect(this.#context.destination);
         this.#applyEffectsVolume();
         this.#applyMusicVolume();
       } catch {
         this.#context = null;
         this.#effectsBus = null;
+        this.#effectsMakeup = null;
+        this.#effectsLimiter = null;
         this.#musicBus = null;
         return false;
       }
@@ -292,6 +321,8 @@ export class AudioEngine {
     this.stopMusic();
     this.#context = null;
     this.#effectsBus = null;
+    this.#effectsMakeup = null;
+    this.#effectsLimiter = null;
     this.#musicBus = null;
     this.#moduleCache.clear();
     if (context !== null && context.state !== "closed") await context.close();
@@ -389,11 +420,11 @@ export class AudioEngine {
     options: PlayCueOptions,
   ): void {
     const context = this.#context;
-    const effectsBus = this.#effectsBus;
+    const effectsInput = this.#effectsMakeup;
     if (
       this.#effectsMuted ||
       context === null ||
-      effectsBus === null ||
+      effectsInput === null ||
       context.state !== "running"
     ) {
       return;
@@ -401,7 +432,7 @@ export class AudioEngine {
     const pan = Math.max(-1, Math.min(1, options.pan ?? 0));
     const cueGain = Math.max(0, Math.min(2, options.gain ?? 1));
     for (const cueTone of definition) {
-      this.#scheduleTone(context, effectsBus, cueTone, pan, cueGain);
+      this.#scheduleTone(context, effectsInput, cueTone, pan, cueGain);
     }
   }
 
