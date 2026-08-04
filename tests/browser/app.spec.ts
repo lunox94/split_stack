@@ -11,6 +11,7 @@ async function openApp(page: Page, identity = "Browser Tester"): Promise<void> {
     `/#name=${encodeURIComponent(identity)}&addr=${encodeURIComponent(`${slug}@example.test`)}`,
   );
   await expect(page.getByRole("heading", { name: "Split Stack" })).toBeVisible();
+  await page.waitForLoadState("networkidle");
 }
 
 async function seedCompletedMatch(page: Page): Promise<void> {
@@ -182,10 +183,14 @@ test("lobby keeps help opt-in and exposes the complete settings surface", async 
 
   await page.getByRole("button", { name: "Settings" }).click();
   await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
-  await expect(page.getByLabel("Effects audio")).toBeChecked();
+  await expect(page.getByLabel("Effects", { exact: true })).toBeChecked();
   await expect(page.getByLabel("Effects volume")).toHaveAttribute("type", "range");
+  await expect(page.getByLabel("Music", { exact: true })).toBeChecked();
+  await expect(page.getByLabel("Music volume")).toHaveAttribute("type", "range");
   await expect(page.getByLabel("Touch controls")).toHaveValue("gestures");
   await expect(page.getByLabel("Gameplay tips")).not.toBeChecked();
+  await page.getByRole("button", { name: "Clear diagnostics" }).click();
+  await expect(page.getByText("Diagnostics cleared.")).toBeVisible();
 });
 
 test("Practice accepts keyboard and compact touch-button actions", async ({ page }) => {
@@ -212,6 +217,33 @@ test("Practice accepts keyboard and compact touch-button actions", async ({ page
   const touchBaseline = await numericText(localScore(page));
   await page.getByRole("button", { name: "Hard drop" }).click();
   await expectScoreAbove(localScore(page), touchBaseline);
+});
+
+test("gesture controls accept a hard-drop flick over the opponent board", async ({
+  context,
+  page,
+}) => {
+  const { seatA, seatB } = await openVersusPair(context, page);
+  await seatA.getByRole("button", { name: "Ready", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready", exact: true }).click();
+  await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
+
+  await expect(seatA.locator(".split-stack-app")).toHaveCSS("touch-action", "none");
+
+  const opponentBoard = seatA.getByRole("application", { name: "Opponent board" });
+  const bounds = await opponentBoard.boundingBox();
+  expect(bounds).not.toBeNull();
+  const x = Math.floor(bounds!.x + bounds!.width / 2);
+  const startY = Math.floor(bounds!.y + bounds!.height * 0.25);
+  const baseline = await numericText(localScore(seatA));
+
+  await seatA.mouse.move(x, startY);
+  await seatA.mouse.down();
+  await seatA.mouse.move(x, startY + Math.max(90, bounds!.height * 0.3), { steps: 2 });
+  await seatA.mouse.up();
+
+  await expectScoreAbove(localScore(seatA), baseline);
+  await seatB.close();
 });
 
 test("versus boards stay visible, side by side, and equal at 360 by 640", async ({

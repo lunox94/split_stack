@@ -31,21 +31,52 @@ describe("automatic powers", () => {
     expect(status).toEqual([{ kind: "barrier", remainingTicks: 1_200, capacity: 4 }]);
   });
 
-  it("Nuke targets the topmost center-nearest cell with lower-column tie break", () => {
+  it("Nuke chooses the densest 5x5 blast on the highest occupied row", () => {
     const grid = createBoard();
-    grid[3]![4] = { kind: "T" };
-    grid[3]![5] = { kind: "T" };
-    grid[4]![3] = { kind: "I", special: "glitch-core" };
+    grid[3]![1] = { kind: "T" };
+    grid[3]![8] = { kind: "T" };
+    grid[4]![0] = { kind: "I", special: "glitch-core" };
+    grid[4]![2] = { kind: "J" };
+    grid[5]![3] = { kind: "L" };
+    grid[4]![8] = { kind: "S" };
     grid[8]![9] = { kind: "O" };
 
     const result = applyNuke(grid);
 
-    expect(result.target).toEqual({ x: 4, y: 3 });
-    expect(result.removed).toBe(3);
-    expect(result.grid[3]![4]).toBeNull();
-    expect(result.grid[4]![3]).toBeNull();
+    expect(result.target).toEqual({ x: 2, y: 3 });
+    expect(result.cells).toEqual([
+      { x: 1, y: 3 },
+      { x: 0, y: 4 },
+      { x: 2, y: 4 },
+      { x: 3, y: 5 },
+    ]);
+    expect(result.removed).toBe(4);
+    expect(result.grid[3]![1]).toBeNull();
+    expect(result.grid[4]![0]).toBeNull();
+    expect(result.grid[3]![8]).toEqual({ kind: "T" });
     expect(result.grid[8]![9]).toEqual({ kind: "O" });
-    expect(applyNuke(createBoard()).target).toBeNull();
+    expect(applyNuke(createBoard())).toMatchObject({ target: null, cells: [] });
+  });
+
+  it("Nuke considers empty centers that still cover the highest occupied row", () => {
+    const grid = createBoard();
+    grid[0]![0] = { kind: "T" };
+    grid[0]![9] = { kind: "T" };
+    grid[1]![0] = { kind: "I" };
+    grid[2]![2] = { kind: "O" };
+    grid[1]![3] = { kind: "J" };
+    grid[2]![4] = { kind: "L" };
+
+    const result = applyNuke(grid);
+
+    expect(result.target).toEqual({ x: 2, y: 0 });
+    expect(result.cells).toEqual([
+      { x: 0, y: 0 },
+      { x: 0, y: 1 },
+      { x: 3, y: 1 },
+      { x: 2, y: 2 },
+      { x: 4, y: 2 },
+    ]);
   });
 
   it("Collapse compacts columns, preserves markers while moving, then scores clears only", () => {

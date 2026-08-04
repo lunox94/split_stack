@@ -168,6 +168,16 @@ describe("remote snapshot replacement", () => {
     } as never];
     expect(store.accept(malformed)).toBe(false);
   });
+
+  it("accepts bounded meter overflow retained by rules version two", () => {
+    const store = new RemoteSnapshotStore();
+    store.bind("player-a", "session-a");
+    const overflow = envelope(1, 6);
+    overflow.payload.powerCharge = 8;
+
+    expect(store.accept(overflow)).toBe(true);
+    expect(store.latest("player-a")?.powerCharge).toBe(8);
+  });
 });
 
 describe("compact snapshot grids", () => {

@@ -1,5 +1,5 @@
 import { RULES } from "../config/rules";
-import type { Cell, Grid, PowerKind, StatusState } from "./types";
+import type { Cell, Coordinate, Grid, PowerKind, StatusState } from "./types";
 
 function cloneGrid(grid: Grid): Grid {
   return grid.map((row) => row.map((cell) => (cell === null ? null : { ...cell })));
@@ -46,25 +46,55 @@ export function activateBarrier(statuses: readonly StatusState[]): StatusState[]
 export interface NukeResult {
   grid: Grid;
   target: { x: number; y: number } | null;
+  cells: Coordinate[];
   removed: number;
 }
 
 export function applyNuke(source: Grid): NukeResult {
   const grid = cloneGrid(source);
   const rowIndex = grid.findIndex((row) => row.some((cell) => cell !== null));
-  if (rowIndex < 0) return { grid, target: null, removed: 0 };
+  if (rowIndex < 0) return { grid, target: null, cells: [], removed: 0 };
 
-  const occupiedColumns = grid[rowIndex]!
+  const topOccupiedColumns = source[rowIndex]!
     .map((cell, column) => ({ cell, column }))
     .filter(({ cell }) => cell !== null)
-    .map(({ column }) => column)
+    .map(({ column }) => column);
+  const candidateColumns = Array.from(
+    { length: RULES.board.width },
+    (_, column) => column,
+  )
+    .filter((column) =>
+      topOccupiedColumns.some(
+        (occupied) => Math.abs(occupied - column) <= RULES.power.nukeRadius,
+      ),
+    )
     .sort((left, right) => {
-      const distance = Math.abs(left - (RULES.board.width - 1) / 2) -
+      const countCells = (column: number): number => {
+        let count = 0;
+        for (
+          let row = Math.max(0, rowIndex - RULES.power.nukeRadius);
+          row <= Math.min(RULES.board.height - 1, rowIndex + RULES.power.nukeRadius);
+          row += 1
+        ) {
+          for (
+            let x = Math.max(0, column - RULES.power.nukeRadius);
+            x <= Math.min(RULES.board.width - 1, column + RULES.power.nukeRadius);
+            x += 1
+          ) {
+            if (source[row]![x] !== null) count += 1;
+          }
+        }
+        return count;
+      };
+      const countDifference = countCells(right) - countCells(left);
+      if (countDifference !== 0) return countDifference;
+      const distance =
+        Math.abs(left - (RULES.board.width - 1) / 2) -
         Math.abs(right - (RULES.board.width - 1) / 2);
       return distance === 0 ? left - right : distance;
     });
-  const column = occupiedColumns[0] as number;
-  let removed = 0;
+  const column = candidateColumns[0] as number;
+  const cells: Coordinate[] = [];
   for (let row = Math.max(0, rowIndex - RULES.power.nukeRadius); row <= Math.min(
     RULES.board.height - 1,
     rowIndex + RULES.power.nukeRadius,
@@ -75,25 +105,44 @@ export function applyNuke(source: Grid): NukeResult {
     ); x += 1) {
       if (grid[row]![x] !== null) {
         grid[row]![x] = null;
-        removed += 1;
+        cells.push({ x, y: row });
       }
     }
   }
-  return { grid, target: { x: column, y: rowIndex }, removed };
+  return {
+    grid,
+    target: { x: column, y: rowIndex },
+    cells,
+    removed: cells.length,
+  };
 }
 
-function compact(grid: Grid): void {
+export interface CollapseMovement {
+  from: Coordinate;
+  to: Coordinate;
+}
+
+function compact(grid: Grid): CollapseMovement[] {
+  const movements: CollapseMovement[] = [];
   for (let column = 0; column < RULES.board.width; column += 1) {
-    const cells: Cell[] = [];
+    const cells: Array<{ cell: Cell; row: number }> = [];
     for (let row = RULES.board.height - 1; row >= 0; row -= 1) {
       const cell = grid[row]![column];
-      if (cell !== null && cell !== undefined) cells.push(cell);
+      if (cell !== null && cell !== undefined) cells.push({ cell, row });
       grid[row]![column] = null;
     }
-    cells.forEach((cell, offset) => {
-      grid[RULES.board.height - 1 - offset]![column] = cell;
+    cells.forEach(({ cell, row }, offset) => {
+      const targetRow = RULES.board.height - 1 - offset;
+      grid[targetRow]![column] = cell;
+      if (targetRow !== row) {
+        movements.push({
+          from: { x: column, y: row },
+          to: { x: column, y: targetRow },
+        });
+      }
     });
   }
+  return movements;
 }
 
 function collapseBaseScore(lines: number): number {
@@ -116,25 +165,45 @@ export interface CollapseResult {
   triggeredSpecials: 0;
 }
 
-export function applyCollapse(source: Grid, level: number): CollapseResult {
+export interface PreparedCollapse {
+  grid: Grid;
+  completedRows: number[];
+  movements: CollapseMovement[];
+}
+
+export function prepareCollapse(source: Grid): PreparedCollapse {
   const grid = cloneGrid(source);
-  compact(grid);
-  const complete = grid
+  const movements = compact(grid);
+  const completedRows = grid
     .map((row, index) => ({ row, index }))
     .filter(({ row }) => row.every((cell) => cell !== null))
     .map(({ index }) => index);
-  for (const row of [...complete].sort((left, right) => right - left)) {
-    grid.splice(row, 1);
-  }
-  for (let row = 0; row < complete.length; row += 1) {
+  return { grid, completedRows, movements };
+}
+
+export function completePreparedCollapse(
+  source: Grid,
+  completedRows: readonly number[],
+  level: number,
+): CollapseResult {
+  const grid = cloneGrid(source);
+  const ordered = [...completedRows].sort((left, right) => right - left);
+  for (const row of ordered) grid.splice(row, 1);
+  for (let row = 0; row < completedRows.length; row += 1) {
     grid.unshift(Array.from({ length: RULES.board.width }, () => null));
   }
   return {
     grid,
-    clearedLines: complete.length,
-    score: collapseBaseScore(complete.length) * Math.max(1, Math.floor(level)),
+    clearedLines: completedRows.length,
+    score:
+      collapseBaseScore(completedRows.length) * Math.max(1, Math.floor(level)),
     triggeredSpecials: 0,
   };
+}
+
+export function applyCollapse(source: Grid, level: number): CollapseResult {
+  const prepared = prepareCollapse(source);
+  return completePreparedCollapse(prepared.grid, prepared.completedRows, level);
 }
 
 export function queueReplacementPower(

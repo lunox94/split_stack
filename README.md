@@ -26,10 +26,18 @@ Desktop controls:
 | Pause (practice only) | P or Escape |
 
 Touch users can choose gestures or labeled on-screen buttons in Settings.
+Gestures work across the gameplay canvas (apart from explicit UI controls), so
+phone players do not have to keep every swipe inside the local board.
 Scramble effects remap logical movement controls consistently for their full
 duration. Accessibility options include a colorblind palette, surface patterns,
 reduced motion, reduced flashes, a 30 FPS reduced-effects mode, optional screen
-shake and vibration, and independent effects audio controls.
+shake and vibration, and independent music and effects controls.
+
+Each match selects one of three original procedural chiptune arrangements and
+keeps its tempo stable while adding layers as play intensifies. The music takes
+melodic inspiration from the public-domain compositions *In the Hall of the
+Mountain King*, *Flight of the Bumblebee*, and *Kalinka*; no MIDI files or
+recorded music assets are bundled.
 
 ## Development
 
@@ -94,15 +102,25 @@ seat, and result records use bounded durable Webxdc updates. Display names are
 rendered as text, network messages are bounded and validated, and the app does
 not expose participant addresses.
 
+An authenticated peer frame counts as proof of life. A silent peer freezes the
+match after three seconds, starts channel replacement after five seconds, and
+retries every five seconds for up to one minute. A successful recovery rolls
+both players back to their last common checkpoint (at most three seconds) and
+uses a synchronized three-second countdown before resuming. If recovery cannot
+complete, the match ends neutrally as a connection loss: it remains visible in
+Recent Matches but does not affect head-to-head tallies. Settings also provides
+copy/clear controls for a bounded, local-only diagnostic log.
+
 The game uses a casual trust model: deterministic seeds and hashes detect
-accidental divergence, but version one does not claim strong protection from a
-deliberately modified client.
+accidental divergence, but rules version two does not claim strong protection
+from a deliberately modified client.
 
 ## License and distribution
 
 Original Split Stack code is MIT licensed; see `LICENSE`. Third-party notices
 are in `THIRD_PARTY_NOTICES.md` and are included in the release archive. The UI,
-icon, procedural sounds, effects, and copy are original to this project.
+icon, procedural sounds and arrangements, effects, and copy are original to
+this project.
 
 A proper intellectual-property review is required before broad commercial
 distribution. This repository is an implementation artifact, not legal advice

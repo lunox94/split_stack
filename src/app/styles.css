@@ -95,6 +95,10 @@ button:disabled {
   isolation: isolate;
 }
 
+.split-stack-app.gestures-active {
+  touch-action: none;
+}
+
 .game-canvas {
   position: absolute;
   z-index: 0;
@@ -223,6 +227,33 @@ button:disabled {
   --pane-border: rgba(147, 174, 217, 0.46);
 }
 
+.arena[data-scrambled="true"] .player-pane.is-local::before,
+.arena[data-scrambled="true"] .player-pane.is-local::after {
+  position: absolute;
+  z-index: 3;
+  top: 18%;
+  bottom: 18%;
+  width: 0.22rem;
+  content: "";
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0 0.45rem,
+    rgba(255, 92, 219, 0.82) 0.45rem 0.95rem
+  );
+  filter: drop-shadow(0 0 0.35rem rgba(255, 92, 219, 0.8));
+  animation: scramble-edge-flow 480ms linear infinite;
+  pointer-events: none;
+}
+
+.arena[data-scrambled="true"] .player-pane.is-local::before {
+  left: 0.18rem;
+}
+
+.arena[data-scrambled="true"] .player-pane.is-local::after {
+  right: 0.18rem;
+  animation-direction: reverse;
+}
+
 .board-hit-target {
   position: absolute;
   z-index: 3;
@@ -339,6 +370,7 @@ button:disabled {
     repeating-linear-gradient(135deg, rgba(65, 84, 112, 0.18) 0 7px, transparent 7px 14px),
     rgba(5, 7, 12, 0.96);
   text-align: center;
+  animation: blackout-close-in 250ms ease-out both;
 }
 
 .blackout-cover::before {
@@ -458,6 +490,48 @@ button:disabled {
   line-height: 1.55;
 }
 
+.special-guide {
+  display: grid;
+  gap: 0.65rem;
+  margin-block: 0.75rem 1.25rem;
+}
+
+.special-guide-card {
+  display: grid;
+  grid-template-columns: 3.25rem minmax(0, 1fr);
+  gap: 0.8rem;
+  align-items: center;
+  padding: 0.75rem;
+  border: 1px solid rgba(181, 255, 98, 0.25);
+  border-radius: var(--radius-sm);
+  background: rgba(6, 11, 21, 0.58);
+}
+
+.special-guide-card svg {
+  width: 3.25rem;
+  height: 3.25rem;
+  padding: 0.35rem;
+  border-radius: 0.7rem;
+  color: var(--accent);
+  background: rgba(181, 255, 98, 0.1);
+  filter: drop-shadow(0 0 0.55rem rgba(181, 255, 98, 0.45));
+}
+
+.special-guide-card h4,
+.special-guide-card p {
+  margin: 0;
+}
+
+.special-guide-card p {
+  color: var(--muted);
+}
+
+.diagnostics-settings {
+  margin-block: 1.25rem;
+  padding-block: 0.25rem 1rem;
+  border-bottom: 1px solid rgba(147, 174, 217, 0.14);
+}
+
 .glossary-list {
   display: grid;
   grid-template-columns: minmax(7rem, auto) minmax(0, 1fr);
@@ -530,6 +604,23 @@ button:disabled {
 @keyframes blackout-scan {
   to {
     rotate: 1turn;
+  }
+}
+
+@keyframes blackout-close-in {
+  from {
+    clip-path: inset(0 50%);
+    opacity: 0.35;
+  }
+  to {
+    clip-path: inset(0);
+    opacity: 1;
+  }
+}
+
+@keyframes scramble-edge-flow {
+  to {
+    background-position-y: 0.95rem;
   }
 }
 

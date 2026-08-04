@@ -231,6 +231,30 @@ describe("critical realtime reliability", () => {
 });
 
 describe("peer liveness", () => {
+  it("treats any authenticated frame from the bound opponent as proof of life", () => {
+    const clock = new ManualClock();
+    const liveness = new PeerLiveness({
+      clock,
+      peer: { senderId: "player-b", sessionId: "session-b" },
+    });
+    const ready: RealtimeEnvelope<"READY"> = {
+      protocol: 1,
+      matchId: "match-1",
+      senderId: "player-b",
+      sessionId: "session-b",
+      kind: "READY",
+      matchTick: 0,
+      sentAtMonotonicMs: 2_999,
+      payload: { ready: true, rulesHash: "rules-v1-hash" },
+    };
+
+    clock.advance(2_999);
+    expect(liveness.observe(ready)).toBe(true);
+    clock.advance(2_999);
+
+    expect(liveness.isMissing()).toBe(false);
+  });
+
   it("pauses after three seconds without a keepalive from the bound opponent", () => {
     const clock = new ManualClock();
     const liveness = new PeerLiveness({
@@ -247,6 +271,7 @@ describe("peer liveness", () => {
       sentAtMonotonicMs: 2_999,
       payload: {
         activeSessionId: "spectator-session",
+        resumeAvailable: true,
         lastSnapshotSeq: 0,
         inboundCritical: [],
       },

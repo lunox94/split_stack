@@ -53,42 +53,45 @@ function criticalEventId(envelope: RealtimeEnvelope<CriticalKind>): string {
 
 export class PeerLiveness {
   private peer: StreamRef;
-  private lastKeepaliveMs: number;
+  private lastTrafficMs: number;
   private readonly missingPeerMs: number;
 
   public constructor(private readonly options: PeerLivenessOptions) {
     this.peer = options.peer;
-    this.lastKeepaliveMs = options.clock.now();
+    this.lastTrafficMs = options.clock.now();
     this.missingPeerMs = options.missingPeerMs ?? RULES.network.missingPeerMs;
   }
 
   public bindPeer(peer: StreamRef): void {
     this.peer = peer;
-    this.lastKeepaliveMs = this.options.clock.now();
+    this.lastTrafficMs = this.options.clock.now();
   }
 
   public observe(envelope: RealtimeEnvelope): boolean {
+    if (!sameStream(envelopeStream(envelope), this.peer)) return false;
     if (
-      envelope.kind !== "KEEPALIVE" ||
-      !sameStream(envelopeStream(envelope), this.peer)
+      envelope.kind === "KEEPALIVE" &&
+      envelope.payload.activeSessionId !== this.peer.sessionId
     ) {
       return false;
     }
-    const keepalive = envelope as RealtimeEnvelope<"KEEPALIVE">;
-    if (keepalive.payload.activeSessionId !== this.peer.sessionId) return false;
-    this.lastKeepaliveMs = this.options.clock.now();
+    this.lastTrafficMs = this.options.clock.now();
     return true;
   }
 
   public isMissing(): boolean {
-    return this.options.clock.now() - this.lastKeepaliveMs >= this.missingPeerMs;
+    return this.options.clock.now() - this.lastTrafficMs >= this.missingPeerMs;
   }
 
   public remainingMs(): number {
     return Math.max(
       0,
-      this.missingPeerMs - (this.options.clock.now() - this.lastKeepaliveMs),
+      this.missingPeerMs - (this.options.clock.now() - this.lastTrafficMs),
     );
+  }
+
+  public silentForMs(): number {
+    return Math.max(0, this.options.clock.now() - this.lastTrafficMs);
   }
 }
 

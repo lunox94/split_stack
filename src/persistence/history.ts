@@ -96,7 +96,13 @@ export function isMatchResultV1(value: unknown): value is MatchResultV1 {
     !result.players.every(isResultPlayer) ||
     result.players[0]?.id === result.players[1]?.id ||
     !["seat-a", "seat-b", "draw", "desync"].includes(String(result.outcome)) ||
-    !["top-out", "forfeit", "simultaneous", "desynchronization"].includes(
+    ![
+      "top-out",
+      "forfeit",
+      "simultaneous",
+      "desynchronization",
+      "connection-lost",
+    ].includes(
       String(result.reason),
     ) ||
     !isNonNegativeInteger(result.durationTicks) ||
@@ -120,7 +126,9 @@ export function isMatchResultV1(value: unknown): value is MatchResultV1 {
     return false;
   }
   if (result.outcome === "draw") return result.reason === "simultaneous";
-  if (result.outcome === "desync") return result.reason === "desynchronization";
+  if (result.outcome === "desync") {
+    return result.reason === "desynchronization" || result.reason === "connection-lost";
+  }
   return result.reason === "top-out" || result.reason === "forfeit";
 }
 
@@ -137,10 +145,14 @@ function conflictResult(variants: readonly MatchResultV1[]): MatchResultV1 {
     compareCodeUnits(stableJson(left), stableJson(right)),
   )[0];
   if (base === undefined) throw new Error("Cannot materialize an empty result conflict");
+  const connectionLost = variants.every(
+    (variant) =>
+      variant.outcome === "desync" && variant.reason === "connection-lost",
+  );
   return {
     ...base,
     outcome: "desync",
-    reason: "desynchronization",
+    reason: connectionLost ? "connection-lost" : "desynchronization",
   };
 }
 

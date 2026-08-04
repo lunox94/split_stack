@@ -1,13 +1,13 @@
 # Split Stack 1.0.0 release notes
 
-Build date: 2026-08-02
+Build date: 2026-08-04
 
 ## Artifact
 
 - File: `dist-xdc/split-stack.xdc`
-- Archive size: **270,747 bytes (264.4 KiB)**
-- SHA-256: `fe5de4092601ec979f72db4dc1fab01d70ec50015deb6e3d8109a8f5b8ebf66e`
-- Uncompressed payload: **758,289 bytes (740.5 KiB)**
+- Archive size: **291,951 bytes (285.1 KiB)**
+- SHA-256: `ca067986ae966902ccba02586bbded3525eb4f84666d60ff5d86590aff2a2abb`
+- Uncompressed payload: **834,904 bytes (815.3 KiB)**
 - Payload files: **7**
 - Icon: **256×256 PNG**
 
@@ -20,11 +20,14 @@ source maps, packaged `webxdc.js`, and static external network targets.
 ## Included
 
 - Two-player realtime survival matches, spectator presentation, ready/countdown,
-  reconnect handling, result consensus, history, and rematch flow.
-- Deterministic falling-block engine, combat, powers, special cells, and solo
-  practice.
-- Responsive Three.js presentation, keyboard/touch controls, procedural sound,
-  and accessibility/reduced-effects settings.
+  one-minute resilient reconnect/rollback handling, neutral connection-loss
+  results, local diagnostics, result consensus, history, and rematch flow.
+- Rules-v2 deterministic engine with 150 ms clear anticipation, buffered spawn
+  inputs, seven-line power charge, 5×5 Nuke, contact-locking Acid Rain, staged
+  Collapse, ordered special cells, and solo practice.
+- Responsive Three.js power/garbage/status animation, glowing special-cell
+  icons, full-canvas gestures, original adaptive procedural chiptune music,
+  separate music/effects controls, and accessibility/reduced-effects settings.
 - MIT license and third-party notices at the archive root.
 
 ## Distribution note

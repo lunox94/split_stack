@@ -37,6 +37,13 @@ interface DelayedDelivery {
   data: Uint8Array;
 }
 
+interface HeldRoute {
+  from: string;
+  to: string;
+  predicate: (data: Uint8Array) => boolean;
+  deliveries: DelayedDelivery[];
+}
+
 function routeKey(from: string, to: string): string {
   return `${from.length}:${from}${to.length}:${to}`;
 }
@@ -49,6 +56,8 @@ export class InMemoryRealtimeBus {
   private readonly listeners = new Map<string, (data: Uint8Array) => void>();
   private readonly faults = new Map<string, RouteFaults>();
   private readonly delayed: DelayedDelivery[] = [];
+  private readonly heldRoutes = new Map<number, HeldRoute>();
+  private nextHoldId = 1;
 
   public connect(endpointId: string): InMemoryRealtimeEndpoint {
     if (this.listeners.has(endpointId)) {
@@ -91,6 +100,30 @@ export class InMemoryRealtimeBus {
     for (const delivery of deliveries) this.deliver(delivery.to, delivery.data);
   }
 
+  public holdMatching(
+    from: string,
+    to: string,
+    predicate: (data: Uint8Array) => boolean,
+  ): number {
+    const holdId = this.nextHoldId;
+    this.nextHoldId += 1;
+    this.heldRoutes.set(holdId, { from, to, predicate, deliveries: [] });
+    return holdId;
+  }
+
+  public releaseHeld(holdId: number, reverse = false): void {
+    const held = this.heldRoutes.get(holdId);
+    if (held === undefined) return;
+    this.heldRoutes.delete(holdId);
+    const deliveries = held.deliveries.splice(0);
+    if (reverse) deliveries.reverse();
+    for (const delivery of deliveries) this.deliver(delivery.to, delivery.data);
+  }
+
+  public discardHeld(holdId: number): void {
+    this.heldRoutes.delete(holdId);
+  }
+
   private fault(from: string, to: string): RouteFaults {
     const key = routeKey(from, to);
     let fault = this.faults.get(key);
@@ -104,6 +137,16 @@ export class InMemoryRealtimeBus {
   private broadcast(from: string, data: Uint8Array): void {
     for (const to of this.listeners.keys()) {
       if (to === from) continue;
+      const held = [...this.heldRoutes.values()].find(
+        (route) =>
+          route.from === from &&
+          route.to === to &&
+          route.predicate(data),
+      );
+      if (held !== undefined) {
+        held.deliveries.push({ to, data: data.slice() });
+        continue;
+      }
       const fault = this.fault(from, to);
       if (fault.drops > 0) {
         fault.drops -= 1;

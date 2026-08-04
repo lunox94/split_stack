@@ -1,0 +1,307 @@
+import { describe, expect, it } from "vitest";
+
+import { PresentationTimeline } from "../../src/render/presentation-timeline";
+
+describe("presentation timeline", () => {
+  it("gives every normal line clear the same 150 ms blocking rhythm", () => {
+    const single = new PresentationTimeline();
+    const fourLine = new PresentationTimeline();
+
+    const singleTiming = single.schedule(
+      { id: "single", kind: "line-clear", board: "left", rows: [21] },
+      1_000,
+    );
+    const fourLineTiming = fourLine.schedule(
+      {
+        id: "four",
+        kind: "line-clear",
+        board: "left",
+        rows: [18, 19, 20, 21],
+      },
+      1_000,
+    );
+
+    expect(singleTiming.blockingUntilMs).toBe(150);
+    expect(fourLineTiming.blockingUntilMs).toBe(150);
+    expect(single.frameAt(1_075)).toMatchObject({
+      blocking: true,
+      effects: [{ id: "single", stage: "anticipation", moment: "compress" }],
+    });
+    expect(single.frameAt(1_135)).toMatchObject({
+      blocking: true,
+      effects: [{ id: "single", stage: "action", moment: "impact" }],
+    });
+    expect(single.frameAt(1_160)).toMatchObject({
+      blocking: false,
+      effects: [{ id: "single", stage: "follow-through" }],
+    });
+  });
+
+  it("choreographs offensive effects from source charge through target impact", () => {
+    const timeline = new PresentationTimeline();
+    const timing = timeline.schedule(
+      {
+        id: "scramble-a-b",
+        kind: "offensive-transfer",
+        attack: "scramble",
+        source: "left",
+        target: "right",
+      },
+      0,
+    );
+
+    expect(timing.impactAtMs).toBe(200);
+    expect(timeline.frameAt(40).effects[0]).toMatchObject({
+      moment: "charge",
+      source: "left",
+      target: "right",
+    });
+    expect(timeline.frameAt(150).effects[0]).toMatchObject({ moment: "travel" });
+    expect(timeline.frameAt(225).effects[0]).toMatchObject({
+      stage: "action",
+      moment: "impact",
+    });
+    expect(timeline.frameAt(300).effects[0]).toMatchObject({
+      stage: "follow-through",
+    });
+  });
+
+  it("telegraphs a five-by-five Nuke before its shockwave", () => {
+    const timeline = new PresentationTimeline();
+    timeline.schedule(
+      {
+        id: "nuke",
+        kind: "nuke",
+        board: "left",
+        center: { column: 6, row: 14 },
+      },
+      100,
+    );
+
+    expect(timeline.frameAt(200).effects[0]).toMatchObject({
+      moment: "reticle",
+      footprint: { width: 5, height: 5 },
+      center: { column: 6, row: 14 },
+    });
+    expect(timeline.frameAt(325).effects[0]).toMatchObject({
+      stage: "action",
+      moment: "shockwave",
+    });
+    expect(timeline.frameAt(500).effects[0]).toMatchObject({
+      stage: "follow-through",
+      moment: "particles",
+    });
+  });
+
+  it("dissolves an Acid Rain column from top to bottom one cell at a time", () => {
+    const timeline = new PresentationTimeline();
+    const timing = timeline.schedule(
+      {
+        id: "acid-contact",
+        kind: "acid-dissolve",
+        board: "right",
+        column: 4,
+        occupiedRows: [18, 7, 12],
+      },
+      0,
+    );
+
+    expect(timing.blockingUntilMs).toBeLessThanOrEqual(350);
+    expect(timeline.frameAt(20).effects[0]).toMatchObject({ moment: "splash" });
+    expect(timeline.frameAt(40).effects[0]).toMatchObject({
+      moment: "dissolve",
+      column: 4,
+      resolvedRows: [7],
+    });
+    expect(timeline.frameAt(75).effects[0]).toMatchObject({
+      resolvedRows: [7, 12],
+    });
+    expect(timeline.frameAt(110).effects[0]).toMatchObject({
+      resolvedRows: [7, 12, 18],
+    });
+  });
+
+  it("warns about garbage pressure without exposing holes before the rise", () => {
+    const timeline = new PresentationTimeline();
+    timeline.schedule(
+      { id: "garbage", kind: "garbage-rise", board: "left", rowCount: 4 },
+      0,
+    );
+
+    expect(timeline.frameAt(50).effects[0]).toMatchObject({
+      moment: "pressure",
+      rowCount: 4,
+    });
+    expect(timeline.frameAt(175).effects[0]).toMatchObject({
+      stage: "action",
+      moment: "lift",
+      rowCount: 4,
+    });
+    expect(timeline.frameAt(50).effects[0]).not.toHaveProperty("holeColumns");
+  });
+
+  it("drops Collapse cells before using the standard row-clear anticipation", () => {
+    const timeline = new PresentationTimeline();
+    const timing = timeline.schedule(
+      {
+        id: "collapse",
+        kind: "collapse",
+        board: "right",
+        completedRows: [20],
+        movements: [{ from: { x: 3, y: 16 }, to: { x: 3, y: 20 } }],
+      },
+      0,
+    );
+
+    expect(timing.impactAtMs).toBe(200);
+    expect(timing.blockingUntilMs).toBeLessThanOrEqual(500);
+    expect(timeline.frameAt(125).effects[0]).toMatchObject({
+      moment: "charge",
+    });
+    expect(timeline.frameAt(325).effects[0]).toMatchObject({
+      moment: "fall",
+      movements: [{ from: { x: 3, y: 16 }, to: { x: 3, y: 20 } }],
+    });
+    expect(timeline.frameAt(475).effects[0]).toMatchObject({
+      stage: "follow-through",
+      moment: "particles",
+    });
+  });
+
+  it("adds Collapse movements at power impact without restarting its charge cue", () => {
+    const timeline = new PresentationTimeline();
+    timeline.schedule(
+      {
+        id: "collapse-transition",
+        kind: "collapse",
+        board: "left",
+        completedRows: [],
+        movements: [],
+      },
+      0,
+    );
+    timeline.schedule(
+      {
+        id: "collapse-transition",
+        kind: "collapse",
+        board: "left",
+        completedRows: [],
+        movements: [{ from: { x: 1, y: 17 }, to: { x: 1, y: 21 } }],
+      },
+      200,
+    );
+
+    expect(timeline.frameAt(201).effects[0]).toMatchObject({
+      stage: "action",
+      moment: "fall",
+      movements: [{ from: { x: 1, y: 17 }, to: { x: 1, y: 21 } }],
+    });
+  });
+
+  it("gives each status power a distinct readable activation", () => {
+    const timeline = new PresentationTimeline();
+    timeline.schedule(
+      { id: "barrier", kind: "barrier", board: "left", capacity: 4 },
+      0,
+    );
+    timeline.schedule({ id: "blackout", kind: "blackout", board: "right" }, 0);
+    timeline.schedule({ id: "scramble", kind: "scramble", board: "left" }, 0);
+    timeline.schedule(
+      { id: "monomino", kind: "monomino-rush", board: "right" },
+      0,
+    );
+    timeline.schedule({ id: "acid", kind: "acid-rain", board: "left" }, 0);
+
+    expect(timeline.frameAt(50).effects).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "barrier", moment: "rail", capacity: 4 }),
+        expect.objectContaining({ id: "blackout", moment: "veil" }),
+        expect.objectContaining({ id: "scramble", moment: "glitch" }),
+        expect.objectContaining({ id: "monomino", moment: "fracture" }),
+        expect.objectContaining({ id: "acid", moment: "charge" }),
+      ]),
+    );
+  });
+
+  it("preserves competitive timing while reduced motion removes shake and particles", () => {
+    const full = new PresentationTimeline({
+      reducedMotion: false,
+      reducedFlashes: false,
+      screenShake: true,
+      particleScale: 1,
+    });
+    const reduced = new PresentationTimeline({
+      reducedMotion: true,
+      reducedFlashes: true,
+      screenShake: false,
+      particleScale: 0,
+    });
+    const cue = {
+      id: "major-nuke",
+      kind: "nuke" as const,
+      board: "left" as const,
+      center: { column: 5, row: 18 },
+    };
+
+    expect(reduced.schedule(cue, 0)).toEqual(full.schedule(cue, 0));
+    const fullImpact = full.frameAt(210);
+    const reducedImpact = reduced.frameAt(210);
+
+    expect(reducedImpact.effects[0]?.stage).toBe(fullImpact.effects[0]?.stage);
+    expect(fullImpact).toMatchObject({
+      effects: [{ visualStyle: "motion", particleCount: 48, flash: true }],
+    });
+    expect(fullImpact.shake).not.toBeNull();
+    expect(reducedImpact).toMatchObject({
+      effects: [{ visualStyle: "fade", particleCount: 0, flash: false }],
+      shake: null,
+    });
+  });
+
+  it("reveals marked-cell chains bottom-row first and left-to-right", () => {
+    const timeline = new PresentationTimeline();
+    const timing = timeline.schedule(
+      {
+        id: "specials",
+        kind: "special-chain",
+        board: "left",
+        triggers: [
+          { special: "glitch-core", row: 18, column: 7 },
+          { special: "column-bomb", row: 20, column: 6 },
+          { special: "garbage-core", row: 20, column: 2 },
+        ],
+      },
+      0,
+    );
+
+    expect(timing.blockingUntilMs).toBeLessThanOrEqual(400);
+    expect(timeline.frameAt(80).effects[0]).toMatchObject({
+      moment: "special-burst",
+      resolvedSpecials: [{ special: "garbage-core", row: 20, column: 2 }],
+    });
+    expect(timeline.frameAt(190).effects[0]).toMatchObject({
+      resolvedSpecials: [
+        { special: "garbage-core", row: 20, column: 2 },
+        { special: "column-bomb", row: 20, column: 6 },
+        { special: "glitch-core", row: 18, column: 7 },
+      ],
+    });
+  });
+
+  it("bounds simultaneous visual cues for low-memory mobile runtimes", () => {
+    const timeline = new PresentationTimeline();
+    for (let index = 0; index < 100; index += 1) {
+      timeline.schedule(
+        {
+          id: `clear-${index}`,
+          kind: "line-clear",
+          board: "left",
+          rows: [21],
+        },
+        0,
+      );
+    }
+
+    expect(timeline.frameAt(50).effects).toHaveLength(64);
+  });
+});

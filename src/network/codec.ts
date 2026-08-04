@@ -169,6 +169,7 @@ function isValidPayload(kind: MessageKind, payload: unknown): boolean {
       return (
         typeof payload.displayName === "string" &&
         payload.displayName.length <= 128 &&
+        typeof payload.resumeAvailable === "boolean" &&
         isOptionalBoundedString(payload.targetSessionId)
       );
     case "STATE_REQUEST":
@@ -218,6 +219,7 @@ function isValidPayload(kind: MessageKind, payload: unknown): boolean {
     case "KEEPALIVE":
       return (
         isBoundedId(payload.activeSessionId) &&
+        typeof payload.resumeAvailable === "boolean" &&
         isSafeCounter(payload.lastSnapshotSeq) &&
         Array.isArray(payload.inboundCritical) &&
         payload.inboundCritical.length <= 16 &&
@@ -231,7 +233,7 @@ function isValidPayload(kind: MessageKind, payload: unknown): boolean {
     case "MATCH_CONFIG":
       return (
         hasEventId(payload) &&
-        payload.rulesVersion === 1 &&
+        payload.rulesVersion === RULES.rulesVersion &&
         isBoundedId(payload.rulesHash) &&
         isBoundedId(payload.configHash) &&
         typeof payload.seed === "string" &&
@@ -293,7 +295,8 @@ function isValidPayload(kind: MessageKind, payload: unknown): boolean {
       return (
         hasEventId(payload) &&
         isSafeCounter(payload.pauseEpoch) &&
-        isSafeCounter(payload.proposedPauseTick)
+        isSafeCounter(payload.proposedPauseTick) &&
+        typeof payload.connectionIssue === "boolean"
       );
     case "RESULT_CONFIRM":
       return (

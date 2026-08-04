@@ -35,6 +35,15 @@ The deterministic random-number generator is a TypeScript port of the
 public-domain xoshiro128** 1.1 reference implementation by David Blackman and
 Sebastiano Vigna: https://prng.di.unimi.it/
 
+## Public-domain musical inspiration
+
+Split Stack's three chiptune tracks are original procedural arrangements that
+take melodic inspiration from the public-domain compositions *In the Hall of
+the Mountain King* (Edvard Grieg), *Flight of the Bumblebee* (Nikolai
+Rimsky-Korsakov), and *Kalinka* (Ivan Larionov). No third-party MIDI file,
+recording, performance, or BitMidi asset is included in the source or release
+bundle.
+
 ## Build and test toolchain
 
 The following packages are development/build tools and are not separately

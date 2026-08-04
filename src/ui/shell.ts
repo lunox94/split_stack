@@ -1,6 +1,8 @@
 import { RULES } from "../config/rules";
 import { STRINGS, formatString, type StringKey } from "../app/strings";
+import type { SpecialKind } from "../domain/types";
 import type { Preferences } from "../persistence/settings";
+import { createSpecialIcon } from "../render/special-icons";
 
 function element<K extends keyof HTMLElementTagNameMap>(
   document: Document,
@@ -119,8 +121,10 @@ function createHud(document: Document, side: "left" | "right"): HudElements {
 }
 
 export interface SettingsInputs {
-  audioEnabled: HTMLInputElement;
-  volume: HTMLInputElement;
+  effectsEnabled: HTMLInputElement;
+  effectsVolume: HTMLInputElement;
+  musicEnabled: HTMLInputElement;
+  musicVolume: HTMLInputElement;
   vibration: HTMLInputElement;
   touchControls: HTMLSelectElement;
   colorPalette: HTMLSelectElement;
@@ -164,6 +168,9 @@ export interface AppShell {
   helpBack: HTMLButtonElement;
   settings: HTMLElement;
   settingsInputs: SettingsInputs;
+  diagnosticsCopyButton: HTMLButtonElement;
+  diagnosticsClearButton: HTMLButtonElement;
+  diagnosticsStatus: HTMLElement;
   settingsBack: HTMLButtonElement;
   match: HTMLElement;
   arena: HTMLElement;
@@ -183,6 +190,7 @@ export interface AppShell {
   resultsLeaveButton: HTMLButtonElement;
   show(screen: "lobby" | "help" | "settings" | "match" | "results"): void;
   setPreferences(preferences: Preferences): void;
+  setScrambled(active: boolean): void;
 }
 
 export function createAppShell(document: Document, mount: HTMLElement): AppShell {
@@ -226,20 +234,38 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
 
   const settingsParts = menuScreen(document, STRINGS["settings.heading"]);
   const settingsList = element(document, "div", "settings-list");
-  const audioEnabled = checkboxSetting(
+  const effectsEnabled = checkboxSetting(
     document,
     settingsList,
-    STRINGS["settings.audio"],
+    STRINGS["settings.effects"],
   );
-  const volumeLabel = element(document, "label", "setting-row");
-  volumeLabel.append(element(document, "span", undefined, STRINGS["settings.effectsVolume"]));
-  const volume = element(document, "input");
-  volume.type = "range";
-  volume.min = "0";
-  volume.max = "1";
-  volume.step = "0.05";
-  volumeLabel.append(volume);
-  settingsList.append(volumeLabel);
+  const effectsVolumeLabel = element(document, "label", "setting-row");
+  effectsVolumeLabel.append(
+    element(document, "span", undefined, STRINGS["settings.effectsVolume"]),
+  );
+  const effectsVolume = element(document, "input");
+  effectsVolume.type = "range";
+  effectsVolume.min = "0";
+  effectsVolume.max = "1";
+  effectsVolume.step = "0.05";
+  effectsVolumeLabel.append(effectsVolume);
+  settingsList.append(effectsVolumeLabel);
+  const musicEnabled = checkboxSetting(
+    document,
+    settingsList,
+    STRINGS["settings.music"],
+  );
+  const musicVolumeLabel = element(document, "label", "setting-row");
+  musicVolumeLabel.append(
+    element(document, "span", undefined, STRINGS["settings.musicVolume"]),
+  );
+  const musicVolume = element(document, "input");
+  musicVolume.type = "range";
+  musicVolume.min = "0";
+  musicVolume.max = "1";
+  musicVolume.step = "0.05";
+  musicVolumeLabel.append(musicVolume);
+  settingsList.append(musicVolumeLabel);
   const vibration = checkboxSetting(document, settingsList, STRINGS["settings.vibration"]);
   const touchLabel = element(document, "label", "setting-row");
   touchLabel.append(element(document, "span", undefined, STRINGS["settings.controls"]));
@@ -296,8 +322,25 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     settingsList,
     STRINGS["settings.gameplayTips"],
   );
+  const diagnostics = element(document, "section", "diagnostics-settings");
+  diagnostics.append(
+    element(document, "h3", undefined, STRINGS["settings.diagnosticsReady"]),
+  );
+  const diagnosticsActions = element(document, "div", "secondary-actions");
+  const diagnosticsCopyButton = button(
+    document,
+    STRINGS["settings.copyDiagnostics"],
+  );
+  const diagnosticsClearButton = button(
+    document,
+    STRINGS["settings.clearDiagnostics"],
+  );
+  diagnosticsActions.append(diagnosticsCopyButton, diagnosticsClearButton);
+  const diagnosticsStatus = element(document, "p", "muted");
+  diagnosticsStatus.setAttribute("aria-live", "polite");
+  diagnostics.append(diagnosticsActions, diagnosticsStatus);
   const settingsBack = button(document, STRINGS["common.back"]);
-  settingsParts.panel.append(settingsList, settingsBack);
+  settingsParts.panel.append(settingsList, diagnostics, settingsBack);
 
   const match = element(document, "section", "screen");
   match.hidden = true;
@@ -331,11 +374,13 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     ["⇊", "controls.hardDrop", "hard-drop"],
     ["H", "controls.hold", "hold"],
   ];
+  const touchControlNodes = new Map<string, HTMLButtonElement>();
   for (const [symbol, key, action] of controls) {
     const control = button(document, symbol);
     control.dataset.action = action;
     control.setAttribute("aria-label", STRINGS[key]);
     touchButtons.append(control);
+    touchControlNodes.set(action, control);
   }
   const unsupported = element(
     document,
@@ -391,8 +436,10 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     helpBack,
     settings: settingsParts.screen,
     settingsInputs: {
-      audioEnabled,
-      volume,
+      effectsEnabled,
+      effectsVolume,
+      musicEnabled,
+      musicVolume,
       vibration,
       touchControls,
       colorPalette,
@@ -402,6 +449,9 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
       screenShake,
       gameplayTips,
     },
+    diagnosticsCopyButton,
+    diagnosticsClearButton,
+    diagnosticsStatus,
     settingsBack,
     match,
     arena,
@@ -423,8 +473,10 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
       for (const [name, node] of Object.entries(screens)) node.hidden = name !== screen;
     },
     setPreferences(preferences): void {
-      audioEnabled.checked = preferences.audioEnabled;
-      volume.value = String(preferences.volume);
+      effectsEnabled.checked = preferences.effectsEnabled;
+      effectsVolume.value = String(preferences.effectsVolume);
+      musicEnabled.checked = preferences.musicEnabled;
+      musicVolume.value = String(preferences.musicVolume);
       vibration.checked = preferences.vibration;
       touchControls.value = preferences.touchControls;
       colorPalette.value = preferences.colorPalette;
@@ -433,6 +485,46 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
       reducedEffects.checked = preferences.reducedEffects;
       screenShake.checked = preferences.screenShake;
       gameplayTips.checked = preferences.gameplayTips;
+    },
+    setScrambled(active): void {
+      arena.dataset.scrambled = String(active);
+      const glyphs = active
+        ? {
+            "move-left": "→",
+            "move-right": "←",
+            "rotate-ccw": "↻",
+            "rotate-cw": "↺",
+          }
+        : {
+            "move-left": "←",
+            "move-right": "→",
+            "rotate-ccw": "↺",
+            "rotate-cw": "↻",
+          };
+      for (const [action, glyph] of Object.entries(glyphs)) {
+        const control = touchControlNodes.get(action);
+        if (control !== undefined) control.textContent = glyph;
+      }
+      touchControlNodes.get("move-left")?.setAttribute(
+        "aria-label",
+        active ? STRINGS["controls.moveRight"] : STRINGS["controls.moveLeft"],
+      );
+      touchControlNodes.get("move-right")?.setAttribute(
+        "aria-label",
+        active ? STRINGS["controls.moveLeft"] : STRINGS["controls.moveRight"],
+      );
+      touchControlNodes.get("rotate-ccw")?.setAttribute(
+        "aria-label",
+        active
+          ? STRINGS["controls.rotateClockwise"]
+          : STRINGS["controls.rotateCounterclockwise"],
+      );
+      touchControlNodes.get("rotate-cw")?.setAttribute(
+        "aria-label",
+        active
+          ? STRINGS["controls.rotateCounterclockwise"]
+          : STRINGS["controls.rotateClockwise"],
+      );
     },
   };
   return shell;
@@ -452,6 +544,45 @@ export function showHelp(shell: AppShell, kind: "how" | "powers" | "controls"): 
     ] as const) {
       shell.helpBody.append(element(document, "p", undefined, STRINGS[key]));
     }
+    shell.helpBody.append(
+      element(document, "h3", undefined, STRINGS["help.specialCellsHeading"]),
+    );
+    const specials = element(document, "div", "special-guide");
+    const specialEntries: ReadonlyArray<{
+      readonly special: SpecialKind;
+      readonly name: StringKey;
+      readonly description: StringKey;
+    }> = [
+      {
+        special: "column-bomb",
+        name: "special.columnBomb",
+        description: "special.columnBombDescription",
+      },
+      {
+        special: "garbage-core",
+        name: "special.garbageCore",
+        description: "special.garbageCoreDescription",
+      },
+      {
+        special: "glitch-core",
+        name: "special.glitchCore",
+        description: "special.glitchCoreDescription",
+      },
+    ];
+    for (const entry of specialEntries) {
+      const card = element(document, "article", "special-guide-card");
+      const copy = element(document, "div");
+      copy.append(
+        element(document, "h4", undefined, STRINGS[entry.name]),
+        element(document, "p", undefined, STRINGS[entry.description]),
+      );
+      card.append(
+        createSpecialIcon(document, entry.special, STRINGS[entry.name]),
+        copy,
+      );
+      specials.append(card);
+    }
+    shell.helpBody.append(specials);
   } else if (kind === "powers") {
     shell.helpHeading.textContent = STRINGS["lobby.powerGlossary"];
     const list = element(document, "dl", "glossary-list");
@@ -489,6 +620,23 @@ export function showHelp(shell: AppShell, kind: "how" | "powers" | "controls"): 
 
 export function meterProgress(value: number): string {
   return `${Math.max(0, Math.min(100, (value / RULES.power.threshold) * 100))}%`;
+}
+
+export function setPowerMeterAccessibility(meter: HTMLElement, value: number): void {
+  const charge = Math.max(0, Math.floor(value));
+  const threshold = RULES.power.threshold;
+  const retained = Math.max(0, charge - threshold);
+  meter.setAttribute("aria-valuenow", String(Math.min(charge, threshold)));
+  meter.setAttribute(
+    "aria-valuetext",
+    charge >= threshold
+      ? retained > 0
+        ? retained === 1
+          ? STRINGS["hud.powerReadyRetainedOne"]
+          : formatString("hud.powerReadyRetainedMany", { count: retained })
+        : STRINGS["hud.powerReady"]
+      : formatString("hud.powerCharge", { charge, threshold }),
+  );
 }
 
 export function countdownText(seconds: number): string {

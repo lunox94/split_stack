@@ -39,7 +39,9 @@ export const STRINGS = {
   "match.notReady": "Not ready",
   "match.waitingForReady": "Waiting for both players…",
   "match.countdown": "Match starts in {seconds}",
+  "match.connectionUnstable": "Connection unstable…",
   "match.reconnecting": "Reconnecting…",
+  "match.resynchronizing": "Resynchronizing…",
   "match.resuming": "Connection restored. Resuming in {seconds}…",
   "match.versionMismatch":
     "The players have different game versions. Update Split Stack to continue.",
@@ -64,6 +66,10 @@ export const STRINGS = {
   "hud.replacementSeconds": "{power} · {seconds}s",
   "hud.replacementPieces": "{power} · {count} left",
   "hud.power": "Power",
+  "hud.powerReady": "Power ready",
+  "hud.powerReadyRetainedOne": "Power ready; 1 charge retained",
+  "hud.powerReadyRetainedMany": "Power ready; {count} charges retained",
+  "hud.powerCharge": "{charge} of {threshold} power charge",
   "hud.upcomingPower": "Upcoming power",
   "hud.incomingGarbage": "Incoming garbage",
   "hud.combo": "Combo {count}",
@@ -100,9 +106,13 @@ export const STRINGS = {
   "results.practiceOver": "Practice complete",
   "results.newHighScore": "New practice high score",
   "results.forfeit": "Opponent connection timed out",
+  "results.connectionLost": "Connection lost",
+  "results.connectionLostHistory": "Connection lost · neutral result",
   "settings.heading": "Settings",
-  "settings.audio": "Effects audio",
+  "settings.effects": "Effects",
   "settings.effectsVolume": "Effects volume",
+  "settings.music": "Music",
+  "settings.musicVolume": "Music volume",
   "settings.vibration": "Vibration",
   "settings.controls": "Touch controls",
   "settings.gestures": "Gestures",
@@ -115,6 +125,12 @@ export const STRINGS = {
   "settings.reducedEffects": "Reduced effects and 30 FPS",
   "settings.screenShake": "Screen shake",
   "settings.gameplayTips": "Gameplay tips",
+  "settings.copyDiagnostics": "Copy diagnostics",
+  "settings.clearDiagnostics": "Clear diagnostics",
+  "settings.diagnosticsReady": "Connection diagnostics",
+  "settings.diagnosticsCopied": "Diagnostics copied.",
+  "settings.diagnosticsCopyFailed": "Diagnostics could not be copied.",
+  "settings.diagnosticsCleared": "Diagnostics cleared.",
   "help.heading": "How to Play",
   "help.goal":
     "Keep your stack below the top while sending garbage and forced pieces to your opponent.",
@@ -124,6 +140,7 @@ export const STRINGS = {
     "Line clears charge your meter. The displayed power activates automatically when the meter is full.",
   "help.specialCells":
     "A marked cell triggers only when it participates in a normal line clear.",
+  "help.specialCellsHeading": "Marked piece powers",
   "help.noAutoTutorial": "Help opens only when you choose it from the lobby.",
   "power.blackout": "Blackout",
   "power.scramble": "Scramble",
@@ -136,7 +153,7 @@ export const STRINGS = {
   "power.scrambleDescription":
     "Reverse your opponent’s horizontal and rotation controls for 10 seconds.",
   "power.nukeDescription":
-    "Remove a guided three-by-three area from your own highest stack.",
+    "Remove a guided five-by-five area from your own highest stack.",
   "power.barrierDescription": "Block up to four incoming garbage rows for 20 seconds.",
   "power.collapseDescription":
     "Compact every column downward and score any completed lines.",
@@ -146,6 +163,12 @@ export const STRINGS = {
   "special.columnBomb": "Column Bomb",
   "special.garbageCore": "Garbage Core",
   "special.glitchCore": "Glitch Core",
+  "special.columnBombDescription":
+    "Clears its entire column when its marked cell participates in a line clear.",
+  "special.garbageCoreDescription":
+    "Sends extra garbage when its marked cell participates in a line clear.",
+  "special.glitchCoreDescription":
+    "Sends a Glitch piece when its marked cell participates in a line clear.",
   "help.touchRotate":
     "Tap to rotate clockwise; two-finger tap rotates counterclockwise.",
   "help.touchMove": "Drag across columns to move. Hold downward to soft drop.",

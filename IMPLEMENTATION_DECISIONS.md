@@ -2,8 +2,8 @@
 
 The approved specification identifies itself as the source of truth and asks
 implementers to surface ambiguity. This file records the narrow interpretations
-needed to make version 1 deterministic. They are part of rules version 1 and
-must change together with the peer rules hash.
+needed to make the simulation deterministic. The additions below are part of
+rules version 2 and must change together with the peer rules hash.
 
 ## Simulation ordering
 
@@ -18,11 +18,34 @@ must change together with the peer rules hash.
 - The spawn selection in resolution step 13 includes the spawn-collision
   top-out check. This is the operational form of the top-out check mentioned in
   step 12.
+- A delayed line clear captures its level at lock time; crossing a timed level
+  boundary during anticipation does not multiply that clear's score. The event
+  ordinal participates in the authoritative state hash and checkpoints.
 - O rotation is a no-op and is not a successful action, so it cannot reset lock
   delay or qualify a T-Spin. A hard drop is the final successful action and,
   per the literal T-Spin rule, disqualifies a prior rotation.
 
 ## Effects and queues
+
+- A normal lock that completes rows enters a nine-tick (150 ms) resolution
+  phase before the rows disappear. Gravity, status timers, and replacement-mode
+  timers pause during resolution. Hold, one rotation, and the latest horizontal
+  direction may be buffered for the next spawn; other inputs wait.
+- Metered powers use a seven-point threshold and retain overflow charge. Their
+  gameplay impact is staged for twelve ticks (200 ms) so presentation and
+  simulation share a deterministic impact boundary.
+- A Nuke fixes its target row to the highest occupied row, then evaluates every
+  center column whose clipped 5×5 window includes a cell on that row. It
+  maximizes occupied removals and breaks ties center-most, then left-most. The
+  selected target cell itself may be empty.
+- Acid remains horizontally controllable until its first stack/floor contact.
+  The soft-drop or gravity step that first becomes grounded locks immediately,
+  before another horizontal input. Occupied cells then dissolve top-to-bottom
+  at one cell per tick (at most 333 ms for all 20 visible rows). Collapse uses
+  a 15-tick drop followed by the standard nine-tick clear, totaling 400 ms
+  after its power-impact boundary.
+- Simultaneous special cells resolve bottom-to-top and left-to-right. The
+  ordered affected-cell events are part of the deterministic effect stream.
 
 - Pending Monomino Rush and Acid Rain activations form a two-item FIFO. Further
   activations are ignored while that queue is full. An active mode remains
@@ -65,10 +88,21 @@ must change together with the peer rules hash.
 - A critical gap is requested immediately. Buffers, ACK lists, and gap ranges
   are bounded by the central network limit so a remote peer cannot amplify an
   unbounded control frame.
+- Every authenticated peer frame proves liveness. Three seconds of silence
+  freezes simulation and shows an unstable-connection state; five seconds
+  requests a replacement channel, repeated every five seconds while silent.
+  The recovery window is one minute.
 - Network pause stops each authoritative local simulation immediately. Resume
-  reconciles owner states and ledgers, requires equal pause ticks, then
-  performs a new three-second countdown. A tick mismatch ends neutrally as a
+  restores both owners to their newest common rolling checkpoint, bounded to
+  three seconds of rollback, reconciles ledgers, and performs a synchronized
+  three-second countdown. A checkpoint or hash mismatch ends neutrally as a
   desynchronization rather than guessing which owner state to rewrite.
+- Exhausting the recovery window produces the neutral `connection-lost`
+  result. It is retained in recent history but excluded from win/loss tallies;
+  an explicit Leave remains a forfeit.
+- Networking is pumped on a dedicated wall-clock interval rather than from the
+  render loop. Privacy-safe diagnostics retain at most three incidents and 100
+  events in local storage and may be copied or cleared by the player.
 - Incoming realtime ticks are bounded to three seconds of catch-up work. A
   rolling checkpoint window accepts earlier terminal events without replaying
   from match start; events outside either bound finish neutrally as a desync.
@@ -94,3 +128,9 @@ must change together with the peer rules hash.
   automatic competitive ticks cross a read-only session callback. Snapshot
   transitions supply level, countdown, and upcoming-power warning cues. Remote
   attacks and Blackout cues pan right; authoritative local effects pan left.
+- The presentation timeline consumes deterministic simulation cues but never
+  changes authoritative state. Reduced-motion/reduced-effects variants keep the
+  same gameplay timing while removing shake, large travel, or repeated flashes.
+- Music is synthesized locally from original procedural arrangements. A match
+  chooses one deterministic track, rematches rotate the choice, adaptive layers
+  do not alter tempo, and backgrounding pauses music until a musical boundary.

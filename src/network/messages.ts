@@ -23,7 +23,7 @@ export interface CriticalPayload {
 }
 
 export interface MatchConfigPayload extends CriticalPayload {
-  rulesVersion: 1;
+  rulesVersion: 2;
   rulesHash: string;
   configHash: string;
   seed: string;
@@ -96,7 +96,11 @@ export function isCriticalKind(value: MessageKind): value is CriticalKind {
 }
 
 export interface RealtimePayloadMap {
-  HELLO: { displayName: string; targetSessionId?: SessionId };
+  HELLO: {
+    displayName: string;
+    targetSessionId?: SessionId;
+    resumeAvailable: boolean;
+  };
   STATE_REQUEST: { targetPlayerIds?: PlayerId[] };
   READY: { ready: boolean; rulesHash: string };
   CLOCK_PING: { sampleId: number; coordinatorSentMs: number };
@@ -115,6 +119,7 @@ export interface RealtimePayloadMap {
   GAP_REQUEST: { stream: StreamRef; fromSeq: number; throughSeq: number };
   KEEPALIVE: {
     activeSessionId: SessionId;
+    resumeAvailable: boolean;
     lastSnapshotSeq: number;
     inboundCritical: StreamCursor[];
   };
@@ -149,6 +154,7 @@ export interface RealtimePayloadMap {
   NETWORK_PAUSE: CriticalPayload & {
     pauseEpoch: number;
     proposedPauseTick: Tick;
+    connectionIssue: boolean;
   };
   RESUME_STATE: ResumeStatePayload;
   RESULT_CONFIRM: CriticalPayload & {

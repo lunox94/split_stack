@@ -17,6 +17,24 @@ class MemoryStorage implements StoragePort {
 }
 
 describe("local preferences", () => {
+  it("keeps music and effects independently controllable", () => {
+    const storage = new MemoryStorage();
+    savePreferences(storage, {
+      ...DEFAULT_PREFERENCES,
+      effectsEnabled: false,
+      effectsVolume: 0.25,
+      musicEnabled: true,
+      musicVolume: 0.6,
+    });
+
+    expect(loadPreferences(storage, false)).toMatchObject({
+      effectsEnabled: false,
+      effectsVolume: 0.25,
+      musicEnabled: true,
+      musicVolume: 0.6,
+    });
+  });
+
   it("defaults tips off and respects first-run reduced-motion", () => {
     expect(loadPreferences(new MemoryStorage(), true)).toMatchObject({
       gameplayTips: false,
@@ -29,17 +47,32 @@ describe("local preferences", () => {
     const storage = new MemoryStorage();
     savePreferences(storage, {
       ...DEFAULT_PREFERENCES,
-      volume: 0.35,
+      effectsVolume: 0.35,
       touchControls: "buttons",
       colorPalette: "colorblind",
     });
 
     expect(loadPreferences(storage, false)).toMatchObject({
-      volume: 0.35,
+      effectsVolume: 0.35,
       touchControls: "buttons",
       colorPalette: "colorblind",
     });
     storage.setItem("split-stack/preferences/v1", "not json");
     expect(loadPreferences(storage, false)).toEqual(DEFAULT_PREFERENCES);
+  });
+
+  it("migrates the former single audio control to both audio buses", () => {
+    const storage = new MemoryStorage();
+    storage.setItem(
+      "split-stack/preferences/v1",
+      JSON.stringify({ audioEnabled: false, volume: 0.3 }),
+    );
+
+    expect(loadPreferences(storage, false)).toMatchObject({
+      effectsEnabled: false,
+      effectsVolume: 0.3,
+      musicEnabled: false,
+      musicVolume: 0.3,
+    });
   });
 });

@@ -13,6 +13,7 @@ const keepalive: RealtimeEnvelope<"KEEPALIVE"> = {
   sentAtMonotonicMs: 2_000,
   payload: {
     activeSessionId: "session-a",
+    resumeAvailable: true,
     lastSnapshotSeq: 20,
     inboundCritical: [],
   },
@@ -157,7 +158,7 @@ describe("realtime envelope codec", () => {
       seq: 1,
       payload: {
         eventId: "config-1",
-        rulesVersion: 1,
+        rulesVersion: 2,
         rulesHash: "rules-hash",
         configHash: "config-hash",
         seed: "00112233445566778899aabbccddeeff",

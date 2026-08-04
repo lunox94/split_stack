@@ -3,13 +3,17 @@ import type { PowerKind, SpecialKind } from "../domain/types";
 export const STANDARD_SHAPES = ["I", "J", "L", "O", "S", "T", "Z"] as const;
 
 export const RULES = {
-  rulesVersion: 1,
+  rulesVersion: 2,
   board: { width: 10, height: 22, hiddenRows: 2 },
   timing: {
     ticksPerSecond: 60,
     levelTicks: 3_600,
     lockDelayTicks: 30,
     lockResetCap: 15,
+    lineClearTicks: 9,
+    powerImpactTicks: 12,
+    collapseDropTicks: 15,
+    acidDissolveStepTicks: 1,
     dasMs: 140,
     arrMs: 35,
     softDropRepeatMs: 35,
@@ -67,7 +71,7 @@ export const RULES = {
     },
   },
   power: {
-    threshold: 20,
+    threshold: 7,
     deck: [
       "blackout",
       "scramble",
@@ -79,7 +83,7 @@ export const RULES = {
     ] as readonly PowerKind[],
     blackoutTicks: 900,
     scrambleTicks: 600,
-    nukeRadius: 1,
+    nukeRadius: 2,
     monominoRushTicks: 480,
     acidRainPieces: 3,
     replacementQueueCap: 2,
@@ -111,7 +115,9 @@ export const RULES = {
     keepaliveMs: 1_000,
     retryMs: 250,
     missingPeerMs: 3_000,
-    reconnectGraceMs: 20_000,
+    reconnectingMs: 5_000,
+    reconnectGraceMs: 60_000,
+    resultConsensusMs: 20_000,
     resumeCountdownTicks: 180,
     maxSnapshotBytes: 4_096,
     maxRealtimeBytes: 128_000,

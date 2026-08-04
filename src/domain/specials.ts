@@ -1,6 +1,6 @@
 import { RULES, STANDARD_SHAPES } from "../config/rules";
 import { deriveEventUint32 } from "./rng";
-import type { Grid, PieceDescriptor, SpecialKind } from "./types";
+import type { Coordinate, Grid, PieceDescriptor, SpecialKind } from "./types";
 
 export interface ForcedQueueResult {
   queue: PieceDescriptor[];
@@ -75,7 +75,14 @@ export interface SpecialResolution {
   grid: Grid;
   garbageCoreEvents: string[];
   glitchEvents: string[];
+  events: SpecialResolutionEvent[];
   destroyedCells: number;
+}
+
+export interface SpecialResolutionEvent extends CapturedSpecial {
+  order: number;
+  eventId: string;
+  affectedCells: Coordinate[];
 }
 
 export function resolveSpecialTriggers(
@@ -89,6 +96,8 @@ export function resolveSpecialTriggers(
   );
   const garbageCoreEvents: string[] = [];
   const glitchEvents: string[] = [];
+  const events: SpecialResolutionEvent[] = [];
+  let columnBombOrdinal = 0;
   let garbageOrdinal = 0;
   let glitchOrdinal = 0;
   let destroyedCells = 0;
@@ -96,21 +105,34 @@ export function resolveSpecialTriggers(
   const ordered = [...captured].sort(
     (left, right) => right.row - left.row || left.column - right.column,
   );
-  for (const trigger of ordered) {
+  for (const [order, trigger] of ordered.entries()) {
     if (trigger.kind === "column-bomb") {
-      for (const row of grid) {
+      columnBombOrdinal += 1;
+      const affectedCells: Coordinate[] = [];
+      for (const [rowIndex, row] of grid.entries()) {
         if (row[trigger.column] !== null) {
+          affectedCells.push({ x: trigger.column, y: rowIndex });
           row[trigger.column] = null;
           destroyedCells += 1;
         }
       }
+      events.push({
+        ...trigger,
+        order,
+        eventId: `${lockEventId}:column-bomb:${columnBombOrdinal}`,
+        affectedCells,
+      });
     } else if (trigger.kind === "garbage-core") {
       garbageOrdinal += 1;
-      garbageCoreEvents.push(`${lockEventId}:garbage-core:${garbageOrdinal}`);
+      const eventId = `${lockEventId}:garbage-core:${garbageOrdinal}`;
+      garbageCoreEvents.push(eventId);
+      events.push({ ...trigger, order, eventId, affectedCells: [] });
     } else {
       glitchOrdinal += 1;
-      glitchEvents.push(`${lockEventId}:glitch-core:${glitchOrdinal}`);
+      const eventId = `${lockEventId}:glitch-core:${glitchOrdinal}`;
+      glitchEvents.push(eventId);
+      events.push({ ...trigger, order, eventId, affectedCells: [] });
     }
   }
-  return { grid, garbageCoreEvents, glitchEvents, destroyedCells };
+  return { grid, garbageCoreEvents, glitchEvents, events, destroyedCells };
 }

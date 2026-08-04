@@ -4,8 +4,10 @@ export interface StoragePort {
 }
 
 export interface Preferences {
-  audioEnabled: boolean;
-  volume: number;
+  effectsEnabled: boolean;
+  effectsVolume: number;
+  musicEnabled: boolean;
+  musicVolume: number;
   vibration: boolean;
   touchControls: "gestures" | "buttons";
   colorPalette: "standard" | "colorblind";
@@ -19,8 +21,10 @@ export interface Preferences {
 const STORAGE_KEY = "split-stack/preferences/v1";
 
 export const DEFAULT_PREFERENCES: Preferences = {
-  audioEnabled: true,
-  volume: 0.8,
+  effectsEnabled: true,
+  effectsVolume: 0.8,
+  musicEnabled: true,
+  musicVolume: 0.55,
   vibration: true,
   touchControls: "gestures",
   colorPalette: "standard",
@@ -35,17 +39,31 @@ function boolean(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
 
+function volume(value: unknown, fallback: number): number {
+  const raw = typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  return Math.max(0, Math.min(1, raw));
+}
+
 function parsePreferences(value: unknown, firstRunReducedMotion: boolean): Preferences {
   const record = typeof value === "object" && value !== null
     ? (value as Record<string, unknown>)
     : {};
   const reducedMotion = boolean(record.reducedMotion, firstRunReducedMotion);
-  const rawVolume = typeof record.volume === "number" && Number.isFinite(record.volume)
-    ? record.volume
-    : DEFAULT_PREFERENCES.volume;
+  const legacyEnabled = boolean(record.audioEnabled, true);
+  const legacyVolume = typeof record.volume === "number" && Number.isFinite(record.volume)
+    ? volume(record.volume, DEFAULT_PREFERENCES.effectsVolume)
+    : undefined;
   return {
-    audioEnabled: boolean(record.audioEnabled, DEFAULT_PREFERENCES.audioEnabled),
-    volume: Math.max(0, Math.min(1, rawVolume)),
+    effectsEnabled: boolean(record.effectsEnabled, legacyEnabled),
+    effectsVolume: volume(
+      record.effectsVolume,
+      legacyVolume ?? DEFAULT_PREFERENCES.effectsVolume,
+    ),
+    musicEnabled: boolean(record.musicEnabled, legacyEnabled),
+    musicVolume: volume(
+      record.musicVolume,
+      legacyVolume ?? DEFAULT_PREFERENCES.musicVolume,
+    ),
     vibration: boolean(record.vibration, DEFAULT_PREFERENCES.vibration),
     touchControls: record.touchControls === "buttons" ? "buttons" : "gestures",
     colorPalette: record.colorPalette === "colorblind" ? "colorblind" : "standard",

@@ -14,8 +14,8 @@ describe("canonical hashing", () => {
     expect(() => canonicalize({ value: undefined })).toThrow(/undefined/i);
   });
 
-  it("pins the version-one rules hash", () => {
+  it("pins the version-two rules hash", () => {
     expect(RULES_HASH).toMatch(/^[0-9a-f]{8}$/);
-    expect(RULES_HASH).toBe("e7d8fc73");
+    expect(RULES_HASH).toBe("aa362b3d");
   });
 });

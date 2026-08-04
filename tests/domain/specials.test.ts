@@ -75,5 +75,34 @@ describe("Hollow Cross and embedded special cells", () => {
     expect(result.grid[15]![3]).toEqual({ kind: "O" });
     expect(result.garbageCoreEvents).toEqual(["lock:9:garbage-core:1"]);
     expect(result.glitchEvents).toHaveLength(1);
+    expect(result.events).toEqual([
+      {
+        order: 0,
+        kind: "column-bomb",
+        row: 20,
+        column: 2,
+        eventId: "lock:9:column-bomb:1",
+        affectedCells: [
+          { x: 2, y: 10 },
+          { x: 2, y: 15 },
+        ],
+      },
+      {
+        order: 1,
+        kind: "garbage-core",
+        row: 20,
+        column: 7,
+        eventId: "lock:9:garbage-core:1",
+        affectedCells: [],
+      },
+      {
+        order: 2,
+        kind: "glitch-core",
+        row: 18,
+        column: 5,
+        eventId: "lock:9:glitch-core:1",
+        affectedCells: [],
+      },
+    ]);
   });
 });

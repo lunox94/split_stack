@@ -68,6 +68,12 @@ interface PointerTrace {
 export interface GestureInputOptions {
   readonly getCellSize: () => number;
   readonly now?: () => number;
+  readonly shouldStart?: (event: PointerEvent) => boolean;
+}
+
+export function isGameplayGestureTarget(target: EventTarget | null): boolean {
+  return !(target instanceof Element) ||
+    target.closest("button, input, select, a, [data-gesture-blocked='true']") === null;
 }
 
 export class GestureInput {
@@ -75,6 +81,7 @@ export class GestureInput {
   readonly #sink: InputSink;
   readonly #getCellSize: () => number;
   readonly #now: () => number;
+  readonly #shouldStart: (event: PointerEvent) => boolean;
   readonly #pointers = new Map<number, PointerTrace>();
   #enabled = true;
   #primaryPointerId: number | null = null;
@@ -89,6 +96,7 @@ export class GestureInput {
     this.#sink = sink;
     this.#getCellSize = options.getCellSize;
     this.#now = options.now ?? (() => performance.now());
+    this.#shouldStart = options.shouldStart ?? (() => true);
     element.addEventListener("pointerdown", this.#onPointerDown, {
       passive: false,
     });
@@ -145,7 +153,7 @@ export class GestureInput {
   }
 
   readonly #onPointerDown = (event: PointerEvent): void => {
-    if (!this.#enabled) return;
+    if (!this.#enabled || !this.#shouldStart(event)) return;
     event.preventDefault();
     if (this.#pointers.size === 0) {
       this.#primaryPointerId = event.pointerId;

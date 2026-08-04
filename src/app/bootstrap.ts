@@ -1,5 +1,6 @@
 import { AudioEngine } from "../audio/engine";
 import type { AudioCue } from "../audio/cues";
+import type { MusicIntensity } from "../audio/music";
 import { RULES } from "../config/rules";
 import { RULES_HASH } from "../config/rules-hash";
 import { hashCanonicalHex } from "../domain/hashing";
@@ -16,16 +17,18 @@ import type {
   PowerKind,
   StatusState,
 } from "../domain/types";
-import { GestureInput } from "../input/gestures";
+import { GestureInput, isGameplayGestureTarget } from "../input/gestures";
 import { KeyboardInput } from "../input/keyboard";
 import { transformScrambledAction } from "../input/scramble-transform";
 import {
   CompetitiveSession,
+  type CompetitiveConnectionStatus,
   type CompetitivePhase,
   type CompetitiveRealtimeTransport,
   type CompetitiveTerminalState,
 } from "../match/competitive-session";
 import { decodeEnvelope } from "../network/codec";
+import { NetworkDiagnostics } from "../network/diagnostics";
 import { RemoteSnapshotStore, type PlayerSnapshotV1 } from "../network/snapshots";
 import {
   DurableLamportClock,
@@ -45,8 +48,17 @@ import {
   type StoragePort,
 } from "../persistence/settings";
 import { ThreeRenderer, type BoardViewport, type RendererLayout } from "../render/renderer";
-import { createAppShell, countdownText, meterProgress, showHelp, type AppShell, type HudElements } from "../ui/shell";
+import {
+  createAppShell,
+  countdownText,
+  meterProgress,
+  setPowerMeterAccessibility,
+  showHelp,
+  type AppShell,
+  type HudElements,
+} from "../ui/shell";
 import { boardModelFromRemoteSnapshot, boardModelFromSimulation } from "./view-model";
+import { PresentationRouter } from "./presentation-router";
 import {
   appendBoundedUnique,
   createRuntimeId,
@@ -68,6 +80,7 @@ import {
   type SessionClaimV1,
 } from "./runtime-election";
 import { STRINGS, formatString, type StringKey } from "./strings";
+import { PresentationTimeline } from "../render/presentation-timeline";
 
 const PRACTICE_HIGH_SCORE_KEY = "split-stack/practice-high-score/v1";
 const FIXED_TICK_MS = 1_000 / RULES.timing.ticksPerSecond;
@@ -249,7 +262,7 @@ function updateHud(
     hud.upcomingPower.textContent = `${STRINGS["hud.upcomingPower"]}: —`;
     hud.incoming.textContent = `${STRINGS["hud.incomingGarbage"]}: 0`;
     hud.meterFill.style.setProperty("--meter-progress", "0%");
-    hud.meter.setAttribute("aria-valuenow", "0");
+    setPowerMeterAccessibility(hud.meter, 0);
     hud.statuses.replaceChildren();
     return;
   }
@@ -269,7 +282,7 @@ function updateHud(
   hud.upcomingPower.textContent = `${STRINGS["hud.upcomingPower"]}: ${powerLabel(upcomingPower)}`;
   hud.incoming.textContent = `${STRINGS["hud.incomingGarbage"]}: ${incoming.reduce((sum, packet) => sum + packet.rows, 0)}`;
   hud.meterFill.style.setProperty("--meter-progress", meterProgress(powerCharge));
-  hud.meter.setAttribute("aria-valuenow", String(powerCharge));
+  setPowerMeterAccessibility(hud.meter, powerCharge);
   const document = hud.statuses.ownerDocument;
   hud.statuses.replaceChildren(
     ...statuses.map((status) => {
@@ -299,10 +312,13 @@ export async function bootstrap(): Promise<void> {
 
   const shell = createAppShell(document, mount);
   const storage = safeStorage(window);
+  const networkDiagnostics = new NetworkDiagnostics({ storage });
   const mediaPrefersReduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
   let preferences = loadPreferences(storage, mediaPrefersReduced);
   shell.setPreferences(preferences);
   const audio = new AudioEngine();
+  let presentationTimeline = new PresentationTimeline();
+  let presentationRouter = new PresentationRouter(presentationTimeline);
   let renderer: ThreeRenderer | null = null;
   let latestLayout: RendererLayout | null = null;
   let mode: "lobby" | "practice" | "competitive" | "spectator" | "results" = "lobby";
@@ -310,6 +326,7 @@ export async function bootstrap(): Promise<void> {
   let practicePaused = false;
   let practiceAccumulator = 0;
   let competitive: CompetitiveSession | null = null;
+  let competitivePumpTimer: number | null = null;
   let spectator: SpectatorRuntime | null = null;
   let activeMatch: ActiveMatch | null = null;
   let lastFrameMs = performance.now();
@@ -320,6 +337,40 @@ export async function bootstrap(): Promise<void> {
   let lastCountdownSecond = 0;
   let lastLocalLevel = 1;
   let warnedUpcomingPower: PowerKind | null = null;
+  let currentMusicMatchId: string | null = null;
+
+  const resetPresentation = (): void => {
+    presentationTimeline = new PresentationTimeline({
+      reducedMotion: preferences.reducedMotion,
+      reducedFlashes: preferences.reducedFlashes,
+      screenShake: preferences.screenShake,
+      particleScale: preferences.reducedEffects ? 0 : 1,
+    });
+    presentationRouter = new PresentationRouter(presentationTimeline);
+  };
+
+  const musicIntensityFor = (
+    snapshot: SimulationSnapshot | undefined,
+  ): MusicIntensity => {
+    if (snapshot === undefined) return "calm";
+    const highestOccupiedRow = snapshot.player.grid.findIndex((row) =>
+      row.some((cell) => cell !== null),
+    );
+    const incomingRows = snapshot.player.incomingGarbage.reduce(
+      (total, packet) => total + packet.rows,
+      0,
+    );
+    if (
+      (highestOccupiedRow >= 0 && highestOccupiedRow <= RULES.board.hiddenRows + 4) ||
+      incomingRows >= 6
+    ) {
+      return "danger";
+    }
+    if (snapshot.level >= 4 || snapshot.player.lines >= 12 || incomingRows >= 3) {
+      return "building";
+    }
+    return "calm";
+  };
 
   const host = window.webxdc;
   const selfActor: LobbyActor = {
@@ -342,6 +393,17 @@ export async function bootstrap(): Promise<void> {
   let appendChain = Promise.resolve();
   let lastAppendMs = -Infinity;
 
+  const stopCompetitivePump = (): void => {
+    if (competitivePumpTimer === null) return;
+    window.clearInterval(competitivePumpTimer);
+    competitivePumpTimer = null;
+  };
+
+  const startCompetitivePump = (): void => {
+    stopCompetitivePump();
+    competitivePumpTimer = window.setInterval(() => competitive?.pump(), 50);
+  };
+
   const resumeCompetitiveTransport = (): void => {
     const session = competitive;
     if (session === null) return;
@@ -353,10 +415,11 @@ export async function bootstrap(): Promise<void> {
       session.disconnect();
       session.attachTransport(makeRealtimeTransport(channel));
     }
-    session.setHidden(false);
+    if (document.visibilityState !== "hidden") session.setHidden(false);
   };
 
   const applyPreferences = (): void => {
+    resetPresentation();
     shell.setPreferences(preferences);
     shell.container.dataset.reducedMotion = String(preferences.reducedMotion);
     shell.container.dataset.reducedFlashes = String(preferences.reducedFlashes);
@@ -365,8 +428,10 @@ export async function bootstrap(): Promise<void> {
     shell.container.dataset.screenShake = String(preferences.screenShake);
     shell.touchButtons.hidden =
       mode === "lobby" || mode === "results" || preferences.touchControls !== "buttons";
-    audio.setMuted(!preferences.audioEnabled);
-    audio.setVolume(preferences.volume);
+    audio.setEffectsMuted(!preferences.effectsEnabled);
+    audio.setEffectsVolume(preferences.effectsVolume);
+    audio.setMusicMuted(!preferences.musicEnabled);
+    audio.setMusicVolume(preferences.musicVolume);
     renderer?.setReducedEffects(preferences.reducedEffects);
     renderer?.setColorPalette(preferences.colorPalette);
   };
@@ -385,6 +450,7 @@ export async function bootstrap(): Promise<void> {
     renderer = new ThreeRenderer(shell.canvas, {
       onLayout: positionTargets,
       onContextLost: () => {
+        audio.pauseMusic();
         shell.unsupported.hidden = true;
         if (mode === "practice") {
           practicePaused = true;
@@ -397,6 +463,12 @@ export async function bootstrap(): Promise<void> {
       },
       onContextRestored: () => {
         shell.unsupported.hidden = true;
+        if (
+          document.visibilityState !== "hidden" &&
+          (mode !== "practice" || !practicePaused)
+        ) {
+          audio.resumeMusic();
+        }
         if (mode === "competitive") resumeCompetitiveTransport();
         if (mode !== "practice") shell.overlay.hidden = true;
       },
@@ -504,6 +576,10 @@ export async function bootstrap(): Promise<void> {
   };
 
   const leaveRuntime = (): void => {
+    stopCompetitivePump();
+    audio.stopMusic();
+    currentMusicMatchId = null;
+    resetPresentation();
     competitive?.disconnect();
     competitive = null;
     spectator?.channel.leave?.();
@@ -511,6 +587,7 @@ export async function bootstrap(): Promise<void> {
     activeMatch = null;
     practice = null;
     lastScrambleActive = false;
+    shell.setScrambled(false);
     announcedConfigHash = null;
     shell.overlay.hidden = true;
   };
@@ -518,6 +595,7 @@ export async function bootstrap(): Promise<void> {
   const showLobby = (): void => {
     leaveRuntime();
     mode = "lobby";
+    audio.startMenuMusic();
     shell.show("lobby");
     shell.readyButton.hidden = false;
     shell.pausePracticeButton.hidden = true;
@@ -528,12 +606,19 @@ export async function bootstrap(): Promise<void> {
 
   const showResult = (result: MatchResultV1, localPlayerId: string | null): void => {
     if (resultShownFor === result.matchId && mode === "results") return;
+    stopCompetitivePump();
+    audio.stopMusic();
+    currentMusicMatchId = null;
     resultShownFor = result.matchId;
     mode = "results";
+    lastScrambleActive = false;
+    shell.setScrambled(false);
     const seatA = result.players[0];
     const seatB = result.players[1];
     const localSeat = localPlayerId === seatA?.id ? "seat-a" : localPlayerId === seatB?.id ? "seat-b" : null;
-    if (result.outcome === "draw") shell.resultsHeading.textContent = STRINGS["results.draw"];
+    if (result.reason === "connection-lost") {
+      shell.resultsHeading.textContent = STRINGS["results.connectionLost"];
+    } else if (result.outcome === "draw") shell.resultsHeading.textContent = STRINGS["results.draw"];
     else if (result.outcome === "desync") shell.resultsHeading.textContent = STRINGS["results.desync"];
     else if (localSeat === null) shell.resultsHeading.textContent = result.outcome === "seat-a" ? seatA?.displayName ?? STRINGS["results.victory"] : seatB?.displayName ?? STRINGS["results.victory"];
     else shell.resultsHeading.textContent = result.outcome === localSeat ? STRINGS["results.victory"] : STRINGS["results.defeat"];
@@ -550,7 +635,13 @@ export async function bootstrap(): Promise<void> {
     ]);
     shell.rematchButton.hidden = activeMatch?.role === "spectator" || activeMatch === null;
     shell.show("results");
-    audio.play(result.outcome === "draw" ? "draw" : localSeat !== null && result.outcome === localSeat ? "victory" : "defeat");
+    audio.play(
+      result.outcome === "draw" || result.reason === "connection-lost"
+        ? "draw"
+        : localSeat !== null && result.outcome === localSeat
+          ? "victory"
+          : "defeat",
+    );
   };
 
   const showPracticeResult = (snapshot: SimulationSnapshot): void => {
@@ -562,6 +653,10 @@ export async function bootstrap(): Promise<void> {
       // Practice score is a non-authoritative convenience cache.
     }
     mode = "results";
+    lastScrambleActive = false;
+    shell.setScrambled(false);
+    audio.stopMusic();
+    currentMusicMatchId = null;
     shell.resultsHeading.textContent = snapshot.player.score > previous
       ? STRINGS["results.newHighScore"]
       : STRINGS["results.practiceOver"];
@@ -580,15 +675,29 @@ export async function bootstrap(): Promise<void> {
   };
 
   const processEffects = (effects: readonly SimulationEffect[], pan = -0.45): void => {
+    presentationRouter.consumeSimulationEffects(
+      effects,
+      pan <= 0 ? "left" : "right",
+    );
     for (const effect of effects) {
       if (effect.kind === "piece-locked") audio.play("lock", { pan });
       else if (effect.kind === "t-spin") audio.play("t-spin", { pan });
-      else if (effect.kind === "line-clear") {
+      else if (effect.kind === "line-clear" && effect.phase === "impact") {
         const cue: AudioCue = effect.rows === 1 ? "single" : effect.rows === 2 ? "double" : effect.rows === 3 ? "triple" : "four-line";
         audio.play(cue, { pan });
       } else if (effect.kind === "garbage-rise") audio.play("garbage-rise", { pan });
       else if (effect.kind === "hollow-cross" || effect.kind === "glitch-piece") audio.play("special-trigger", { pan });
-      else if (effect.kind === "power-activated" && effect.power !== undefined) audio.play(cueForPower(effect.power), { pan });
+      else if (effect.kind === "power-activated" && effect.power !== undefined) {
+        audio.play(cueForPower(effect.power), { pan });
+        if (
+          effect.power === "nuke" ||
+          effect.power === "collapse" ||
+          effect.power === "blackout" ||
+          effect.power === "scramble"
+        ) {
+          audio.duckMusic();
+        }
+      }
       else if (effect.kind === "top-out" && mode === "practice" && practice !== null) showPracticeResult(practice.readSnapshot());
     }
   };
@@ -625,17 +734,21 @@ export async function bootstrap(): Promise<void> {
   };
 
   const keyboard = new KeyboardInput(window, ({ action }) => dispatchInput(action));
-  const gestures = new GestureInput(shell.left.boardTarget, ({ action }) => dispatchInput(action), {
+  const gameplayGestures = new GestureInput(shell.container, ({ action }) => dispatchInput(action), {
     getCellSize: () => latestLayout?.left.cellSize ?? 24,
+    shouldStart: (event) => isGameplayGestureTarget(event.target),
   });
 
   const setInputsEnabled = (enabled: boolean): void => {
     keyboard.setEnabled(enabled);
-    gestures.setEnabled(enabled && preferences.touchControls === "gestures");
+    const gesturesEnabled = enabled && preferences.touchControls === "gestures";
+    gameplayGestures.setEnabled(gesturesEnabled);
+    shell.container.classList.toggle("gestures-active", gesturesEnabled);
     shell.left.pane.setAttribute("aria-disabled", String(!enabled));
   };
 
   const restoreCompletedMatch = (match: ActiveMatch, result: MatchResultV1): void => {
+    stopCompetitivePump();
     competitive?.disconnect();
     competitive = null;
     spectator?.channel.leave?.();
@@ -643,6 +756,7 @@ export async function bootstrap(): Promise<void> {
     practice = null;
     activeMatch = match;
     lastScrambleActive = false;
+    shell.setScrambled(false);
     announcedConfigHash = null;
     shell.readyButton.hidden = true;
     shell.pausePracticeButton.hidden = true;
@@ -660,11 +774,14 @@ export async function bootstrap(): Promise<void> {
     practiceAccumulator = 0;
     lastLocalLevel = 1;
     warnedUpcomingPower = null;
+    const practiceSeed = createRuntimeId();
     practice = createSimulation({
-      seed: createRuntimeId(),
+      seed: practiceSeed,
       playerId: selfActor.id,
       practice: true,
     });
+    audio.startMusic(practiceSeed, 0);
+    currentMusicMatchId = `practice:${practiceSeed}`;
     shell.arena.dataset.mode = "practice";
     shell.left.pane.classList.add("is-local");
     shell.left.boardTarget.setAttribute("aria-label", STRINGS["match.localBoard"]);
@@ -693,9 +810,26 @@ export async function bootstrap(): Promise<void> {
     return { channel, snapshots, matchId: match.matchId };
   };
 
-  const phaseText = (phase: CompetitivePhase, countdownTicks: number): string => {
-    if (phase === "countdown") return countdownText(Math.max(1, Math.ceil(countdownTicks / RULES.timing.ticksPerSecond)));
-    if (phase === "network-pause") return STRINGS["match.reconnecting"];
+  const phaseText = (
+    phase: CompetitivePhase,
+    countdownTicks: number,
+    connectionStatus: CompetitiveConnectionStatus = "connected",
+    resuming = false,
+  ): string => {
+    if (phase === "countdown") {
+      const seconds = Math.max(
+        1,
+        Math.ceil(countdownTicks / RULES.timing.ticksPerSecond),
+      );
+      return resuming
+        ? formatString("match.resuming", { seconds })
+        : countdownText(seconds);
+    }
+    if (phase === "network-pause") {
+      return connectionStatus === "unstable"
+        ? STRINGS["match.connectionUnstable"]
+        : STRINGS["match.reconnecting"];
+    }
     if (phase === "version-mismatch") return STRINGS["match.versionMismatch"];
     if (phase === "desynchronized") return STRINGS["match.desynchronization"];
     if (phase === "synchronizing") return STRINGS["match.waitingForReady"];
@@ -703,6 +837,10 @@ export async function bootstrap(): Promise<void> {
   };
 
   const startActiveMatch = (match: ActiveMatch): void => {
+    stopCompetitivePump();
+    audio.stopMusic();
+    currentMusicMatchId = null;
+    resetPresentation();
     // Join the replacement channel before retiring the old one. Besides
     // avoiding a receive gap, this supports hosts that reject a rejoin after a
     // channel has already been explicitly trashed.
@@ -712,6 +850,7 @@ export async function bootstrap(): Promise<void> {
     spectator = null;
     practice = null;
     lastScrambleActive = false;
+    shell.setScrambled(false);
     announcedConfigHash = null;
     lastCountdownSecond = 0;
     lastLocalLevel = 1;
@@ -736,6 +875,8 @@ export async function bootstrap(): Promise<void> {
 
     if (match.role === "spectator") {
       mode = "spectator";
+      audio.startMusic(match.challenge.challengeId, match.round - 1);
+      currentMusicMatchId = match.matchId;
       spectator = spectatorRuntime(match);
       retirePrevious();
       shell.left.pane.classList.remove("is-local");
@@ -777,11 +918,27 @@ export async function bootstrap(): Promise<void> {
       rulesHash: RULES_HASH,
       clock: { now: () => performance.now() },
       transport: makeRealtimeTransport(channel),
+      diagnostics: networkDiagnostics,
       onPhaseChange: (phase) => {
         const view = competitive?.view();
+        if (phase === "countdown" || phase === "playing") {
+          if (currentMusicMatchId !== match.matchId) {
+            audio.startMusic(match.challenge.challengeId, match.round - 1);
+            currentMusicMatchId = match.matchId;
+          } else {
+            audio.resumeMusic();
+          }
+        } else if (phase === "network-pause") {
+          audio.pauseMusic();
+        }
         shell.readyButton.hidden = phase !== "lobby";
         shell.overlay.hidden = phase === "playing" || phase === "finished";
-        shell.overlayText.textContent = phaseText(phase, view?.countdownTicks ?? 0);
+        shell.overlayText.textContent = phaseText(
+          phase,
+          view?.countdownTicks ?? 0,
+          view?.connectionStatus,
+          view?.resuming,
+        );
         setInputsEnabled(phase === "playing");
       },
       onRemoteBlackout: () => {
@@ -789,6 +946,12 @@ export async function bootstrap(): Promise<void> {
       },
       onIncomingGarbage: () => {
         audio.play("garbage-warning", { pan: 0.45 });
+      },
+      onIncomingAttack: (kind, eventId, value) => {
+        presentationRouter.consumeIncomingAttack(kind, eventId, value);
+      },
+      onTransportRecoveryNeeded: () => {
+        resumeCompetitiveTransport();
       },
       onSimulationEffects: (effects) => {
         processEffects(effects, -0.45);
@@ -806,6 +969,7 @@ export async function bootstrap(): Promise<void> {
       },
     });
     competitive.start();
+    startCompetitivePump();
     setInputsEnabled(false);
     shell.overlay.hidden = false;
     shell.overlayText.textContent = STRINGS["match.waitingForReady"];
@@ -937,8 +1101,10 @@ export async function bootstrap(): Promise<void> {
       const row = document.createElement("li");
       row.className = "history-item";
       const players = item.result.players.map((player) => player.displayName).join(" · ");
-      const outcome = item.conflicted
-        ? STRINGS["results.desync"]
+      const outcome = item.result.reason === "connection-lost"
+        ? STRINGS["results.connectionLostHistory"]
+        : item.conflicted
+          ? STRINGS["results.desync"]
         : item.result.outcome === "draw"
           ? STRINGS["results.draw"]
           : item.result.players[item.result.outcome === "seat-a" ? 0 : 1]?.displayName ?? STRINGS["results.desync"];
@@ -1024,10 +1190,49 @@ export async function bootstrap(): Promise<void> {
   shell.controlsHelpButton.addEventListener("click", () => showHelp(shell, "controls"));
   shell.helpBack.addEventListener("click", () => shell.show("lobby"));
   shell.settingsButton.addEventListener("click", () => shell.show("settings"));
+  shell.diagnosticsCopyButton.addEventListener("click", () => {
+    const copy = async (): Promise<boolean> => {
+      const text = networkDiagnostics.copyText();
+      try {
+        if (navigator.clipboard?.writeText !== undefined) {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+      } catch {
+        // The synchronous selection fallback below works in older WebViews.
+      }
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.readOnly = true;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.append(textarea);
+      textarea.select();
+      let copied = false;
+      try {
+        copied = document.execCommand("copy");
+      } catch {
+        copied = false;
+      }
+      textarea.remove();
+      return copied;
+    };
+    void copy().then((copied) => {
+      shell.diagnosticsStatus.textContent = copied
+        ? STRINGS["settings.diagnosticsCopied"]
+        : STRINGS["settings.diagnosticsCopyFailed"];
+    });
+  });
+  shell.diagnosticsClearButton.addEventListener("click", () => {
+    networkDiagnostics.clear();
+    shell.diagnosticsStatus.textContent = STRINGS["settings.diagnosticsCleared"];
+  });
   shell.settingsBack.addEventListener("click", () => {
     preferences = {
-      audioEnabled: shell.settingsInputs.audioEnabled.checked,
-      volume: Number(shell.settingsInputs.volume.value),
+      effectsEnabled: shell.settingsInputs.effectsEnabled.checked,
+      effectsVolume: Number(shell.settingsInputs.effectsVolume.value),
+      musicEnabled: shell.settingsInputs.musicEnabled.checked,
+      musicVolume: Number(shell.settingsInputs.musicVolume.value),
       vibration: shell.settingsInputs.vibration.checked,
       touchControls: shell.settingsInputs.touchControls.value === "buttons" ? "buttons" : "gestures",
       colorPalette: shell.settingsInputs.colorPalette.value === "colorblind" ? "colorblind" : "standard",
@@ -1096,6 +1301,8 @@ export async function bootstrap(): Promise<void> {
     if (practice === null) return;
     practicePaused = !practicePaused;
     practice.setPaused(practicePaused);
+    if (practicePaused) audio.pauseMusic();
+    else audio.resumeMusic();
     shell.pausePracticeButton.textContent = practicePaused
       ? STRINGS["controls.resumeShort"]
       : STRINGS["controls.pauseShort"];
@@ -1216,6 +1423,7 @@ export async function bootstrap(): Promise<void> {
 
   document.addEventListener("visibilitychange", () => {
     const hidden = document.visibilityState === "hidden";
+    if (hidden) audio.pauseMusic();
     if (mode === "practice" && practice !== null) {
       practicePaused = hidden || practicePaused;
       practice.setPaused(practicePaused);
@@ -1225,7 +1433,20 @@ export async function bootstrap(): Promise<void> {
       }
     } else if (mode === "competitive") {
       if (hidden) competitive?.setHidden(true);
-      else resumeCompetitiveTransport();
+      else {
+        audio.resumeMusic();
+        resumeCompetitiveTransport();
+      }
+    } else if (!hidden && mode === "spectator") {
+      audio.resumeMusic();
+    }
+    if (
+      !hidden &&
+      mode !== "competitive" &&
+      mode !== "spectator" &&
+      (mode !== "practice" || !practicePaused)
+    ) {
+      audio.resumeMusic();
     }
   });
   window.addEventListener("keydown", (event) => {
@@ -1240,8 +1461,8 @@ export async function bootstrap(): Promise<void> {
       shell.pausePracticeButton.click();
     }
   });
-  window.addEventListener("pointerdown", () => void audio.unlock(), { once: true });
-  window.addEventListener("keydown", () => void audio.unlock(), { once: true });
+  window.addEventListener("pointerdown", () => void audio.unlock());
+  window.addEventListener("keydown", () => void audio.unlock());
 
   const renderFrame = (now: number): void => {
     const elapsed = Math.min(250, Math.max(0, now - lastFrameMs));
@@ -1249,6 +1470,7 @@ export async function bootstrap(): Promise<void> {
     let leftBoard = null;
     let rightBoard = null;
     let renderMode: "practice" | "versus" = "versus";
+    let musicIntensity: MusicIntensity = "calm";
 
     if (mode === "practice" && practice !== null) {
       if (!practicePaused) {
@@ -1259,14 +1481,15 @@ export async function bootstrap(): Promise<void> {
         }
       }
       const snapshot = practice.readSnapshot();
+      musicIntensity = musicIntensityFor(snapshot);
       processSnapshotAudio(snapshot);
       leftBoard = boardModelFromSimulation(snapshot, true, false);
       updateHud(shell.left, selfActor.displayName, snapshot);
       shell.left.blackout.hidden = true;
       renderMode = "practice";
     } else if (mode === "competitive" && competitive !== null && activeMatch !== null) {
-      competitive.pump();
       const view = competitive.view();
+      musicIntensity = musicIntensityFor(view.local);
       processSnapshotAudio(view.local);
       if (view.phase === "countdown") {
         const second = Math.max(
@@ -1293,9 +1516,19 @@ export async function bootstrap(): Promise<void> {
       shell.left.blackout.hidden = true;
       shell.right.blackout.hidden = !remoteConcealed;
       shell.overlay.hidden = view.phase === "playing" || view.phase === "finished";
-      if (!shell.overlay.hidden) shell.overlayText.textContent = phaseText(view.phase, view.countdownTicks);
+      if (!shell.overlay.hidden) {
+        shell.overlayText.textContent = phaseText(
+          view.phase,
+          view.countdownTicks,
+          view.connectionStatus,
+          view.resuming,
+        );
+      }
       const scrambled = view.local?.player.statuses.some((status) => status.kind === "scramble") ?? false;
-      if (scrambled && !lastScrambleActive) keyboard.releaseHorizontal();
+      if (scrambled !== lastScrambleActive) {
+        keyboard.releaseHorizontal();
+        shell.setScrambled(scrambled);
+      }
       lastScrambleActive = scrambled;
       if (view.result !== undefined) showResult(view.result, selfActor.id);
       if (
@@ -1334,9 +1567,26 @@ export async function bootstrap(): Promise<void> {
       shell.left.blackout.hidden = !leftConcealed;
       shell.right.blackout.hidden = !rightConcealed;
       if (left !== undefined || right !== undefined) shell.overlay.hidden = true;
+      const spectatorIncoming = [...(left?.incomingGarbage ?? []), ...(right?.incomingGarbage ?? [])]
+        .reduce((total, packet) => total + packet.rows, 0);
+      const spectatorLevel = Math.max(left?.level ?? 1, right?.level ?? 1);
+      musicIntensity = spectatorIncoming >= 6
+        ? "danger"
+        : spectatorIncoming >= 3 || spectatorLevel >= 4
+          ? "building"
+          : "calm";
     }
 
-    renderer?.render({ mode: renderMode, left: leftBoard, right: rightBoard }, now);
+    audio.updateMusic(musicIntensity);
+    renderer?.render(
+      {
+        mode: renderMode,
+        left: leftBoard,
+        right: rightBoard,
+        presentation: presentationTimeline.frameAt(now),
+      },
+      now,
+    );
     window.requestAnimationFrame(renderFrame);
   };
 
@@ -1349,6 +1599,7 @@ export async function bootstrap(): Promise<void> {
       : "";
   shell.pausePracticeButton.hidden = true;
   shell.show("lobby");
+  audio.startMenuMusic();
   renderHistory();
   setInputsEnabled(false);
   window.requestAnimationFrame(renderFrame);

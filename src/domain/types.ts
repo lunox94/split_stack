@@ -148,7 +148,7 @@ export type MatchPhase =
   | "finished";
 
 export interface MatchState {
-  rulesVersion: 1;
+  rulesVersion: 2;
   matchId: string;
   seed: string;
   tick: Tick;
@@ -171,7 +171,12 @@ export interface MatchResultV1 {
   seedHash: string;
   players: Array<{ id: string; displayName: string }>;
   outcome: "seat-a" | "seat-b" | "draw" | "desync";
-  reason: "top-out" | "forfeit" | "simultaneous" | "desynchronization";
+  reason:
+    | "top-out"
+    | "forfeit"
+    | "simultaneous"
+    | "desynchronization"
+    | "connection-lost";
   durationTicks: number;
   finalLevel: number;
   statsByPlayer: Record<string, PlayerResultStats>;

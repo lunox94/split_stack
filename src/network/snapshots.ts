@@ -393,7 +393,6 @@ export function isPlayerSnapshot(value: unknown): value is PlayerSnapshotV1 {
     (candidate.comboIndex ?? -2) < -1 ||
     typeof candidate.backToBack !== "boolean" ||
     !isCounter(candidate.powerCharge ?? -1) ||
-    candidate.powerCharge! > RULES.power.threshold ||
     !isCounter(candidate.powerDeckCursor ?? -1) ||
     !Number.isSafeInteger(candidate.stateHash) ||
     (candidate.stateHash ?? -1) < 0 ||

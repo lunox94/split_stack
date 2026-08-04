@@ -81,6 +81,49 @@ describe("durable match history", () => {
     expect(view.tallies).toEqual([]);
   });
 
+  it("keeps a connection-loss result in recent history without changing tallies", () => {
+    const history = new HistoryMaterializer();
+    const interrupted = result("match-disconnected", "desync");
+    interrupted.reason = "connection-lost";
+
+    expect(history.apply({ serial: 1, payload: interrupted })).toBe(true);
+    expect(history.view()).toMatchObject({
+      latest: [
+        {
+          result: {
+            matchId: "match-disconnected",
+            outcome: "desync",
+            reason: "connection-lost",
+          },
+        },
+      ],
+      tallies: [],
+    });
+  });
+
+  it("preserves a neutral connection-loss label across peer result variants", () => {
+    const history = new HistoryMaterializer();
+    const first = result("match-disconnected-variants", "desync");
+    first.reason = "connection-lost";
+    const second = structuredClone(first);
+    second.durationTicks += 2;
+    second.statsByPlayer.bob!.score += 10;
+
+    history.apply({ serial: 1, payload: first });
+    history.apply({ serial: 2, payload: second });
+
+    expect(history.view()).toMatchObject({
+      latest: [
+        {
+          conflicted: true,
+          variantCount: 2,
+          result: { outcome: "desync", reason: "connection-lost" },
+        },
+      ],
+      tallies: [],
+    });
+  });
+
   it("ignores malformed result statistics instead of materializing partial history", () => {
     const history = new HistoryMaterializer();
     const malformed = result("match-1", "seat-a") as unknown as {

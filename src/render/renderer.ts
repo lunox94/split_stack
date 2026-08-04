@@ -1,5 +1,6 @@
 import {
   ACESFilmicToneMapping,
+  AdditiveBlending,
   AmbientLight,
   BufferGeometry,
   CanvasTexture,
@@ -17,6 +18,8 @@ import {
   OrthographicCamera,
   RepeatWrapping,
   Scene,
+  Shape,
+  ShapeGeometry,
   SRGBColorSpace,
   type Texture,
   Vector3,
@@ -26,6 +29,11 @@ import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeom
 
 import { RULES } from "../config/rules";
 import type { CellKind, PlayerId, SpecialKind } from "../domain/types";
+import {
+  type PresentationEffect,
+  type PresentationFrame,
+} from "./presentation-timeline";
+import { SPECIAL_ICON_PATHS } from "./special-icons";
 import {
   QualityController,
   type EffectQuality,
@@ -48,12 +56,17 @@ export interface BoardRenderModel {
   readonly cells: readonly RenderCellModel[];
   readonly focused: boolean;
   readonly concealed: boolean;
+  readonly incomingGarbage?: number;
+  readonly barrierCapacity?: number;
+  readonly scrambled?: boolean;
+  readonly monominoRush?: boolean;
 }
 
 export interface GameRenderFrame {
   readonly mode: "versus" | "practice";
   readonly left: BoardRenderModel | null;
   readonly right: BoardRenderModel | null;
+  readonly presentation?: PresentationFrame;
 }
 
 export interface BoardViewport {
@@ -73,6 +86,89 @@ export interface RendererLayout {
   readonly left: BoardViewport;
   readonly right: BoardViewport | null;
   readonly dividerX: number | null;
+}
+
+export interface PresentationMotionTransform {
+  readonly garbageLift: number;
+  readonly transferTravel: number;
+  readonly nukeScale: number;
+  readonly collapseTravel: number;
+  readonly scrambleOscillation: number;
+}
+
+export function presentationMotionTransform(
+  effect: PresentationEffect,
+): PresentationMotionTransform {
+  if (effect.visualStyle === "fade") {
+    return {
+      garbageLift: 0,
+      transferTravel: 1,
+      nukeScale: 1,
+      collapseTravel: 0,
+      scrambleOscillation: 0,
+    };
+  }
+  return {
+    garbageLift: effect.moment === "lift" ? effect.stageProgress : 0,
+    transferTravel: effect.moment === "travel"
+      ? Math.max(0, Math.min(1, (effect.stageProgress - 0.36) / 0.64))
+      : effect.moment === "charge" ? 0 : 1,
+    nukeScale: effect.moment === "shockwave"
+      ? 1 + effect.stageProgress * 0.38
+      : 0.9 + Math.sin(effect.progress * Math.PI * 12) * 0.035,
+    collapseTravel: effect.kind === "collapse"
+      ? effect.moment === "fall"
+        ? 1 - effect.stageProgress
+        : effect.stage === "anticipation" ? 1 : 0
+      : 1 - effect.stageProgress,
+    scrambleOscillation: Math.sin(effect.progress * Math.PI * 18),
+  };
+}
+
+export function collapseCellVisualRow(
+  effect: PresentationEffect,
+  column: number,
+  destinationRow: number,
+): number {
+  if (effect.kind !== "collapse") return destinationRow;
+  const movement = effect.movements?.find(
+    (candidate) =>
+      candidate.to.x === column && candidate.to.y === destinationRow,
+  );
+  if (movement === undefined) return destinationRow;
+  const remaining = presentationMotionTransform(effect).collapseTravel;
+  return movement.to.y - (movement.to.y - movement.from.y) * remaining;
+}
+
+export function garbageCellVisualRow(
+  effect: PresentationEffect,
+  destinationRow: number,
+): number {
+  if (effect.kind !== "garbage-rise" || effect.visualStyle === "fade") {
+    return destinationRow;
+  }
+  const rows = Math.max(0, effect.rowCount ?? 0);
+  const remaining = effect.moment === "pressure"
+    ? 1
+    : effect.moment === "lift" ? 1 - effect.stageProgress : 0;
+  return destinationRow + rows * remaining;
+}
+
+function boardMovementEffectFor(
+  presentation: PresentationFrame | undefined,
+  board: "left" | "right",
+): PresentationEffect | undefined {
+  if (presentation === undefined) return undefined;
+  for (let index = presentation.effects.length - 1; index >= 0; index -= 1) {
+    const effect = presentation.effects[index];
+    if (
+      effect?.board === board &&
+      (effect.kind === "collapse" || effect.kind === "garbage-rise")
+    ) {
+      return effect;
+    }
+  }
+  return undefined;
 }
 
 export interface ThreeRendererOptions {
@@ -123,12 +219,28 @@ const COLORBLIND_COLORS: Record<RenderCellKind, number> = {
 };
 
 const MAX_INSTANCES_PER_POOL = 512;
+export const MAX_PRESENTATION_PARTICLES = 96;
 const BOARD_GUTTER_PX = 12;
 const VERTICAL_GUTTER_PX = 16;
 
 interface CellPool {
   readonly mesh: InstancedMesh;
   readonly material: MeshStandardMaterial;
+}
+
+interface EffectPool {
+  readonly mesh: InstancedMesh;
+  readonly material: MeshBasicMaterial;
+}
+
+function createAcidDropGeometry(): ShapeGeometry {
+  const drop = new Shape();
+  drop.moveTo(0, 0.56);
+  drop.bezierCurveTo(0.08, 0.34, 0.43, 0.03, 0.43, -0.24);
+  drop.bezierCurveTo(0.43, -0.49, 0.24, -0.62, 0, -0.62);
+  drop.bezierCurveTo(-0.24, -0.62, -0.43, -0.49, -0.43, -0.24);
+  drop.bezierCurveTo(-0.43, 0.03, -0.08, 0.34, 0, 0.56);
+  return new ShapeGeometry(drop, 5);
 }
 
 interface BoardPanel {
@@ -208,7 +320,10 @@ export class ThreeRenderer {
   readonly #camera = new OrthographicCamera(0, 1, 1, 0, -100, 100);
   readonly #renderer: WebGLRenderer;
   readonly #cellGeometry = new RoundedBoxGeometry(1, 1, 0.18, 2, 0.06);
+  readonly #acidGeometry = createAcidDropGeometry();
+  readonly #effectGeometry = createUnitPanelGeometry();
   readonly #pools = new Map<string, CellPool>();
+  readonly #effectPools = new Map<string, EffectPool>();
   readonly #textures = new Map<string, Texture>();
   readonly #matrix = new Matrix4();
   readonly #position = new Vector3();
@@ -221,6 +336,8 @@ export class ThreeRenderer {
   #disposed = false;
   #pixelRatio = 0;
   #palette: "standard" | "colorblind" = "standard";
+  #effectInstanceCount = 0;
+  #frameTimestampMs = 0;
 
   constructor(canvas: HTMLCanvasElement, options: ThreeRendererOptions = {}) {
     this.#canvas = canvas;
@@ -292,7 +409,7 @@ export class ThreeRenderer {
     if (this.#palette === palette) return;
     this.#palette = palette;
     for (const [key, pool] of this.#pools) {
-      const [kind, , special] = key.split(":") as [
+      const [kind, role, special] = key.split(":") as [
         RenderCellKind,
         RenderCellRole,
         string,
@@ -301,7 +418,9 @@ export class ThreeRenderer {
       if (special !== "ordinary") color.offsetHSL(0, 0.08, 0.18);
       pool.material.color.copy(color);
       pool.material.emissive.setHex(
-        special === "ordinary" ? 0x000000 : color.clone().multiplyScalar(0.42).getHex(),
+        special === "ordinary"
+          ? 0x000000
+          : color.clone().multiplyScalar(role === "ghost" ? 0.1 : 0.28).getHex(),
       );
       pool.material.needsUpdate = true;
     }
@@ -317,19 +436,40 @@ export class ThreeRenderer {
     }
     if (!this.#quality.shouldRender(timestampMs)) return;
 
+    this.#frameTimestampMs = timestampMs;
     this.#resize(frame.mode);
     for (const [key, pool] of this.#pools) {
       pool.mesh.count = 0;
       if (!key.endsWith(":ordinary")) {
+        const role = key.split(":")[1];
         pool.material.emissiveIntensity =
-          this.#quality.profile.effects === "reduced"
-            ? 0.85
+          role === "ghost"
+            ? 0.18
+            : this.#quality.profile.effects === "reduced"
+              ? 0.72
             : 0.85 + Math.sin(timestampMs / 180) * 0.2;
       }
     }
-    this.#drawBoard(frame.left, this.#layout.left, this.#panels[0]);
-    this.#drawBoard(frame.right, this.#layout.right, this.#panels[1]);
+    for (const pool of this.#effectPools.values()) pool.mesh.count = 0;
+    this.#effectInstanceCount = 0;
+    this.#scene.position.set(0, 0, 0);
+    this.#drawBoard(
+      frame.left,
+      this.#layout.left,
+      this.#panels[0],
+      boardMovementEffectFor(frame.presentation, "left"),
+    );
+    this.#drawBoard(
+      frame.right,
+      this.#layout.right,
+      this.#panels[1],
+      boardMovementEffectFor(frame.presentation, "right"),
+    );
+    this.#drawPresentation(frame.presentation);
     for (const pool of this.#pools.values()) {
+      pool.mesh.instanceMatrix.needsUpdate = true;
+    }
+    for (const pool of this.#effectPools.values()) {
       pool.mesh.instanceMatrix.needsUpdate = true;
     }
     this.#renderer.render(this.#scene, this.#camera);
@@ -342,9 +482,13 @@ export class ThreeRenderer {
     this.#canvas.removeEventListener("webglcontextrestored", this.#onContextRestored);
     for (const pool of this.#pools.values()) pool.material.dispose();
     this.#pools.clear();
+    for (const pool of this.#effectPools.values()) pool.material.dispose();
+    this.#effectPools.clear();
     for (const texture of this.#textures.values()) texture.dispose();
     this.#textures.clear();
     this.#cellGeometry.dispose();
+    this.#acidGeometry.dispose();
+    this.#effectGeometry.dispose();
     for (const panel of this.#panels) {
       panel.fill.geometry.dispose();
       panel.fill.material.dispose();
@@ -394,6 +538,7 @@ export class ThreeRenderer {
     board: BoardRenderModel | null,
     viewport: BoardViewport | null,
     panel: BoardPanel,
+    movementEffect?: PresentationEffect,
   ): void {
     const visible = board !== null && viewport !== null;
     panel.fill.visible = visible;
@@ -410,10 +555,15 @@ export class ThreeRenderer {
     panel.border.material.opacity = board.focused ? 1 : 0.65;
 
     if (board.concealed) return;
-    for (const cell of board.cells) this.#drawCell(cell, viewport);
+    for (const cell of board.cells) this.#drawCell(cell, viewport, movementEffect);
+    this.#drawBoardStatus(board, viewport);
   }
 
-  #drawCell(cell: RenderCellModel, viewport: BoardViewport): void {
+  #drawCell(
+    cell: RenderCellModel,
+    viewport: BoardViewport,
+    movementEffect?: PresentationEffect,
+  ): void {
     if (
       cell.column < 0 ||
       cell.column >= RULES.board.width ||
@@ -425,7 +575,12 @@ export class ThreeRenderer {
     const pool = this.#poolFor(cell);
     if (pool.mesh.count >= MAX_INSTANCES_PER_POOL) return;
 
-    const visibleRow = cell.row - RULES.board.hiddenRows;
+    const visualRow = movementEffect?.kind === "collapse"
+      ? collapseCellVisualRow(movementEffect, cell.column, cell.row)
+      : movementEffect?.kind === "garbage-rise"
+        ? garbageCellVisualRow(movementEffect, cell.row)
+        : cell.row;
+    const visibleRow = visualRow - RULES.board.hiddenRows;
     const x = viewport.boardX + (cell.column + 0.5) * viewport.cellSize;
     const top = viewport.boardY + (visibleRow + 0.5) * viewport.cellSize;
     const y = this.#layout.height - top;
@@ -439,6 +594,435 @@ export class ThreeRenderer {
     this.#matrix.compose(this.#position, this.#camera.quaternion, this.#scale);
     pool.mesh.setMatrixAt(pool.mesh.count, this.#matrix);
     pool.mesh.count += 1;
+    if (cell.special !== undefined) {
+      const ghost = cell.role === "ghost";
+      const pulse = this.#quality.profile.effects === "reduced"
+        ? 0.42
+        : 0.48 + Math.sin(this.#frameTimestampMs / 180) * 0.14;
+      const opacity = ghost ? 0.13 : pulse;
+      const span = viewport.cellSize * (ghost ? 0.68 : 0.86);
+      const edge = viewport.cellSize * 0.055;
+      const color = this.#colors()[cell.kind];
+      for (const [rimX, rimY, width, height] of [
+        [x, y - span / 2, span, edge],
+        [x, y + span / 2, span, edge],
+        [x - span / 2, y, edge, span],
+        [x + span / 2, y, edge, span],
+      ] as const) {
+        this.#drawEffectRect(
+          `special-rim-${cell.role}-${cell.special}`,
+          color,
+          rimX,
+          rimY,
+          width,
+          height,
+          opacity,
+        );
+      }
+    }
+  }
+
+  #drawBoardStatus(board: BoardRenderModel, viewport: BoardViewport): void {
+    const bottomY = this.#layout.height - (viewport.boardY + viewport.boardHeight);
+    const incoming = Math.max(0, board.incomingGarbage ?? 0);
+    if (incoming > 0) {
+      const strength = Math.min(1, incoming / 4);
+      this.#drawEffectRect(
+        "garbage-pressure",
+        0xff755d,
+        viewport.boardX + viewport.boardWidth / 2,
+        bottomY - viewport.cellSize * 0.12,
+        viewport.boardWidth,
+        viewport.cellSize * (0.12 + strength * 0.18),
+        0.25 + strength * 0.45,
+      );
+    }
+
+    const capacity = Math.max(0, Math.min(4, board.barrierCapacity ?? 0));
+    if (capacity > 0) {
+      const gap = viewport.cellSize * 0.12;
+      const segmentWidth = (viewport.boardWidth - gap * 3) / 4;
+      for (let segment = 0; segment < 4; segment += 1) {
+        this.#drawEffectRect(
+          segment < capacity ? "barrier-active" : "barrier-empty",
+          segment < capacity ? 0x68eaff : 0x263c52,
+          viewport.boardX + segmentWidth / 2 + segment * (segmentWidth + gap),
+          bottomY + viewport.cellSize * 0.08,
+          segmentWidth,
+          viewport.cellSize * 0.14,
+          segment < capacity ? 0.82 : 0.28,
+        );
+      }
+    }
+
+    if (board.scrambled === true) {
+      const width = viewport.cellSize * 0.1;
+      this.#drawEffectRect(
+        "scramble-edge",
+        0xff5cdb,
+        viewport.boardX + width / 2,
+        bottomY + viewport.boardHeight / 2,
+        width,
+        viewport.boardHeight,
+        0.72,
+      );
+      this.#drawEffectRect(
+        "scramble-edge",
+        0xff5cdb,
+        viewport.boardX + viewport.boardWidth - width / 2,
+        bottomY + viewport.boardHeight / 2,
+        width,
+        viewport.boardHeight,
+        0.72,
+      );
+    }
+
+    if (board.monominoRush === true) {
+      for (const cell of board.cells) {
+        if (cell.kind !== "monomino" || cell.role !== "active") continue;
+        const point = this.#cellPoint(viewport, cell.column, cell.row);
+        this.#drawEffectRect(
+          "monomino-trail",
+          0xc5f5ff,
+          point.x,
+          point.y + viewport.cellSize * 0.36,
+          viewport.cellSize * 0.28,
+          viewport.cellSize * 0.48,
+          0.34,
+        );
+      }
+    }
+  }
+
+  #drawPresentation(presentation: PresentationFrame | undefined): void {
+    if (presentation === undefined) return;
+    if (presentation.shake !== null && this.#quality.profile.screenShake) {
+      this.#scene.position.set(
+        presentation.shake.x * 3,
+        presentation.shake.y * 3,
+        0,
+      );
+    }
+    for (const effect of presentation.effects) {
+      const viewport = effect.board === "left" ? this.#layout.left : this.#layout.right;
+      if (viewport === null) continue;
+      this.#drawPresentationEffect(effect, viewport);
+    }
+  }
+
+  #drawPresentationEffect(
+    effect: PresentationEffect,
+    viewport: BoardViewport,
+  ): void {
+    const motion = presentationMotionTransform(effect);
+    const bottomY = this.#layout.height - (viewport.boardY + viewport.boardHeight);
+    const centerX = viewport.boardX + viewport.boardWidth / 2;
+    const centerY = bottomY + viewport.boardHeight / 2;
+    if (effect.kind === "line-clear") {
+      for (const row of effect.rows ?? []) {
+        const point = this.#cellPoint(viewport, 0, row);
+        const height = viewport.cellSize * (effect.visualStyle === "fade"
+          ? 0.28
+          : effect.moment === "compress" ? 1 - effect.stageProgress * 0.62 : 0.28);
+        this.#drawEffectRect(
+          "line-clear",
+          0xeaffff,
+          centerX,
+          point.y,
+          viewport.boardWidth,
+          height,
+          effect.flash ? 0.92 : 0.52,
+        );
+      }
+    } else if (effect.kind === "garbage-rise") {
+      const rows = Math.max(1, effect.rowCount ?? 1);
+      this.#drawEffectRect(
+        "garbage-rise",
+        0xff755d,
+        centerX,
+        bottomY - viewport.cellSize * 0.12 +
+          motion.garbageLift * rows * viewport.cellSize * 0.5,
+        viewport.boardWidth,
+        Math.min(rows, 4) * viewport.cellSize * 0.32,
+        0.58,
+      );
+    } else if (effect.kind === "offensive-transfer") {
+      const sourceViewport = effect.source === "left"
+        ? this.#layout.left
+        : this.#layout.right;
+      const targetViewport = effect.target === "left"
+        ? this.#layout.left
+        : this.#layout.right;
+      if (sourceViewport !== null && targetViewport !== null) {
+        const sourceX = sourceViewport.boardX + sourceViewport.boardWidth / 2;
+        const targetX = targetViewport.boardX + targetViewport.boardWidth / 2;
+        this.#drawEffectRect(
+          `transfer-${effect.attack ?? "power"}`,
+          effect.attack === "blackout" ? 0x7563ff : 0xb5ff62,
+          sourceX + (targetX - sourceX) * motion.transferTravel,
+          centerY,
+          viewport.cellSize * (0.55 + (effect.moment === "impact" ? 0.8 : 0)),
+          viewport.cellSize * 0.55,
+          0.82,
+        );
+      }
+    } else if (effect.kind === "nuke" && effect.center !== undefined) {
+      const point = this.#cellPoint(
+        viewport,
+        effect.center.column,
+        effect.center.row,
+      );
+      const size = viewport.cellSize * 5;
+      const scale = motion.nukeScale;
+      if (effect.moment === "shockwave") {
+        this.#drawEffectRect(
+          "nuke-shockwave",
+          0xffffff,
+          point.x,
+          point.y,
+          size * scale,
+          size * scale,
+          0.5,
+        );
+      } else {
+        const edge = viewport.cellSize * 0.09;
+        const span = size * scale;
+        for (const [x, y, width, height] of [
+          [point.x, point.y - span / 2, span, edge],
+          [point.x, point.y + span / 2, span, edge],
+          [point.x - span / 2, point.y, edge, span],
+          [point.x + span / 2, point.y, edge, span],
+        ] as const) {
+          this.#drawEffectRect(
+            "nuke-reticle",
+            0xffd35c,
+            x,
+            y,
+            width,
+            height,
+            0.82,
+          );
+        }
+      }
+      this.#drawParticleBurst(effect, viewport, point.x, point.y, 0xffd35c);
+    } else if (effect.kind === "acid-dissolve") {
+      for (const row of effect.resolvedRows ?? []) {
+        const point = this.#cellPoint(viewport, effect.column ?? 0, row);
+        const scale = effect.visualStyle === "fade"
+          ? 1
+          : Math.max(0.12, 1 - effect.stageProgress * 0.72);
+        this.#drawEffectRect(
+          "acid-dissolve",
+          0x75ff55,
+          point.x,
+          point.y,
+          viewport.cellSize * scale,
+          viewport.cellSize * scale,
+          0.7,
+        );
+      }
+    } else if (effect.kind === "collapse") {
+      const height = viewport.cellSize *
+        (effect.moment === "fall" ? 0.18 + effect.stageProgress * 0.45 : 0.2);
+      this.#drawEffectRect(
+        "collapse",
+        0x76d9ff,
+        centerX,
+        centerY - viewport.boardHeight * 0.35 * motion.collapseTravel,
+        viewport.boardWidth,
+        height,
+        0.42,
+      );
+      for (const row of effect.completedRows ?? []) {
+        const point = this.#cellPoint(viewport, 0, row);
+        this.#drawEffectRect(
+          "line-clear",
+          0xeaffff,
+          centerX,
+          point.y,
+          viewport.boardWidth,
+          viewport.cellSize * 0.25,
+          0.64,
+        );
+      }
+    } else if (effect.kind === "barrier") {
+      const capacity = Math.max(0, Math.min(4, effect.capacity ?? 4));
+      const width = viewport.boardWidth / 4;
+      for (let segment = 0; segment < capacity; segment += 1) {
+        this.#drawEffectRect(
+          "barrier-flare",
+          0x68eaff,
+          viewport.boardX + width * (segment + 0.5),
+          bottomY + viewport.cellSize * 0.08,
+          width * 0.82,
+          viewport.cellSize * 0.18,
+          0.9,
+        );
+      }
+    } else if (effect.kind === "blackout") {
+      const scale = effect.visualStyle === "fade"
+        ? 1
+        : Math.max(0.04, effect.stageProgress);
+      this.#drawEffectRect(
+        "blackout-veil",
+        0x02040a,
+        centerX,
+        centerY,
+        viewport.boardWidth * scale,
+        viewport.boardHeight,
+        0.86,
+        false,
+      );
+    } else if (effect.kind === "scramble") {
+      const offset = motion.scrambleOscillation * viewport.cellSize;
+      this.#drawEffectRect(
+        "scramble-glitch",
+        0xff5cdb,
+        centerX + offset,
+        centerY,
+        viewport.boardWidth,
+        viewport.cellSize * 0.16,
+        0.58,
+      );
+    } else if (effect.kind === "monomino-rush") {
+      if (effect.visualStyle === "fade") {
+        this.#drawEffectRect(
+          "monomino-fade",
+          0xc5f5ff,
+          centerX,
+          centerY,
+          viewport.cellSize * 1.4,
+          viewport.cellSize * 1.4,
+          0.45,
+        );
+      } else {
+        this.#drawParticleBurst(effect, viewport, centerX, centerY, 0xc5f5ff);
+      }
+    } else if (effect.kind === "acid-rain") {
+      if (effect.stage !== "follow-through") {
+        for (const column of [2, 5, 7]) {
+          this.#drawCell(
+            {
+              column,
+              row: RULES.board.hiddenRows + 1,
+              kind: "acid",
+              role: "active",
+            },
+            viewport,
+          );
+        }
+      }
+    } else if (effect.kind === "special-chain") {
+      for (const special of effect.resolvedSpecials ?? []) {
+        const point = this.#cellPoint(viewport, special.column, special.row);
+        const color = special.special === "garbage-core" ? 0xff755d : 0xb5ff62;
+        this.#drawEffectRect(
+          `special-${special.special}`,
+          color,
+          point.x,
+          point.y,
+          viewport.cellSize * 1.3,
+          viewport.cellSize * 1.3,
+          0.5,
+        );
+        this.#drawParticleBurst(
+          { ...effect, id: `${effect.id}:${special.row}:${special.column}` },
+          viewport,
+          point.x,
+          point.y,
+          color,
+        );
+      }
+    }
+  }
+
+  #drawParticleBurst(
+    effect: PresentationEffect,
+    viewport: BoardViewport,
+    centerX: number,
+    centerY: number,
+    color: number,
+  ): void {
+    const count = Math.min(effect.particleCount, MAX_PRESENTATION_PARTICLES);
+    let seed = 0;
+    for (let index = 0; index < effect.id.length; index += 1) {
+      seed = (seed * 33 + effect.id.charCodeAt(index)) >>> 0;
+    }
+    for (let index = 0; index < count; index += 1) {
+      const angle = ((seed + index * 2_654_435_761) >>> 0) / 0xffffffff * Math.PI * 2;
+      const radius = viewport.cellSize *
+        (0.25 + (index % 7) * 0.14) * (0.3 + effect.stageProgress * 1.8);
+      const size = viewport.cellSize * (0.06 + (index % 3) * 0.025);
+      this.#drawEffectRect(
+        `particles-${color}`,
+        color,
+        centerX + Math.cos(angle) * radius,
+        centerY + Math.sin(angle) * radius,
+        size,
+        size,
+        0.72,
+      );
+    }
+  }
+
+  #cellPoint(
+    viewport: BoardViewport,
+    column: number,
+    row: number,
+  ): { readonly x: number; readonly y: number } {
+    const visibleRow = row - RULES.board.hiddenRows;
+    return {
+      x: viewport.boardX + (column + 0.5) * viewport.cellSize,
+      y: this.#layout.height -
+        (viewport.boardY + (visibleRow + 0.5) * viewport.cellSize),
+    };
+  }
+
+  #drawEffectRect(
+    key: string,
+    color: number,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    opacity: number,
+    additive = true,
+  ): void {
+    if (this.#effectInstanceCount >= MAX_PRESENTATION_PARTICLES) return;
+    const pool = this.#effectPoolFor(key, color, additive);
+    if (pool.mesh.count >= MAX_PRESENTATION_PARTICLES) return;
+    pool.material.opacity = Math.max(0, Math.min(1, opacity));
+    this.#position.set(x, y, 3);
+    this.#scale.set(Math.max(0.01, width), Math.max(0.01, height), 1);
+    this.#matrix.compose(this.#position, this.#camera.quaternion, this.#scale);
+    pool.mesh.setMatrixAt(pool.mesh.count, this.#matrix);
+    pool.mesh.count += 1;
+    this.#effectInstanceCount += 1;
+  }
+
+  #effectPoolFor(key: string, color: number, additive: boolean): EffectPool {
+    const poolKey = `${key}:${additive ? "add" : "normal"}`;
+    const existing = this.#effectPools.get(poolKey);
+    if (existing !== undefined) return existing;
+    const material = new MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.65,
+      depthWrite: false,
+      ...(additive ? { blending: AdditiveBlending } : {}),
+    });
+    const mesh = new InstancedMesh(
+      this.#effectGeometry,
+      material,
+      MAX_PRESENTATION_PARTICLES,
+    );
+    mesh.count = 0;
+    mesh.frustumCulled = false;
+    mesh.instanceMatrix.setUsage(DynamicDrawUsage);
+    this.#scene.add(mesh);
+    const created = { mesh, material };
+    this.#effectPools.set(poolKey, created);
+    return created;
   }
 
   #poolFor(cell: RenderCellModel): CellPool {
@@ -453,7 +1037,9 @@ export class ThreeRenderer {
     const material = new MeshStandardMaterial({
       color: baseColor,
       map: isGhost ? null : this.#patternTexture(cell.kind, cell.special),
-      emissive: isSpecial ? baseColor.clone().multiplyScalar(0.42) : 0x000000,
+      emissive: isSpecial
+        ? baseColor.clone().multiplyScalar(isGhost ? 0.1 : 0.28)
+        : 0x000000,
       metalness: cell.kind === "garbage" ? 0.58 : 0.22,
       roughness: cell.kind === "garbage" ? 0.78 : 0.42,
       transparent: isGhost,
@@ -462,7 +1048,7 @@ export class ThreeRenderer {
       wireframe: isGhost,
     });
     const mesh = new InstancedMesh(
-      this.#cellGeometry,
+      cell.kind === "acid" ? this.#acidGeometry : this.#cellGeometry,
       material,
       MAX_INSTANCES_PER_POOL,
     );
@@ -598,39 +1184,16 @@ export class ThreeRenderer {
       context.strokeStyle = "rgba(9, 12, 22, 0.96)";
       context.fillStyle = "rgba(9, 12, 22, 0.96)";
       context.lineWidth = 4;
-      if (special === "column-bomb") {
-        context.beginPath();
-        context.moveTo(32, 20);
-        context.lineTo(32, 44);
-        context.stroke();
-        context.beginPath();
-        context.arc(32, 38, 5, 0, Math.PI * 2);
-        context.fill();
-      } else if (special === "garbage-core") {
-        context.strokeRect(23, 23, 18, 18);
-        context.beginPath();
-        context.moveTo(23, 32);
-        context.lineTo(41, 32);
-        context.moveTo(32, 23);
-        context.lineTo(32, 41);
-        context.stroke();
-      } else {
-        context.beginPath();
-        context.moveTo(22, 24);
-        context.lineTo(30, 31);
-        context.lineTo(24, 40);
-        context.moveTo(42, 24);
-        context.lineTo(34, 31);
-        context.lineTo(40, 40);
-        context.stroke();
-      }
+      context.stroke(new Path2D(SPECIAL_ICON_PATHS[special]));
     }
 
     const texture = new CanvasTexture(canvas);
     texture.colorSpace = SRGBColorSpace;
-    texture.wrapS = RepeatWrapping;
-    texture.wrapT = RepeatWrapping;
-    texture.repeat.set(1.25, 1.25);
+    if (special === undefined) {
+      texture.wrapS = RepeatWrapping;
+      texture.wrapT = RepeatWrapping;
+      texture.repeat.set(1.25, 1.25);
+    }
     this.#textures.set(textureKey, texture);
     return texture;
   }

@@ -64,12 +64,264 @@ describe("simulation facade", () => {
     });
 
     simulation.dispatch("hard-drop");
+    simulation.tick(9);
     const snapshot = simulation.readSnapshot();
 
     expect(snapshot.player.lines).toBe(1);
     expect(snapshot.player.score).toBe(100);
     expect(snapshot.player.powerCharge).toBe(1);
     expect(snapshot.player.comboIndex).toBe(0);
+  });
+
+  it("holds a completed row for exactly nine ticks before resolving and spawning", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    for (let column = 0; column < 10; column += 1) {
+      if (column !== 4 && column !== 5) player.grid[21]![column] = { kind: "J" };
+    }
+    player.active = spawnPiece(player.grid, { source: "base", shape: "O" });
+    player.active!.x = 3;
+    player.active!.y = 20;
+    const simulation = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: true,
+      initialPlayer: player,
+    });
+
+    const startEffects = simulation.dispatch("hard-drop");
+
+    expect(startEffects).toContainEqual(
+      expect.objectContaining({
+        kind: "line-clear",
+        phase: "anticipation",
+        cells: Array.from({ length: 10 }, (_, x) => ({ x, y: 21 })),
+      }),
+    );
+    expect(simulation.readSnapshot()).toMatchObject({
+      resolution: {
+        kind: "line-clear",
+        remainingTicks: 9,
+        totalTicks: 9,
+        rows: [21],
+      },
+      player: { active: null, lines: 0 },
+    });
+
+    expect(simulation.tick(8)).not.toContainEqual(
+      expect.objectContaining({ kind: "line-clear", phase: "impact" }),
+    );
+    expect(simulation.readSnapshot().player.active).toBeNull();
+
+    const impactEffects = simulation.tick(1);
+
+    expect(impactEffects).toContainEqual(
+      expect.objectContaining({ kind: "line-clear", phase: "impact", rows: 1 }),
+    );
+    expect(simulation.readSnapshot().resolution).toBeNull();
+    expect(simulation.readSnapshot().player.lines).toBe(1);
+    expect(simulation.readSnapshot().player.active).not.toBeNull();
+  });
+
+  it("scores a delayed clear at the level where the piece locked", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    for (let column = 0; column < 10; column += 1) {
+      if (column !== 4 && column !== 5) player.grid[21]![column] = { kind: "J" };
+    }
+    player.active = spawnPiece(player.grid, { source: "base", shape: "O" });
+    player.active!.x = 3;
+    player.active!.y = 20;
+    const simulation = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: true,
+      initialPlayer: player,
+    });
+    const checkpoint = simulation.checkpoint();
+    simulation.restore({ ...checkpoint, tick: 3_599, level: 1 });
+
+    simulation.dispatch("hard-drop");
+    simulation.tick(9);
+
+    expect(simulation.readSnapshot().level).toBe(2);
+    expect(simulation.readSnapshot().player.score).toBe(100);
+  });
+
+  it("pauses timed powers while a deterministic resolution phase is active", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    for (let column = 0; column < 10; column += 1) {
+      if (column !== 4 && column !== 5) player.grid[21]![column] = { kind: "J" };
+    }
+    player.active = spawnPiece(player.grid, { source: "base", shape: "O" });
+    player.active!.x = 3;
+    player.active!.y = 20;
+    player.statuses = [{ kind: "blackout", remainingTicks: 100 }];
+    const simulation = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: true,
+      initialPlayer: player,
+    });
+
+    simulation.dispatch("hard-drop");
+    simulation.tick(9);
+
+    expect(simulation.readSnapshot().player.statuses).toContainEqual({
+      kind: "blackout",
+      remainingTicks: 100,
+    });
+
+    simulation.tick(1);
+    expect(simulation.readSnapshot().player.statuses).toContainEqual({
+      kind: "blackout",
+      remainingTicks: 99,
+    });
+  });
+
+  it("buffers Hold, one rotation, and the latest horizontal direction for the next piece", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    for (let column = 0; column < 10; column += 1) {
+      if (column !== 4 && column !== 5) player.grid[21]![column] = { kind: "J" };
+    }
+    player.active = spawnPiece(player.grid, { source: "base", shape: "O" });
+    player.active!.x = 3;
+    player.active!.y = 20;
+    const simulation = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: true,
+      initialPlayer: player,
+    });
+
+    simulation.dispatch("hard-drop");
+    simulation.dispatch("move-left");
+    simulation.dispatch("move-right");
+    simulation.dispatch("rotate-cw");
+    simulation.dispatch("hold");
+    simulation.tick(9);
+
+    const snapshot = simulation.readSnapshot();
+    expect(snapshot.player.hold).toMatchObject({ source: "base", shape: "Z" });
+    expect(snapshot.player.active).toMatchObject({
+      descriptor: { source: "base", shape: "S" },
+      x: 4,
+      rotation: 1,
+    });
+  });
+
+  it("restores an in-flight resolution and buffered spawn input deterministically", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    for (let column = 0; column < 10; column += 1) {
+      if (column !== 4 && column !== 5) player.grid[21]![column] = { kind: "J" };
+    }
+    player.active = spawnPiece(player.grid, { source: "base", shape: "O" });
+    player.active!.x = 3;
+    player.active!.y = 20;
+    const original = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: true,
+      initialPlayer: player,
+    });
+    original.dispatch("hard-drop");
+    original.dispatch("rotate-cw");
+    original.tick(4);
+    const checkpoint = original.checkpoint();
+
+    const expectedEffects = original.tick(5);
+    const expected = original.readSnapshot();
+    const restored = createSimulation({ seed: SEED, playerId: "a", practice: true });
+    restored.restore(checkpoint);
+
+    expect(restored.tick(5)).toEqual(expectedEffects);
+    expect(restored.readSnapshot()).toEqual(expected);
+  });
+
+  it("includes the event ordinal in the authoritative state hash", () => {
+    const baseline = createSimulation({ seed: SEED, playerId: "a", practice: true });
+    const checkpoint = baseline.checkpoint();
+    const advancedOrdinal = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: true,
+    });
+    advancedOrdinal.restore({
+      ...checkpoint,
+      eventOrdinal: checkpoint.eventOrdinal + 1,
+    });
+
+    expect(advancedOrdinal.readSnapshot().player).toEqual(
+      baseline.readSnapshot().player,
+    );
+    expect(advancedOrdinal.readSnapshot().stateHash).not.toBe(
+      baseline.readSnapshot().stateHash,
+    );
+  });
+
+  it("spends one meter threshold per resolution and retains overflow charge", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    for (let row = 20; row < 22; row += 1) {
+      for (let column = 0; column < 10; column += 1) {
+        if (column !== 4) player.grid[row]![column] = { kind: "J" };
+      }
+    }
+    player.active = spawnPiece(player.grid, { source: "base", shape: "I" });
+    player.active!.x = 2;
+    player.active!.y = 18;
+    player.active!.rotation = 1;
+    player.powerCharge = 13;
+    player.upcomingPower = "barrier";
+    const simulation = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: true,
+      initialPlayer: player,
+    });
+
+    simulation.dispatch("hard-drop");
+    const activationEffects = simulation.tick(9);
+
+    expect(activationEffects).toContainEqual(
+      expect.objectContaining({
+        kind: "power-activated",
+        power: "barrier",
+        phase: "anticipation",
+      }),
+    );
+    expect(simulation.readSnapshot().player.powerCharge).toBe(8);
+    expect(simulation.readSnapshot().player.stats.powersActivated).toBe(1);
+    expect(simulation.readSnapshot().player.statuses).not.toContainEqual(
+      expect.objectContaining({ kind: "barrier" }),
+    );
+    expect(simulation.readSnapshot().resolution).toMatchObject({
+      kind: "power-impact",
+      power: "barrier",
+      remainingTicks: 12,
+      totalTicks: 12,
+    });
+
+    expect(simulation.tick(11)).not.toContainEqual(
+      expect.objectContaining({ kind: "power-impact" }),
+    );
+    const impactEffects = simulation.tick(1);
+
+    expect(impactEffects).toContainEqual(
+      expect.objectContaining({
+        kind: "power-impact",
+        power: "barrier",
+        phase: "impact",
+      }),
+    );
+    expect(simulation.readSnapshot().player.statuses).toContainEqual({
+      kind: "barrier",
+      remainingTicks: 1_200,
+      capacity: 4,
+    });
   });
 
   it("emits a distinct T-Spin effect for audio and presentation", () => {
@@ -114,7 +366,11 @@ describe("simulation facade", () => {
       initialPlayer: player,
     });
 
-    const effects = simulation.dispatch("hard-drop");
+    const effects = [
+      ...simulation.dispatch("hard-drop"),
+      ...simulation.tick(9),
+      ...simulation.tick(12),
+    ];
 
     expect(simulation.readLastResolutionTrace()).toEqual([
       "merge",
@@ -177,6 +433,348 @@ describe("simulation facade", () => {
     expect(effects.some((effect) => effect.kind === "garbage-rise")).toBe(false);
   });
 
+  it("keeps Acid controllable until contact, then dissolves its locked column top-to-bottom", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    player.grid[5]![5] = { kind: "J" };
+    player.grid[10]![5] = { kind: "T" };
+    player.grid[20]![5] = { kind: "garbage" };
+    player.active = spawnPiece(player.grid, { source: "acid", shape: "acid" });
+    player.replacementMode = { kind: "acid-rain", remainingPieces: 1 };
+    const simulation = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: true,
+      initialPlayer: player,
+    });
+
+    simulation.dispatch("move-right");
+    expect(simulation.readSnapshot().player.active?.x).toBe(5);
+
+    const contactEffects = simulation.dispatch("hard-drop");
+
+    expect(contactEffects).toContainEqual(
+      expect.objectContaining({
+        kind: "acid-lock",
+        column: 5,
+        target: { x: 5, y: 4 },
+        cells: [
+          { x: 5, y: 5 },
+          { x: 5, y: 10 },
+          { x: 5, y: 20 },
+        ],
+      }),
+    );
+    expect(simulation.readSnapshot().resolution).toMatchObject({
+      kind: "acid-dissolve",
+      column: 5,
+      remainingTicks: 3,
+      nextCellIndex: 0,
+    });
+    expect(simulation.readSnapshot().player.grid[5]![5]).not.toBeNull();
+
+    const first = simulation.tick(1);
+    expect(first).toContainEqual(
+      expect.objectContaining({
+        kind: "acid-dissolve",
+        phase: "dissolve",
+        order: 0,
+        cells: [{ x: 5, y: 5 }],
+      }),
+    );
+    expect(simulation.readSnapshot().player.grid[5]![5]).toBeNull();
+    expect(simulation.readSnapshot().player.grid[10]![5]).not.toBeNull();
+
+    const rest = simulation.tick(2);
+    expect(rest.filter((effect) => effect.kind === "acid-dissolve")).toEqual([
+      expect.objectContaining({ order: 1, cells: [{ x: 5, y: 10 }] }),
+      expect.objectContaining({ order: 2, cells: [{ x: 5, y: 20 }] }),
+    ]);
+    expect(simulation.readSnapshot().resolution).toBeNull();
+    expect(simulation.readSnapshot().player.grid[20]![5]).toBeNull();
+    expect(simulation.readSnapshot().player.active?.descriptor.source).toBe("base");
+  });
+
+  it("locks Acid on the soft-drop step that first reaches contact", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    player.grid[2]![4] = { kind: "J" };
+    player.active = spawnPiece(player.grid, { source: "acid", shape: "acid" });
+    player.replacementMode = { kind: "acid-rain", remainingPieces: 1 };
+    const simulation = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: true,
+      initialPlayer: player,
+    });
+
+    const effects = simulation.dispatch("soft-drop");
+
+    expect(effects).toContainEqual(
+      expect.objectContaining({
+        kind: "acid-lock",
+        column: 4,
+        target: { x: 4, y: 1 },
+      }),
+    );
+    expect(simulation.readSnapshot().resolution).toMatchObject({
+      kind: "acid-dissolve",
+      column: 4,
+    });
+
+    simulation.dispatch("move-right");
+    expect(simulation.readSnapshot().resolution).toMatchObject({
+      kind: "acid-dissolve",
+      column: 4,
+    });
+  });
+
+  it("locks Acid when lateral movement makes first contact and prevents escape", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    player.grid[1]![5] = { kind: "J" };
+    player.active = spawnPiece(player.grid, { source: "acid", shape: "acid" });
+    player.replacementMode = { kind: "acid-rain", remainingPieces: 1 };
+    const simulation = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: true,
+      initialPlayer: player,
+    });
+
+    const contact = simulation.dispatch("move-right");
+
+    expect(contact).toContainEqual(
+      expect.objectContaining({
+        kind: "acid-lock",
+        column: 5,
+        target: { x: 5, y: 0 },
+      }),
+    );
+    expect(simulation.readSnapshot().player.active).toBeNull();
+    expect(simulation.readSnapshot().resolution).toMatchObject({
+      kind: "acid-dissolve",
+      column: 5,
+    });
+
+    simulation.dispatch("move-left");
+    expect(simulation.readSnapshot().resolution).toMatchObject({
+      kind: "acid-dissolve",
+      column: 5,
+    });
+  });
+
+  it("locks an Acid drop that spawns already in contact with the stack", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    player.grid[1]![4] = { kind: "J" };
+    player.active = null;
+    player.replacementMode = { kind: "acid-rain", remainingPieces: 1 };
+
+    const simulation = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: true,
+      initialPlayer: player,
+    });
+
+    expect(simulation.readSnapshot().player.active).toBeNull();
+    expect(simulation.readSnapshot().resolution).toMatchObject({
+      kind: "acid-dissolve",
+      column: 4,
+      cells: [{ x: 4, y: 1 }],
+    });
+  });
+
+  it("locks Acid on the gravity step that first reaches contact", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    player.grid[2]![4] = { kind: "J" };
+    player.active = spawnPiece(player.grid, { source: "acid", shape: "acid" });
+    player.replacementMode = { kind: "acid-rain", remainingPieces: 1 };
+    const simulation = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: true,
+      initialPlayer: player,
+    });
+
+    const effects = simulation.tick(48);
+
+    expect(effects).toContainEqual(
+      expect.objectContaining({
+        kind: "acid-lock",
+        column: 4,
+        target: { x: 4, y: 1 },
+      }),
+    );
+    expect(simulation.readSnapshot().resolution).toMatchObject({
+      kind: "acid-dissolve",
+      column: 4,
+    });
+  });
+
+  it("dissolves a full visible Acid column one cell per tick within 333ms", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    for (let row = 2; row < 22; row += 1) {
+      player.grid[row]![4] = { kind: "garbage" };
+    }
+    player.active = spawnPiece(player.grid, { source: "acid", shape: "acid" });
+    player.replacementMode = { kind: "acid-rain", remainingPieces: 1 };
+    const simulation = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: true,
+      initialPlayer: player,
+    });
+
+    simulation.dispatch("hard-drop");
+
+    expect(simulation.readSnapshot().resolution).toMatchObject({
+      kind: "acid-dissolve",
+      remainingTicks: 20,
+      totalTicks: 20,
+      nextCellIndex: 0,
+    });
+
+    const firstNineteen = simulation.tick(19);
+    expect(
+      firstNineteen.filter((effect) => effect.kind === "acid-dissolve"),
+    ).toHaveLength(19);
+    expect(simulation.readSnapshot().resolution).toMatchObject({
+      kind: "acid-dissolve",
+      remainingTicks: 1,
+      nextCellIndex: 19,
+    });
+    expect(simulation.readSnapshot().player.grid[21]![4]).not.toBeNull();
+
+    const last = simulation.tick(1);
+    expect(last).toContainEqual(
+      expect.objectContaining({
+        kind: "acid-dissolve",
+        order: 19,
+        cells: [{ x: 4, y: 21 }],
+      }),
+    );
+    expect(simulation.readSnapshot().resolution).toBeNull();
+  });
+
+  it("sequences Collapse as power cue, then a 400ms drop-and-clear resolution", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    for (let column = 0; column < 9; column += 1) {
+      player.grid[21]![column] = { kind: "J" };
+    }
+    player.grid[19]![9] = { kind: "T", special: "glitch-core" };
+    const simulation = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: true,
+      initialPlayer: player,
+    });
+
+    const cue = simulation.activatePower("collapse");
+    expect(cue).toContainEqual(
+      expect.objectContaining({ kind: "power-activated", phase: "anticipation" }),
+    );
+    expect(simulation.readSnapshot().player.grid[19]![9]).not.toBeNull();
+
+    const drop = simulation.tick(12);
+    expect(drop).toContainEqual(
+      expect.objectContaining({
+        kind: "collapse",
+        phase: "drop",
+        movements: [
+          {
+            from: { x: 9, y: 19 },
+            to: { x: 9, y: 21 },
+          },
+        ],
+      }),
+    );
+    expect(simulation.readSnapshot().resolution).toMatchObject({
+      kind: "collapse-drop",
+      remainingTicks: 15,
+      rows: [21],
+    });
+    expect(simulation.readSnapshot().player.grid[21]!.every(Boolean)).toBe(true);
+
+    const anticipation = simulation.tick(15);
+    expect(anticipation).toContainEqual(
+      expect.objectContaining({ kind: "line-clear", phase: "anticipation", rows: 1 }),
+    );
+    expect(simulation.readSnapshot().resolution).toMatchObject({
+      kind: "collapse-clear",
+      remainingTicks: 9,
+      rows: [21],
+    });
+
+    expect(simulation.tick(8)).not.toContainEqual(
+      expect.objectContaining({ kind: "collapse", phase: "impact" }),
+    );
+    const impact = simulation.tick(1);
+
+    expect(impact).toContainEqual(
+      expect.objectContaining({ kind: "collapse", phase: "impact", value: 1 }),
+    );
+    expect(simulation.readSnapshot()).toMatchObject({
+      resolution: null,
+      player: { lines: 1, score: 100 },
+    });
+    expect(simulation.readSnapshot().tick).toBe(36);
+    expect(simulation.readSnapshot().tick - 12).toBe(24);
+  });
+
+  it("applies Nuke only at its visible impact and exposes the exact 5x5 blast cells", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    player.grid[3]![0] = { kind: "T" };
+    player.grid[4]![1] = { kind: "J" };
+    player.grid[5]![2] = { kind: "L" };
+    const simulation = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: true,
+      initialPlayer: player,
+    });
+
+    const cue = simulation.activatePower("nuke");
+    expect(cue).toContainEqual(
+      expect.objectContaining({
+        kind: "power-activated",
+        power: "nuke",
+        phase: "anticipation",
+        target: { x: 2, y: 3 },
+        cells: [
+          { x: 0, y: 3 },
+          { x: 1, y: 4 },
+          { x: 2, y: 5 },
+        ],
+      }),
+    );
+    expect(simulation.readSnapshot().player.grid[3]![0]).not.toBeNull();
+    expect(simulation.tick(11)).not.toContainEqual(
+      expect.objectContaining({ kind: "nuke" }),
+    );
+
+    const effects = simulation.tick(1);
+
+    expect(effects).toContainEqual(
+      expect.objectContaining({
+        kind: "nuke",
+        phase: "impact",
+        target: { x: 2, y: 3 },
+        cells: [
+          { x: 0, y: 3 },
+          { x: 1, y: 4 },
+          { x: 2, y: 5 },
+        ],
+      }),
+    );
+    expect(simulation.readSnapshot().player.grid[3]![0]).toBeNull();
+  });
+
   it("measures garbage warning time from an explicit shared attack tick", () => {
     const receivedNow = createSimulation({ seed: SEED, playerId: "a", practice: false });
     receivedNow.tick(25);
@@ -217,8 +815,9 @@ describe("simulation facade", () => {
       initialPlayer: player,
     });
 
+    simulation.dispatch("hard-drop");
     const attacks = simulation
-      .dispatch("hard-drop")
+      .tick(9)
       .filter((effect) => effect.kind === "garbage-attack");
 
     expect(attacks).toEqual([
@@ -253,14 +852,65 @@ describe("simulation facade", () => {
       initialPlayer: player,
     });
 
+    simulation.dispatch("hard-drop");
     const attacks = simulation
-      .dispatch("hard-drop")
+      .tick(9)
       .filter((effect) => effect.kind === "garbage-attack");
 
     expect(attacks).toEqual([
       { kind: "garbage-attack", rows: 4, eventId: "a:0:1:lock:garbage" },
     ]);
     expect(simulation.readSnapshot().player.stats.garbageSent).toBe(4);
+  });
+
+  it("emits marked-cell animation events bottom-first then left-to-right", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    for (let row = 20; row < 22; row += 1) {
+      for (let column = 0; column < 10; column += 1) {
+        if (column !== 4) player.grid[row]![column] = { kind: "J" };
+      }
+    }
+    player.grid[21]![1] = { kind: "J", special: "garbage-core" };
+    player.grid[21]![8] = { kind: "J", special: "glitch-core" };
+    player.grid[20]![0] = { kind: "J", special: "column-bomb" };
+    player.active = spawnPiece(player.grid, { source: "base", shape: "I" });
+    player.active!.x = 2;
+    player.active!.y = 18;
+    player.active!.rotation = 1;
+    const simulation = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: true,
+      initialPlayer: player,
+    });
+
+    simulation.dispatch("hard-drop");
+    const effects = simulation.tick(9);
+
+    expect(effects.filter((effect) => effect.kind === "special-trigger")).toEqual([
+      expect.objectContaining({
+        kind: "special-trigger",
+        special: "garbage-core",
+        row: 21,
+        column: 1,
+        order: 0,
+      }),
+      expect.objectContaining({
+        kind: "special-trigger",
+        special: "glitch-core",
+        row: 21,
+        column: 8,
+        order: 1,
+      }),
+      expect.objectContaining({
+        kind: "special-trigger",
+        special: "column-bomb",
+        row: 20,
+        column: 0,
+        order: 2,
+      }),
+    ]);
   });
 
   it("conceals a pending Glitch's seeded final shape until it spawns", () => {

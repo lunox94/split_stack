@@ -1,5 +1,13 @@
 import { getAbsoluteCells } from "../domain/pieces";
-import type { ActivePiece, Grid, PieceDescriptor, PlayerId } from "../domain/types";
+import type {
+  ActivePiece,
+  GarbagePacket,
+  Grid,
+  PieceDescriptor,
+  PlayerId,
+  ReplacementMode,
+  StatusState,
+} from "../domain/types";
 import { decodeGrid, type PlayerSnapshotV1 } from "../network/snapshots";
 import type {
   BoardRenderModel,
@@ -61,11 +69,22 @@ function boardModel(
   ghostY: number | null,
   focused: boolean,
   concealed: boolean,
+  statuses: readonly StatusState[],
+  incomingGarbage: readonly GarbagePacket[],
+  replacementMode: ReplacementMode | null,
 ): BoardRenderModel {
+  const barrier = statuses.find(
+    (status): status is Extract<StatusState, { kind: "barrier" }> =>
+      status.kind === "barrier",
+  );
   return {
     playerId,
     focused,
     concealed,
+    incomingGarbage: incomingGarbage.reduce((rows, packet) => rows + packet.rows, 0),
+    barrierCapacity: barrier?.capacity ?? 0,
+    scrambled: statuses.some((status) => status.kind === "scramble"),
+    monominoRush: replacementMode?.kind === "monomino-rush",
     cells: concealed
       ? []
       : [
@@ -88,6 +107,9 @@ export function boardModelFromSimulation(
     snapshot.ghostY,
     focused,
     concealed,
+    snapshot.player.statuses,
+    snapshot.player.incomingGarbage,
+    snapshot.player.replacementMode,
   );
 }
 
@@ -103,5 +125,8 @@ export function boardModelFromRemoteSnapshot(
     snapshot.ghostRow,
     focused,
     concealed,
+    snapshot.statuses,
+    snapshot.incomingGarbage,
+    snapshot.replacementMode,
   );
 }

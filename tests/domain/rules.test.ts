@@ -3,12 +3,17 @@ import { RULES, gravityIntervalFor } from "../../src/config/rules";
 
 describe("approved balance configuration", () => {
   it("keeps board, timing, garbage, and meter values in the peer-hashed config", () => {
+    expect(RULES.rulesVersion).toBe(2);
     expect(RULES.board).toEqual({ width: 10, height: 22, hiddenRows: 2 });
     expect(RULES.timing).toMatchObject({
       ticksPerSecond: 60,
       levelTicks: 3600,
       lockDelayTicks: 30,
       lockResetCap: 15,
+      lineClearTicks: 9,
+      powerImpactTicks: 12,
+      collapseDropTicks: 15,
+      acidDissolveStepTicks: 1,
       dasMs: 140,
       arrMs: 35,
       softDropRepeatMs: 35,
@@ -18,7 +23,14 @@ describe("approved balance configuration", () => {
       rowsPerLockCap: 4,
       barrierCapacity: 4,
     });
-    expect(RULES.power.threshold).toBe(20);
+    expect(RULES.power.threshold).toBe(7);
+    expect(RULES.power.nukeRadius).toBe(2);
+    expect(RULES.network).toMatchObject({
+      missingPeerMs: 3_000,
+      reconnectingMs: 5_000,
+      reconnectGraceMs: 60_000,
+      resultConsensusMs: 20_000,
+    });
   });
 
   it("matches the shared gravity table including level-nine alternation", () => {

@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   actionsForGesture,
   classifyCompletedGesture,
+  isGameplayGestureTarget,
 } from "../../src/input/gestures";
 import { KeyboardInput, keyboardActionForKey } from "../../src/input/keyboard";
 import { transformScrambledAction } from "../../src/input/scramble-transform";
@@ -91,6 +92,23 @@ describe("classifyCompletedGesture", () => {
         maximumPointers: 2,
       }),
     ).toEqual({ kind: "tap", fingers: 2 });
+  });
+});
+
+describe("isGameplayGestureTarget", () => {
+  it("accepts either board and the surrounding arena but excludes explicit controls", () => {
+    const arena = document.createElement("div");
+    const remoteBoard = document.createElement("div");
+    const hudText = document.createElement("span");
+    const button = document.createElement("button");
+    const nestedButtonIcon = document.createElement("span");
+    button.append(nestedButtonIcon);
+    arena.append(remoteBoard, hudText, button);
+
+    expect(isGameplayGestureTarget(remoteBoard)).toBe(true);
+    expect(isGameplayGestureTarget(hudText)).toBe(true);
+    expect(isGameplayGestureTarget(button)).toBe(false);
+    expect(isGameplayGestureTarget(nestedButtonIcon)).toBe(false);
   });
 });
 

@@ -26,4 +26,33 @@ describe("board view projection", () => {
 
     expect(boardModelFromSimulation(snapshot, false, true).cells).toEqual([]);
   });
+
+  it("projects incoming pressure and active defensive/status presentation", () => {
+    const snapshot = createSimulation({
+      seed: "00112233445566778899aabbccddeeff",
+      playerId: "a",
+      practice: true,
+    }).readSnapshot();
+    snapshot.player.incomingGarbage.push({
+      id: "incoming-1",
+      rows: 3,
+      readyTick: 120,
+      hole: 4,
+    });
+    snapshot.player.statuses.push(
+      { kind: "barrier", capacity: 3, remainingTicks: 300 },
+      { kind: "scramble", remainingTicks: 180 },
+    );
+    snapshot.player.replacementMode = {
+      kind: "monomino-rush",
+      remainingTicks: 240,
+    };
+
+    expect(boardModelFromSimulation(snapshot, true, false)).toMatchObject({
+      incomingGarbage: 3,
+      barrierCapacity: 3,
+      scrambled: true,
+      monominoRush: true,
+    });
+  });
 });
