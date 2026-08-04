@@ -33,11 +33,11 @@ duration. Accessibility options include a colorblind palette, surface patterns,
 reduced motion, reduced flashes, a 30 FPS reduced-effects mode, optional screen
 shake and vibration, and independent music and effects controls.
 
-Each match selects one of three original procedural chiptune arrangements and
-keeps its tempo stable while adding layers as play intensifies. The music takes
-melodic inspiration from the public-domain compositions *In the Hall of the
-Mountain King*, *Flight of the Bumblebee*, and *Kalinka*; no MIDI files or
-recorded music assets are bundled.
+Each match deterministically selects one of four bundled 4-channel ProTracker
+modules and rotates the choice on rematches. A small local replay engine streams
+short PCM chunks into Web Audio, so the tracker music stays offline without
+retaining an entire decoded song in memory. Music pauses with the game and has
+independent mute and volume controls.
 
 ## Development
 
@@ -96,11 +96,11 @@ landscape layouts, reduced effects, and WebGL context recovery.
 
 ## Offline and privacy model
 
-All game scripts, shaders, visual assets, and procedural audio code are bundled
-inside the `.xdc`. Live state uses Webxdc's ephemeral realtime channel; lobby,
-seat, and result records use bounded durable Webxdc updates. Display names are
-rendered as text, network messages are bounded and validated, and the app does
-not expose participant addresses.
+All game scripts, shaders, visual assets, sound effects, tracker modules, and
+replay code are bundled inside the `.xdc`. Live state uses Webxdc's ephemeral
+realtime channel; lobby, seat, and result records use bounded durable Webxdc
+updates. Display names are rendered as text, network messages are bounded and
+validated, and the app does not expose participant addresses.
 
 An authenticated peer frame counts as proof of life. A silent peer freezes the
 match after three seconds, starts channel replacement after five seconds, and
@@ -118,9 +118,11 @@ from a deliberately modified client.
 ## License and distribution
 
 Original Split Stack code is MIT licensed; see `LICENSE`. Third-party notices
-are in `THIRD_PARTY_NOTICES.md` and are included in the release archive. The UI,
-icon, procedural sounds and arrangements, effects, and copy are original to
-this project.
+are in `THIRD_PARTY_NOTICES.md` and are included in the release archive. The
+bundled music modules are separate assets outside the MIT grant and currently
+have unresolved game-bundling permission; their byte-level provenance and the
+BSD-licensed tracker replay core are documented in that notice. The UI, icon,
+procedural sound effects, visual effects, and copy are original to this project.
 
 A proper intellectual-property review is required before broad commercial
 distribution. This repository is an implementation artifact, not legal advice

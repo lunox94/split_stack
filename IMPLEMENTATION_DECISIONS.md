@@ -131,6 +131,14 @@ rules version 2 and must change together with the peer rules hash.
 - The presentation timeline consumes deterministic simulation cues but never
   changes authoritative state. Reduced-motion/reduced-effects variants keep the
   same gameplay timing while removing shake, large travel, or repeated flashes.
-- Music is synthesized locally from original procedural arrangements. A match
-  chooses one deterministic track, rematches rotate the choice, adaptive layers
-  do not alter tempo, and backgrounding pauses music until a musical boundary.
+- Music uses four bundled 4-channel ProTracker modules. A match chooses one
+  deterministically and rematches rotate the choice. The replay core renders
+  short stereo PCM chunks into scheduled Web Audio buffer sources rather than
+  retaining a full decoded song, which bounds memory use on phones.
+- Pausing, backgrounding, muting, track replacement, and Web Audio suspension
+  stop queued module buffers and resume from the audible sample position. The
+  modules keep their authored tempo and arrangement; gameplay intensity does
+  not rewrite tracker data.
+- The module files remain byte-exact and their source IDs and hashes are pinned.
+  They are separate from the MIT license, and the unresolved game-bundling
+  permission is stated explicitly in `THIRD_PARTY_NOTICES.md`.

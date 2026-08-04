@@ -1,13 +1,16 @@
 import { CUE_DEFINITIONS, type AudioCue, type CueTone } from "./cues";
+import { ModReplay } from "./mod-replay";
 import {
-  MusicSequencer,
+  selectTrackForMatch,
+  type ModuleTrack,
   type MusicIntensity,
-  type ProceduralTrack,
-  type ScheduledMusicEvent,
 } from "./music";
+
+export type ModuleLoader = (assetUrl: string) => Promise<ArrayBuffer>;
 
 export interface AudioEngineOptions {
   readonly contextFactory?: () => AudioContext;
+  readonly moduleLoader?: ModuleLoader;
 }
 
 export interface PlayCueOptions {
@@ -15,8 +18,23 @@ export interface PlayCueOptions {
   readonly gain?: number;
 }
 
+const DEFAULT_MUSIC_SAMPLE_RATE = 44_100;
+const MUSIC_CHUNK_SAMPLES = 8_192;
+const MUSIC_LEAD_SECONDS = 0.025;
+const MUSIC_SCHEDULE_AHEAD_SECONDS = 0.38;
+
+const fetchModule: ModuleLoader = async (assetUrl) => {
+  const response = await fetch(assetUrl);
+  if (!response.ok) {
+    throw new Error(`Cannot load music module (${response.status}): ${assetUrl}`);
+  }
+  return response.arrayBuffer();
+};
+
 export class AudioEngine {
   readonly #contextFactory: () => AudioContext;
+  readonly #moduleLoader: ModuleLoader;
+  readonly #moduleCache = new Map<string, Promise<ArrayBuffer>>();
   #context: AudioContext | null = null;
   #effectsBus: GainNode | null = null;
   #musicBus: GainNode | null = null;
@@ -25,17 +43,20 @@ export class AudioEngine {
   #musicMuted = false;
   #musicVolume = 0.55;
   #musicMix = 1;
-  #music: MusicSequencer | null = null;
-  #musicIntensity: MusicIntensity = "calm";
-  #musicScheduledUntilMs = 0;
+  #musicTrack: ModuleTrack | null = null;
+  #musicReplay: ModReplay | null = null;
+  #musicLoadGeneration = 0;
+  #musicScheduledUntilSeconds = 0;
+  #musicAnchorTimeSeconds: number | null = null;
+  #musicAnchorSample = 0;
   #musicPaused = false;
   #musicResumeRequested = false;
-  #noiseBuffer: AudioBuffer | null = null;
-  readonly #musicSources = new Set<AudioScheduledSourceNode>();
+  readonly #musicSources = new Set<AudioBufferSourceNode>();
 
   constructor(options: AudioEngineOptions = {}) {
     this.#contextFactory =
       options.contextFactory ?? (() => new AudioContext({ latencyHint: "interactive" }));
+    this.#moduleLoader = options.moduleLoader ?? fetchModule;
   }
 
   get unlocked(): boolean {
@@ -68,7 +89,7 @@ export class AudioEngine {
       }
     }
     const running = this.#context.state === "running";
-    if (running && this.#musicResumeRequested) this.#resumeMusicSequencer();
+    if (running && this.#musicResumeRequested) this.#resumeModuleMusic();
     return running;
   }
 
@@ -91,6 +112,9 @@ export class AudioEngine {
   }
 
   setMusicMuted(muted: boolean): void {
+    if (muted && !this.#musicMuted && !this.#musicPaused) {
+      this.#haltScheduledMusic();
+    }
     this.#musicMuted = muted;
     this.#applyMusicVolume();
   }
@@ -118,77 +142,87 @@ export class AudioEngine {
     }
   }
 
-  startMusic(matchSeed: string, rematchIndex = 0): ProceduralTrack {
+  startMusic(matchSeed: string, rematchIndex = 0): ModuleTrack {
     this.stopMusic();
     this.#musicMix = 1;
-    const nowMs = (this.#context?.currentTime ?? 0) * 1_000;
-    const startedAtMs = nowMs + 40;
-    this.#music = new MusicSequencer({ matchSeed, rematchIndex, startedAtMs });
-    this.#musicScheduledUntilMs = nowMs;
+    const track = selectTrackForMatch(matchSeed, rematchIndex);
+    const generation = ++this.#musicLoadGeneration;
+    this.#musicTrack = track;
     this.#musicPaused = false;
     this.#musicResumeRequested = false;
     this.#applyMusicVolume();
-    return this.#music.track;
+    void this.#loadMusic(track, generation);
+    return track;
   }
 
-  startMenuMusic(): ProceduralTrack {
+  startMenuMusic(): ModuleTrack {
     const track = this.startMusic("split-stack-menu", 0);
     this.#musicMix = 0.42;
     this.#applyMusicVolume();
     return track;
   }
 
-  updateMusic(intensity: MusicIntensity = this.#musicIntensity): void {
-    this.#musicIntensity = intensity;
+  updateMusic(_intensity: MusicIntensity = "calm"): void {
     const context = this.#context;
     const musicBus = this.#musicBus;
-    const music = this.#music;
+    const replay = this.#musicReplay;
     if (
       context === null ||
       musicBus === null ||
-      music === null ||
+      replay === null ||
       this.#musicMuted ||
       context.state !== "running" ||
       this.#musicPaused
     ) {
       return;
     }
-    const nowMs = context.currentTime * 1_000;
-    const fromMs = Math.max(nowMs + 12, this.#musicScheduledUntilMs);
-    const untilMs = nowMs + 180;
-    if (untilMs <= fromMs) return;
-    for (const event of music.eventsBetween(fromMs, untilMs, intensity)) {
-      this.#scheduleMusicEvent(context, musicBus, event);
+
+    const now = context.currentTime;
+    if (this.#musicScheduledUntilSeconds <= now) {
+      this.#musicScheduledUntilSeconds = now + MUSIC_LEAD_SECONDS;
+      this.#musicAnchorTimeSeconds = this.#musicScheduledUntilSeconds;
+      this.#musicAnchorSample = replay.positionSamples;
     }
-    this.#musicScheduledUntilMs = untilMs;
+    const horizon = now + MUSIC_SCHEDULE_AHEAD_SECONDS;
+    while (this.#musicScheduledUntilSeconds < horizon) {
+      this.#scheduleMusicChunk(
+        context,
+        musicBus,
+        replay,
+        this.#musicScheduledUntilSeconds,
+      );
+      this.#musicScheduledUntilSeconds += MUSIC_CHUNK_SAMPLES / replay.samplingRate;
+    }
   }
 
   pauseMusic(): void {
-    const context = this.#context;
-    if (this.#music === null || this.#musicPaused) return;
-    this.#music.pause((context?.currentTime ?? 0) * 1_000);
+    if (this.#musicTrack === null || this.#musicPaused) return;
+    this.#haltScheduledMusic();
     this.#musicPaused = true;
     this.#musicResumeRequested = false;
-    this.#stopMusicSources();
     this.#applyMusicVolume();
   }
 
   resumeMusic(): void {
     const context = this.#context;
-    if (this.#music === null || !this.#musicPaused) return;
+    if (this.#musicTrack === null || !this.#musicPaused) return;
     this.#musicResumeRequested = true;
     if (context !== null && context.state === "running") {
-      this.#resumeMusicSequencer();
+      this.#resumeModuleMusic();
       return;
     }
     void this.unlock();
   }
 
   stopMusic(): void {
-    this.#music = null;
+    this.#musicLoadGeneration += 1;
+    this.#musicTrack = null;
+    this.#musicReplay = null;
     this.#musicPaused = false;
     this.#musicResumeRequested = false;
-    this.#musicScheduledUntilMs = 0;
+    this.#musicScheduledUntilSeconds = 0;
+    this.#musicAnchorTimeSeconds = null;
+    this.#musicAnchorSample = 0;
     this.#stopMusicSources();
   }
 
@@ -209,7 +243,7 @@ export class AudioEngine {
     this.#context = null;
     this.#effectsBus = null;
     this.#musicBus = null;
-    this.#noiseBuffer = null;
+    this.#moduleCache.clear();
     if (context !== null && context.state !== "closed") await context.close();
   }
 
@@ -229,23 +263,75 @@ export class AudioEngine {
     this.#musicBus.gain.setTargetAtTime(value, this.#context.currentTime, 0.02);
   }
 
-  #resumeMusicSequencer(): void {
+  async #loadMusic(track: ModuleTrack, generation: number): Promise<void> {
+    try {
+      const data = await this.#loadModule(track.assetUrl);
+      if (
+        generation !== this.#musicLoadGeneration ||
+        this.#musicTrack?.id !== track.id
+      ) {
+        return;
+      }
+      const samplingRate = this.#context?.sampleRate ?? DEFAULT_MUSIC_SAMPLE_RATE;
+      this.#musicReplay = new ModReplay(data, samplingRate);
+      this.#musicScheduledUntilSeconds = 0;
+      this.#musicAnchorTimeSeconds = null;
+    } catch {
+      // Music is optional. Effects and gameplay remain available if a module
+      // cannot be fetched or decoded on a particular host.
+      if (generation === this.#musicLoadGeneration) this.#musicReplay = null;
+    }
+  }
+
+  #loadModule(assetUrl: string): Promise<ArrayBuffer> {
+    const cached = this.#moduleCache.get(assetUrl);
+    if (cached !== undefined) return cached;
+    const pending = this.#moduleLoader(assetUrl).catch((error: unknown) => {
+      this.#moduleCache.delete(assetUrl);
+      throw error;
+    });
+    this.#moduleCache.set(assetUrl, pending);
+    return pending;
+  }
+
+  #resumeModuleMusic(): void {
     const context = this.#context;
     if (
       context === null ||
       context.state !== "running" ||
-      this.#music === null ||
+      this.#musicTrack === null ||
       !this.#musicPaused ||
       !this.#musicResumeRequested
     ) {
       return;
     }
-    const nowMs = context.currentTime * 1_000;
-    this.#music.resume(nowMs + 40);
     this.#musicPaused = false;
     this.#musicResumeRequested = false;
-    this.#musicScheduledUntilMs = nowMs;
+    this.#musicScheduledUntilSeconds = 0;
+    this.#musicAnchorTimeSeconds = null;
     this.#applyMusicVolume();
+  }
+
+  #haltScheduledMusic(): void {
+    const context = this.#context;
+    const replay = this.#musicReplay;
+    const anchorTime = this.#musicAnchorTimeSeconds;
+    if (context !== null && replay !== null && anchorTime !== null) {
+      const audibleUntil = Math.min(
+        Math.max(context.currentTime, anchorTime),
+        this.#musicScheduledUntilSeconds,
+      );
+      const elapsedSamples = Math.max(
+        0,
+        Math.round((audibleUntil - anchorTime) * replay.samplingRate),
+      );
+      replay.seek(
+        (this.#musicAnchorSample + elapsedSamples) % replay.durationSamples,
+      );
+    }
+    this.#stopMusicSources();
+    this.#musicScheduledUntilSeconds = 0;
+    this.#musicAnchorTimeSeconds = null;
   }
 
   #scheduleTone(
@@ -280,60 +366,28 @@ export class AudioEngine {
     oscillator.stop(endsAt + 0.01);
   }
 
-  #scheduleMusicEvent(
+  #scheduleMusicChunk(
     context: AudioContext,
     musicBus: GainNode,
-    event: ScheduledMusicEvent,
+    replay: ModReplay,
+    startsAt: number,
   ): void {
-    const startsAt = event.atMs / 1_000;
-    const endsAt = startsAt + event.durationMs / 1_000;
-    const envelope = context.createGain();
-    const panner = context.createStereoPanner();
-    const pan = event.channel === "pulse-1"
-      ? -0.22
-      : event.channel === "pulse-2"
-        ? 0.22
-        : 0;
-    panner.pan.setValueAtTime(pan, startsAt);
-    envelope.gain.setValueAtTime(0.0001, startsAt);
-    envelope.gain.exponentialRampToValueAtTime(
-      Math.max(0.0001, event.gain),
-      startsAt + 0.008,
+    const left = new Float32Array(MUSIC_CHUNK_SAMPLES);
+    const right = new Float32Array(MUSIC_CHUNK_SAMPLES);
+    replay.render(left, right);
+    const buffer = context.createBuffer(
+      2,
+      MUSIC_CHUNK_SAMPLES,
+      replay.samplingRate,
     );
-    envelope.gain.exponentialRampToValueAtTime(0.0001, endsAt);
-
-    let source: AudioScheduledSourceNode;
-    if (event.channel === "noise") {
-      const noise = context.createBufferSource();
-      noise.buffer = this.#noiseBufferFor(context);
-      noise.loop = true;
-      source = noise;
-    } else {
-      const oscillator = context.createOscillator();
-      oscillator.type = event.channel === "triangle" ? "triangle" : "square";
-      oscillator.frequency.setValueAtTime(event.frequencyHz, startsAt);
-      source = oscillator;
-    }
-    source.connect(envelope).connect(panner).connect(musicBus);
+    buffer.getChannelData(0).set(left);
+    buffer.getChannelData(1).set(right);
+    const source = context.createBufferSource();
+    source.buffer = buffer;
+    source.connect(musicBus);
     this.#musicSources.add(source);
     source.onended = () => this.#musicSources.delete(source);
     source.start(startsAt);
-    source.stop(endsAt + 0.01);
-  }
-
-  #noiseBufferFor(context: AudioContext): AudioBuffer {
-    if (this.#noiseBuffer !== null) return this.#noiseBuffer;
-    const length = Math.max(1, Math.floor(context.sampleRate * 0.1));
-    const buffer = context.createBuffer(1, length, context.sampleRate);
-    const data = buffer.getChannelData(0);
-    let register = 0x5a5a;
-    for (let index = 0; index < data.length; index += 1) {
-      const bit = ((register >> 0) ^ (register >> 1)) & 1;
-      register = (register >> 1) | (bit << 14);
-      data[index] = (register & 1) === 0 ? -0.72 : 0.72;
-    }
-    this.#noiseBuffer = buffer;
-    return buffer;
   }
 
   #stopMusicSources(): void {

@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -117,6 +118,26 @@ afterEach(() => {
 });
 
 describe("XDC archive verifier", () => {
+  it("keeps bundled modules byte-exact and documents their separate rights", () => {
+    const expectedModules = new Map([
+      ["bloody_tears.mod", "76e82333f8c6e17707f41c4c82ca36928d6b94dd0c6b8dfdae0c148150303414"],
+      ["radix-mountain_king.mod", "3605bb8d15ab070fe5c89f1a2020b6f4b1c922db2862d1ce66f0ecb2f115ca3d"],
+      ["flight_of_bumble_bee.mod", "7ae9abff166887906f4ac76635ffca186139d1bb1abfdab463a117126990af5c"],
+      ["galaxy_-_popcorn.mod", "bc756fc62d403ee7837695d4933cc8e2b56de49666b37b8560fb8dabbc7a1aab"],
+    ]);
+    const noticeText = notices.toString("utf8");
+
+    for (const [fileName, expectedHash] of expectedModules) {
+      const module = readFileSync(join(projectRoot, "public/music", fileName));
+      expect(createHash("sha256").update(module).digest("hex")).toBe(expectedHash);
+      expect(noticeText).toContain(fileName);
+      expect(noticeText).toContain(expectedHash);
+    }
+    expect(noticeText).toContain("not licensed under the Split Stack MIT License");
+    expect(noticeText).toContain("does not itself grant permission to bundle");
+    expect(noticeText).toContain("Copyright (c) 2019, Martin Cameron");
+  });
+
   it("accepts safe, self-contained Store and Deflate entries", () => {
     const entries = validEntries().map((entry) =>
       entry.name === "assets/app.js" ? { ...entry, compression: 8 as const } : entry,

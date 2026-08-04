@@ -1,65 +1,55 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  MusicSequencer,
-  PROCEDURAL_TRACKS,
+  MODULE_TRACKS,
   selectTrackForMatch,
 } from "../../src/audio/music";
 
-describe("procedural match music", () => {
-  it("selects one deterministic track per match and rotates on rematches", () => {
-    const firstCycle = [0, 1, 2].map(
+describe("tracker match music", () => {
+  it("selects all four supplied modules deterministically before repeating", () => {
+    const firstCycle = [0, 1, 2, 3].map(
       (rematch) => selectTrackForMatch("shared-match-seed", rematch).id,
     );
 
-    expect(PROCEDURAL_TRACKS.map((track) => track.title)).toEqual([
-      "In the Hall of the Mountain King",
-      "Flight of the Bumblebee",
-      "Kalinka",
+    expect(MODULE_TRACKS.map((track) => [track.id, track.title])).toEqual([
+      ["bloody-tears", "Bloody Tears"],
+      ["mountain-king", "In the Hall of the Mountain King"],
+      ["bumblebee", "Flight of the Bumblebee"],
+      ["popcorn", "Popcorn"],
     ]);
-    expect(new Set(firstCycle).size).toBe(3);
+    expect(new Set(firstCycle).size).toBe(4);
     expect(selectTrackForMatch("shared-match-seed", 0).id).toBe(firstCycle[0]);
-    expect(selectTrackForMatch("shared-match-seed", 3).id).toBe(firstCycle[0]);
+    expect(selectTrackForMatch("shared-match-seed", 4).id).toBe(firstCycle[0]);
   });
 
-  it("keeps tempo stable while adding harmony, percussion, and a danger pulse", () => {
-    const sequencer = new MusicSequencer({
-      matchSeed: "adaptive-score",
-      rematchIndex: 0,
-      startedAtMs: 0,
-    });
-    const calm = sequencer.eventsBetween(0, 4_000, "calm");
-    const building = sequencer.eventsBetween(0, 4_000, "building");
-    const danger = sequencer.eventsBetween(0, 4_000, "danger");
-
-    const firstMelody = calm.find((event) => event.channel === "pulse-1");
-    expect(firstMelody).toBeDefined();
-    expect(building.find((event) => event.channel === "pulse-1")).toMatchObject({
-      atMs: firstMelody?.atMs,
-      frequencyHz: firstMelody?.frequencyHz,
-    });
-    expect(building.some((event) => event.channel === "pulse-2")).toBe(true);
-    expect(building.some((event) => event.channel === "noise")).toBe(true);
+  it("keeps provenance next to every module asset", () => {
     expect(
-      danger.some(
-        (event) => event.layer === "danger" && event.channel === "pulse-2",
-      ),
-    ).toBe(true);
-    expect(danger.length).toBeGreaterThan(building.length);
-  });
-
-  it("pauses while hidden and resumes at the next beat boundary", () => {
-    const sequencer = new MusicSequencer({
-      matchSeed: "visibility",
-      rematchIndex: 1,
-      startedAtMs: 0,
-    });
-    const beatMs = 60_000 / sequencer.track.bpm;
-
-    sequencer.pause(beatMs * 1.4);
-    expect(sequencer.eventsBetween(2_000, 3_000, "danger")).toEqual([]);
-    expect(sequencer.resume(5_000)).toBeCloseTo(beatMs * 2);
-    expect(sequencer.positionAt(5_000)).toBeCloseTo(beatMs * 2);
-    expect(sequencer.positionAt(5_000 + beatMs)).toBeCloseTo(beatMs * 3);
+      MODULE_TRACKS.map(({ fileName, modArchiveId, sha256 }) => ({
+        fileName,
+        modArchiveId,
+        sha256,
+      })),
+    ).toEqual([
+      {
+        fileName: "bloody_tears.mod",
+        modArchiveId: 212035,
+        sha256: "76e82333f8c6e17707f41c4c82ca36928d6b94dd0c6b8dfdae0c148150303414",
+      },
+      {
+        fileName: "radix-mountain_king.mod",
+        modArchiveId: 67602,
+        sha256: "3605bb8d15ab070fe5c89f1a2020b6f4b1c922db2862d1ce66f0ecb2f115ca3d",
+      },
+      {
+        fileName: "flight_of_bumble_bee.mod",
+        modArchiveId: 97600,
+        sha256: "7ae9abff166887906f4ac76635ffca186139d1bb1abfdab463a117126990af5c",
+      },
+      {
+        fileName: "galaxy_-_popcorn.mod",
+        modArchiveId: 187118,
+        sha256: "bc756fc62d403ee7837695d4933cc8e2b56de49666b37b8560fb8dabbc7a1aab",
+      },
+    ]);
   });
 });
