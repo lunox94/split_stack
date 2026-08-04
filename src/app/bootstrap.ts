@@ -404,18 +404,38 @@ export async function bootstrap(): Promise<void> {
     competitivePumpTimer = window.setInterval(() => competitive?.pump(), 50);
   };
 
-  const resumeCompetitiveTransport = (): void => {
+  const resumeCompetitiveTransport = (): boolean => {
     const session = competitive;
-    if (session === null) return;
-    // Acquire first so a host that disallows joining after `leave()` cannot
-    // strand the match. The old channel is retired by disconnect immediately
-    // before the new transport is attached.
-    const channel = host?.joinRealtimeChannel?.();
-    if (channel !== undefined) {
+    if (session === null) return false;
+    // Webxdc permits only one joined realtime channel at a time. Retire the
+    // current listener before acquiring its replacement.
+    let recovered = false;
+    try {
       session.disconnect();
-      session.attachTransport(makeRealtimeTransport(channel));
+      const channel = host?.joinRealtimeChannel?.();
+      if (channel !== undefined) {
+        session.attachTransport(makeRealtimeTransport(channel));
+        recovered = true;
+      }
+    } catch {
+      recovered = false;
+    } finally {
+      if (document.visibilityState !== "hidden") {
+        try {
+          session.setHidden(false);
+        } catch {
+          recovered = false;
+        }
+      }
     }
-    if (document.visibilityState !== "hidden") session.setHidden(false);
+    return recovered;
+  };
+
+  const resumeCompetitiveTransportAfterHostRestore = (): void => {
+    const session = competitive;
+    if (!resumeCompetitiveTransport() && session !== null) {
+      session.noteTransportRecoveryFailure();
+    }
   };
 
   const applyPreferences = (): void => {
@@ -469,7 +489,7 @@ export async function bootstrap(): Promise<void> {
         ) {
           audio.resumeMusic();
         }
-        if (mode === "competitive") resumeCompetitiveTransport();
+        if (mode === "competitive") resumeCompetitiveTransportAfterHostRestore();
         if (mode !== "practice") shell.overlay.hidden = true;
       },
       onUnsupported: () => {
@@ -796,17 +816,37 @@ export async function bootstrap(): Promise<void> {
   };
 
   const spectatorRuntime = (match: ActiveMatch): SpectatorRuntime | null => {
-    const channel = host?.joinRealtimeChannel?.();
     const seatB = match.challenge.seatB;
-    if (channel === undefined || seatB === null) return null;
+    if (seatB === null) return null;
+    let channel: WebxdcRealtimeChannel | undefined;
+    try {
+      channel = host?.joinRealtimeChannel?.();
+    } catch {
+      return null;
+    }
+    if (channel === undefined) return null;
     const snapshots = new RemoteSnapshotStore();
     snapshots.bind(match.challenge.seatA.playerId, match.seatASessionId);
     snapshots.bind(seatB.playerId, match.seatBSessionId);
     const allowed = new Set([match.challenge.seatA.playerId, seatB.playerId]);
-    channel.setListener((bytes) => {
-      const decoded = decodeEnvelope(bytes, { expectedMatchId: match.matchId, allowedSenderIds: allowed });
-      if (decoded.ok && decoded.value.kind === "SNAPSHOT") snapshots.accept(decoded.value);
-    });
+    try {
+      channel.setListener((bytes) => {
+        const decoded = decodeEnvelope(bytes, {
+          expectedMatchId: match.matchId,
+          allowedSenderIds: allowed,
+        });
+        if (decoded.ok && decoded.value.kind === "SNAPSHOT") {
+          snapshots.accept(decoded.value);
+        }
+      });
+    } catch {
+      try {
+        channel.leave?.();
+      } catch {
+        // The channel is already unusable; keep the spectator detached.
+      }
+      return null;
+    }
     return { channel, snapshots, matchId: match.matchId };
   };
 
@@ -841,9 +881,6 @@ export async function bootstrap(): Promise<void> {
     audio.stopMusic();
     currentMusicMatchId = null;
     resetPresentation();
-    // Join the replacement channel before retiring the old one. Besides
-    // avoiding a receive gap, this supports hosts that reject a rejoin after a
-    // channel has already been explicitly trashed.
     const previousCompetitive = competitive;
     const previousSpectator = spectator;
     competitive = null;
@@ -855,13 +892,18 @@ export async function bootstrap(): Promise<void> {
     lastCountdownSecond = 0;
     lastLocalLevel = 1;
     warnedUpcomingPower = null;
-    let previousRetired = false;
-    const retirePrevious = (): void => {
-      if (previousRetired) return;
-      previousRetired = true;
+    // Role and runtime-session changes must obey the same one-channel Webxdc
+    // lifecycle as liveness recovery: retire before joining the replacement.
+    try {
       previousCompetitive?.disconnect();
+    } catch {
+      // A failed leave is followed by a contained join attempt below.
+    }
+    try {
       previousSpectator?.channel.leave?.();
-    };
+    } catch {
+      // A failed leave is followed by a contained join attempt below.
+    }
     activeMatch = match;
     resultShownFor = null;
     announcedConfigHash = null;
@@ -872,13 +914,26 @@ export async function bootstrap(): Promise<void> {
     shell.left.boardTarget.setAttribute("aria-label", match.role === "spectator" ? STRINGS["match.seatABoard"] : STRINGS["match.localBoard"]);
     shell.right.boardTarget.setAttribute("aria-label", match.role === "spectator" ? STRINGS["match.seatBBoard"] : STRINGS["match.opponentBoard"]);
     shell.show("match");
+    const retryActiveMatch = (): void => {
+      window.setTimeout(() => {
+        if (activeMatch !== match) return;
+        activeMatch = null;
+        reconcileLobby();
+      }, RULES.network.reconnectingMs);
+    };
 
     if (match.role === "spectator") {
       mode = "spectator";
       audio.startMusic(match.challenge.challengeId, match.round - 1);
       currentMusicMatchId = match.matchId;
       spectator = spectatorRuntime(match);
-      retirePrevious();
+      if (spectator === null) {
+        shell.overlay.hidden = false;
+        shell.overlayText.textContent = STRINGS["lobby.realtimeUnavailable"];
+        setInputsEnabled(false);
+        retryActiveMatch();
+        return;
+      }
       shell.left.pane.classList.remove("is-local");
       shell.right.pane.classList.remove("is-remote");
       shell.overlay.hidden = false;
@@ -890,11 +945,21 @@ export async function bootstrap(): Promise<void> {
     }
 
     const seatB = match.challenge.seatB;
-    const channel = host?.joinRealtimeChannel?.();
-    retirePrevious();
-    if (seatB === null || channel === undefined) {
+    if (seatB === null) {
       shell.overlay.hidden = false;
       shell.overlayText.textContent = STRINGS["lobby.realtimeUnavailable"];
+      return;
+    }
+    let channel: WebxdcRealtimeChannel | undefined;
+    try {
+      channel = host?.joinRealtimeChannel?.();
+    } catch {
+      channel = undefined;
+    }
+    if (channel === undefined) {
+      shell.overlay.hidden = false;
+      shell.overlayText.textContent = STRINGS["lobby.realtimeUnavailable"];
+      retryActiveMatch();
       return;
     }
     mode = "competitive";
@@ -902,73 +967,87 @@ export async function bootstrap(): Promise<void> {
     shell.right.pane.classList.add("is-remote");
     const local = match.role === "a" ? match.challenge.seatA : seatB;
     const peer = match.role === "a" ? seatB : match.challenge.seatA;
-    competitive = new CompetitiveSession({
-      matchId: match.matchId,
-      seat: match.role,
-      identity: {
-        senderId: local.playerId,
-        sessionId: match.role === "a" ? match.seatASessionId : match.seatBSessionId,
-        displayName: local.displayName,
-      },
-      peer: {
-        senderId: peer.playerId,
-        sessionId: match.role === "a" ? match.seatBSessionId : match.seatASessionId,
-        displayName: peer.displayName,
-      },
-      rulesHash: RULES_HASH,
-      clock: { now: () => performance.now() },
-      transport: makeRealtimeTransport(channel),
-      diagnostics: networkDiagnostics,
-      onPhaseChange: (phase) => {
-        const view = competitive?.view();
-        if (phase === "countdown" || phase === "playing") {
-          if (currentMusicMatchId !== match.matchId) {
-            audio.startMusic(match.challenge.challengeId, match.round - 1);
-            currentMusicMatchId = match.matchId;
-          } else {
-            audio.resumeMusic();
+    try {
+      competitive = new CompetitiveSession({
+        matchId: match.matchId,
+        seat: match.role,
+        identity: {
+          senderId: local.playerId,
+          sessionId: match.role === "a" ? match.seatASessionId : match.seatBSessionId,
+          displayName: local.displayName,
+        },
+        peer: {
+          senderId: peer.playerId,
+          sessionId: match.role === "a" ? match.seatBSessionId : match.seatASessionId,
+          displayName: peer.displayName,
+        },
+        rulesHash: RULES_HASH,
+        clock: { now: () => performance.now() },
+        transport: makeRealtimeTransport(channel),
+        diagnostics: networkDiagnostics,
+        onPhaseChange: (phase) => {
+          const view = competitive?.view();
+          if (phase === "countdown" || phase === "playing") {
+            if (currentMusicMatchId !== match.matchId) {
+              audio.startMusic(match.challenge.challengeId, match.round - 1);
+              currentMusicMatchId = match.matchId;
+            } else {
+              audio.resumeMusic();
+            }
+          } else if (phase === "network-pause") {
+            audio.pauseMusic();
           }
-        } else if (phase === "network-pause") {
-          audio.pauseMusic();
-        }
-        shell.readyButton.hidden = phase !== "lobby";
-        shell.overlay.hidden = phase === "playing" || phase === "finished";
-        shell.overlayText.textContent = phaseText(
-          phase,
-          view?.countdownTicks ?? 0,
-          view?.connectionStatus,
-          view?.resuming,
-        );
-        setInputsEnabled(phase === "playing");
-      },
-      onRemoteBlackout: () => {
-        audio.play("power-blackout", { pan: 0.45 });
-      },
-      onIncomingGarbage: () => {
-        audio.play("garbage-warning", { pan: 0.45 });
-      },
-      onIncomingAttack: (kind, eventId, value) => {
-        presentationRouter.consumeIncomingAttack(kind, eventId, value);
-      },
-      onTransportRecoveryNeeded: () => {
-        resumeCompetitiveTransport();
-      },
-      onSimulationEffects: (effects) => {
-        processEffects(effects, -0.45);
-      },
-      onTerminal: (_terminal: CompetitiveTerminalState) => {
-        setInputsEnabled(false);
-      },
-      onResultConfirmed: (result) => {
-        void appendDurable(result);
-        showResult(result, selfActor.id);
-      },
-      onDesynchronization: () => {
-        shell.overlay.hidden = false;
-        shell.overlayText.textContent = STRINGS["match.desynchronization"];
-      },
-    });
-    competitive.start();
+          shell.readyButton.hidden = phase !== "lobby";
+          shell.overlay.hidden = phase === "playing" || phase === "finished";
+          shell.overlayText.textContent = phaseText(
+            phase,
+            view?.countdownTicks ?? 0,
+            view?.connectionStatus,
+            view?.resuming,
+          );
+          setInputsEnabled(phase === "playing");
+        },
+        onRemoteBlackout: () => {
+          audio.play("power-blackout", { pan: 0.45 });
+        },
+        onIncomingGarbage: () => {
+          audio.play("garbage-warning", { pan: 0.45 });
+        },
+        onIncomingAttack: (kind, eventId, value) => {
+          presentationRouter.consumeIncomingAttack(kind, eventId, value);
+        },
+        onTransportRecoveryNeeded: () => {
+          return resumeCompetitiveTransport();
+        },
+        onSimulationEffects: (effects) => {
+          processEffects(effects, -0.45);
+        },
+        onTerminal: (_terminal: CompetitiveTerminalState) => {
+          setInputsEnabled(false);
+        },
+        onResultConfirmed: (result) => {
+          void appendDurable(result);
+          showResult(result, selfActor.id);
+        },
+        onDesynchronization: () => {
+          shell.overlay.hidden = false;
+          shell.overlayText.textContent = STRINGS["match.desynchronization"];
+        },
+      });
+      competitive.start();
+    } catch {
+      try {
+        if (competitive === null) channel.leave?.();
+        else competitive.disconnect();
+      } catch {
+        // The failed runtime is already unusable; keep it detached.
+      }
+      competitive = null;
+      shell.overlay.hidden = false;
+      shell.overlayText.textContent = STRINGS["lobby.realtimeUnavailable"];
+      retryActiveMatch();
+      return;
+    }
     startCompetitivePump();
     setInputsEnabled(false);
     shell.overlay.hidden = false;
@@ -1435,7 +1514,7 @@ export async function bootstrap(): Promise<void> {
       if (hidden) competitive?.setHidden(true);
       else {
         audio.resumeMusic();
-        resumeCompetitiveTransport();
+        resumeCompetitiveTransportAfterHostRestore();
       }
     } else if (!hidden && mode === "spectator") {
       audio.resumeMusic();

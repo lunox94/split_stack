@@ -7,6 +7,7 @@ export const NETWORK_DIAGNOSTICS_STORAGE_KEY = "split-stack.network-diagnostics.
 export type NetworkDiagnosticEventKind =
   | "connection-unstable"
   | "channel-replacement-requested"
+  | "channel-replacement-failed"
   | "channel-detached"
   | "channel-attached"
   | "peer-traffic-restored"
@@ -54,6 +55,7 @@ const systemClock: MonotonicClock = { now: () => Date.now() };
 const EVENT_KINDS = new Set<NetworkDiagnosticEventKind>([
   "connection-unstable",
   "channel-replacement-requested",
+  "channel-replacement-failed",
   "channel-detached",
   "channel-attached",
   "peer-traffic-restored",

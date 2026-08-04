@@ -77,6 +77,11 @@ describe("NetworkDiagnostics", () => {
       silenceMs: 5_000,
       attempt: 1,
     });
+    first.record(incidentId, {
+      kind: "channel-replacement-failed",
+      silenceMs: 5_000,
+      attempt: 1,
+    });
 
     const restored = new NetworkDiagnostics({ clock, storage, storageKey });
     expect(restored.snapshot()).toEqual(first.snapshot());

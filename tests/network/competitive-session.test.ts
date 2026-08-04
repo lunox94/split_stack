@@ -29,8 +29,8 @@ function createPair(overrides: {
   onAResultConfirmed?: (result: MatchResultV1) => void;
   onBResultConfirmed?: (result: MatchResultV1) => void;
   onADesynchronization?: (reason: string) => void;
-  onATransportRecoveryNeeded?: () => void;
-  onBTransportRecoveryNeeded?: () => void;
+  onATransportRecoveryNeeded?: () => boolean | void;
+  onBTransportRecoveryNeeded?: () => boolean | void;
   aDiagnostics?: NetworkDiagnostics;
 } = {}) {
   const bus = new InMemoryRealtimeBus();
@@ -893,6 +893,27 @@ describe("CompetitiveSession", () => {
     expect(pair.b.view().phase).toBe("countdown");
   });
 
+  it("releases a replacement whose listener fails and accepts a later transport", () => {
+    const pair = createPair();
+    const leave = vi.fn<() => void>();
+    const rejectedReplacement = {
+      setListener: () => {
+        throw new Error("realtime listener already exists");
+      },
+      send: vi.fn<(data: Uint8Array) => void>(),
+      leave,
+    };
+
+    pair.a.disconnect();
+    expect(() => pair.a.attachTransport(rejectedReplacement)).toThrow(
+      "realtime listener already exists",
+    );
+    expect(leave).toHaveBeenCalledTimes(1);
+
+    const workingReplacement = pair.bus.connect("runtime-a-after-listener-error");
+    expect(() => pair.a.attachTransport(workingReplacement)).not.toThrow();
+  });
+
   it("freezes after a missing keepalive and resumes after state exchange and a fresh countdown", () => {
     const pair = createPair();
     ready(pair);
@@ -1399,6 +1420,37 @@ describe("CompetitiveSession", () => {
     expect(onRecoveryNeeded).toHaveBeenCalledTimes(1);
     advanceBoth(pair, 1, 1);
     expect(onRecoveryNeeded).toHaveBeenCalledTimes(2);
+  });
+
+  it("contains failed channel replacement callbacks and keeps retrying", () => {
+    const diagnostics = new NetworkDiagnostics({ clock: new ManualClock(1_000) });
+    let invocation = 0;
+    const onRecoveryNeeded = vi.fn<() => boolean | void>(() => {
+      invocation += 1;
+      if (invocation === 1) throw new Error("realtime listener already exists");
+      return false;
+    });
+    const pair = createPair({
+      aDiagnostics: diagnostics,
+      onATransportRecoveryNeeded: onRecoveryNeeded,
+    });
+    ready(pair);
+    advanceBoth(pair, 3_000);
+    pair.b.disconnect();
+
+    expect(() => advanceBoth(pair, RULES.network.reconnectingMs)).not.toThrow();
+    expect(onRecoveryNeeded).toHaveBeenCalledTimes(1);
+
+    expect(() => advanceBoth(pair, RULES.network.reconnectingMs)).not.toThrow();
+    expect(onRecoveryNeeded).toHaveBeenCalledTimes(2);
+    expect(
+      diagnostics
+        .snapshot()
+        .incidents[0]?.events.filter(
+          (event) => event.kind === "channel-replacement-failed",
+        )
+        .map((event) => event.attempt),
+    ).toEqual([1, 2]);
   });
 
   it("records a privacy-safe connection recovery timeline", () => {
