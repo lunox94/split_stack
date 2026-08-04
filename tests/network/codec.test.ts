@@ -81,6 +81,27 @@ describe("realtime envelope codec", () => {
     ).toMatchObject({ ok: false, error: "invalid-envelope" });
   });
 
+  it("accepts bounded Oversize and Ghost Jam attack messages", () => {
+    for (const [kind, eventId] of [
+      ["OVERSIZE_PIECE", "oversize-1"],
+      ["GHOST_JAM_START", "ghost-jam-1"],
+    ] as const) {
+      const attack = {
+        ...keepalive,
+        kind,
+        seq: 1,
+        payload: {
+          eventId,
+          targetPlayerId: "player-b",
+        },
+      };
+
+      expect(
+        decodeEnvelope(new TextEncoder().encode(JSON.stringify(attack))),
+      ).toMatchObject({ ok: true });
+    }
+  });
+
   it("accepts the complete unsigned 32-bit state-hash range", () => {
     const topOut = {
       ...keepalive,

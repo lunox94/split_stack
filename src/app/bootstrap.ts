@@ -13,6 +13,7 @@ import {
 import type {
   LogicalAction,
   MatchResultV1,
+  PieceDescriptor,
   PlayerGameState,
   PowerKind,
   StatusState,
@@ -47,7 +48,12 @@ import {
   type Preferences,
   type StoragePort,
 } from "../persistence/settings";
-import { ThreeRenderer, type BoardViewport, type RendererLayout } from "../render/renderer";
+import {
+  ThreeRenderer,
+  type BoardRenderModel,
+  type BoardViewport,
+  type RendererLayout,
+} from "../render/renderer";
 import {
   createAppShell,
   countdownText,
@@ -57,14 +63,18 @@ import {
   type AppShell,
   type HudElements,
 } from "../ui/shell";
+import type { PiecePreviewOptions } from "../ui/piece-preview";
 import { boardModelFromRemoteSnapshot, boardModelFromSimulation } from "./view-model";
+import { cueForIncomingAttack, panForPowerCue } from "./audio-policy";
 import { PresentationRouter } from "./presentation-router";
 import {
   appendBoundedUnique,
   createRuntimeId,
-  displayShapeAt,
   formatDuration,
   isSameRuntimeRoster,
+  shouldGameplayMusicRun,
+  shouldUseStaticMarkedCells,
+  type AppRuntimeMode,
   type RuntimeRoster,
 } from "./runtime-helpers";
 import { materializeRematchRound, type RematchProposalV1 } from "./rematch";
@@ -167,44 +177,19 @@ function makeRealtimeTransport(channel: WebxdcRealtimeChannel): CompetitiveRealt
   };
 }
 
-function shapeName(snapshot: SimulationSnapshot | PlayerSnapshotV1, kind: "hold" | "next"): string {
-  const label = (piece: SimulationSnapshot["preview"][number]): string => {
-    const marker = piece.specialCellIndex === undefined ? "" : "◆";
-    return `${displayShapeAt(piece, performance.now())}${marker}`;
-  };
-  if (kind === "hold") {
-    const held = "player" in snapshot ? snapshot.player.hold : snapshot.hold;
-    return held === null ? "—" : label(held);
-  }
-  const player = "player" in snapshot ? snapshot.player : snapshot;
-  if (player.replacementMode?.kind === "monomino-rush") {
-    return formatString("hud.replacementSeconds", {
-      power: powerLabel("monomino-rush"),
-      seconds: Math.ceil(
-        (player.replacementMode.remainingTicks ?? 0) /
-          RULES.timing.ticksPerSecond,
-      ),
-    });
-  }
-  if (player.replacementMode?.kind === "acid-rain") {
-    return formatString("hud.replacementPieces", {
-      power: powerLabel("acid-rain"),
-      count: player.replacementMode.remainingPieces ?? 0,
-    });
-  }
-  const preview = "player" in snapshot ? snapshot.preview : snapshot.nextFive;
-  return preview.map(label).join(" ") || "—";
-}
+type DisplayPowerKind = PowerKind | "blackout" | "barrier";
 
-function powerLabel(power: PowerKind): string {
-  const keys: Record<PowerKind, StringKey> = {
-    blackout: "power.blackout",
+function powerLabel(power: DisplayPowerKind): string {
+  const keys: Record<DisplayPowerKind, StringKey> = {
     scramble: "power.scramble",
     nuke: "power.nuke",
-    barrier: "power.barrier",
     collapse: "power.collapse",
     "monomino-rush": "power.monominoRush",
     "acid-rain": "power.acidRain",
+    oversize: "power.oversize",
+    "ghost-jam": "power.ghostJam",
+    blackout: "power.blackout",
+    barrier: "power.barrier",
   };
   return STRINGS[keys[power]];
 }
@@ -251,14 +236,14 @@ function updateHud(
   hud: HudElements,
   name: string,
   snapshot: SimulationSnapshot | PlayerSnapshotV1 | undefined,
+  previewOptions: PiecePreviewOptions,
 ): void {
   hud.name.textContent = name;
   if (snapshot === undefined) {
     hud.score.textContent = "0";
     hud.level.textContent = "1";
     hud.lines.textContent = "0";
-    hud.hold.textContent = `${STRINGS["hud.hold"]}: —`;
-    hud.preview.textContent = `${STRINGS["hud.next"]}: —`;
+    hud.setPiecePreviews(null, [], previewOptions);
     hud.upcomingPower.textContent = `${STRINGS["hud.upcomingPower"]}: —`;
     hud.incoming.textContent = `${STRINGS["hud.incomingGarbage"]}: 0`;
     hud.meterFill.style.setProperty("--meter-progress", "0%");
@@ -273,24 +258,41 @@ function updateHud(
   const powerCharge = player?.powerCharge ?? (snapshot as PlayerSnapshotV1).powerCharge;
   const upcomingPower = player?.upcomingPower ?? (snapshot as PlayerSnapshotV1).upcomingPower;
   const statuses = player?.statuses ?? (snapshot as PlayerSnapshotV1).statuses;
+  const replacementMode = player?.replacementMode ??
+    (snapshot as PlayerSnapshotV1).replacementMode;
   const incoming = player?.incomingGarbage ?? (snapshot as PlayerSnapshotV1).incomingGarbage;
   hud.score.textContent = String(score);
   hud.level.textContent = String(level);
   hud.lines.textContent = String(lines);
-  hud.hold.textContent = `${STRINGS["hud.hold"]}: ${shapeName(snapshot, "hold")}`;
-  hud.preview.textContent = `${STRINGS["hud.next"]}: ${shapeName(snapshot, "next")}`;
+  const held = "player" in snapshot ? snapshot.player.hold : snapshot.hold;
+  const next = "player" in snapshot ? snapshot.preview : snapshot.nextFive;
+  hud.setPiecePreviews(held, next, previewOptions);
   hud.upcomingPower.textContent = `${STRINGS["hud.upcomingPower"]}: ${powerLabel(upcomingPower)}`;
   hud.incoming.textContent = `${STRINGS["hud.incomingGarbage"]}: ${incoming.reduce((sum, packet) => sum + packet.rows, 0)}`;
   hud.meterFill.style.setProperty("--meter-progress", meterProgress(powerCharge));
   setPowerMeterAccessibility(hud.meter, powerCharge);
   const document = hud.statuses.ownerDocument;
+  const replacementLabel = replacementMode?.kind === "monomino-rush"
+    ? formatString("hud.replacementSeconds", {
+        power: powerLabel("monomino-rush"),
+        seconds: Math.ceil(
+          (replacementMode.remainingTicks ?? 0) / RULES.timing.ticksPerSecond,
+        ),
+      })
+    : replacementMode?.kind === "acid-rain"
+      ? formatString("hud.replacementPieces", {
+          power: powerLabel("acid-rain"),
+          count: replacementMode.remainingPieces ?? 0,
+        })
+      : null;
   hud.statuses.replaceChildren(
-    ...statuses.map((status) => {
+    ...[...statuses.map(statusLabel), ...(replacementLabel === null ? [] : [replacementLabel])]
+      .map((label) => {
       const pill = document.createElement("span");
       pill.className = "status-pill";
-      pill.textContent = statusLabel(status);
+      pill.textContent = label;
       return pill;
-    }),
+      }),
   );
 }
 
@@ -317,11 +319,21 @@ export async function bootstrap(): Promise<void> {
   let preferences = loadPreferences(storage, mediaPrefersReduced);
   shell.setPreferences(preferences);
   const audio = new AudioEngine();
+  let latestLeftBoard: BoardRenderModel | null = null;
+  let latestRightBoard: BoardRenderModel | null = null;
+  const ghostCellsFor = (board: "left" | "right") =>
+    (board === "left" ? latestLeftBoard : latestRightBoard)?.cells
+      .filter((cell) => cell.role === "ghost")
+      .map((cell) => ({ column: cell.column, row: cell.row })) ?? [];
   let presentationTimeline = new PresentationTimeline();
-  let presentationRouter = new PresentationRouter(presentationTimeline);
+  let presentationRouter = new PresentationRouter(
+    presentationTimeline,
+    undefined,
+    ghostCellsFor,
+  );
   let renderer: ThreeRenderer | null = null;
   let latestLayout: RendererLayout | null = null;
-  let mode: "lobby" | "practice" | "competitive" | "spectator" | "results" = "lobby";
+  let mode: AppRuntimeMode = "lobby";
   let practice: Simulation | null = null;
   let practicePaused = false;
   let practiceAccumulator = 0;
@@ -338,6 +350,66 @@ export async function bootstrap(): Promise<void> {
   let lastLocalLevel = 1;
   let warnedUpcomingPower: PowerKind | null = null;
   let currentMusicMatchId: string | null = null;
+  let primaryGlitchKey: string | null = null;
+  let primaryGlitchStartedAtMs = 0;
+  let glitchPreviewLoopActive = false;
+  let glitchPreviewArrivalPlayed = false;
+
+  const stopGlitchPreview = (): void => {
+    audio.stopGlitchPreviewLoop();
+    primaryGlitchKey = null;
+    primaryGlitchStartedAtMs = 0;
+    glitchPreviewLoopActive = false;
+    glitchPreviewArrivalPlayed = false;
+  };
+
+  const syncPrimaryGlitchPreview = (
+    descriptor: PieceDescriptor | undefined,
+    now: number,
+    instanceId?: string,
+  ): number => {
+    const isGlitch = descriptor?.source === "glitch" ||
+      descriptor?.previewCosmetics !== undefined;
+    if (!isGlitch || descriptor === undefined) {
+      stopGlitchPreview();
+      return now;
+    }
+
+    const staticFallback = preferences.reducedMotion || preferences.reducedFlashes;
+    const descriptorKey = instanceId ?? descriptor.eventId ??
+      `${descriptor.source}:${descriptor.shape}`;
+    const nextKey = `${descriptorKey}:${staticFallback ? "static" : "cycling"}`;
+    if (primaryGlitchKey !== nextKey) {
+      audio.stopGlitchPreviewLoop();
+      primaryGlitchKey = nextKey;
+      primaryGlitchStartedAtMs = now;
+      glitchPreviewLoopActive = false;
+      glitchPreviewArrivalPlayed = false;
+    }
+
+    if (!preferences.effectsEnabled) {
+      audio.stopGlitchPreviewLoop();
+      glitchPreviewLoopActive = false;
+    } else if (staticFallback) {
+      if (!glitchPreviewArrivalPlayed && audio.unlocked) {
+        audio.play("glitch-preview-arrival", { pan: -0.45 });
+        glitchPreviewArrivalPlayed = true;
+      }
+    } else if (!glitchPreviewLoopActive && audio.unlocked) {
+      glitchPreviewLoopActive = audio.startGlitchPreviewLoop({
+        pan: -0.45,
+        elapsedMs: Math.max(0, now - primaryGlitchStartedAtMs),
+      });
+    }
+    return Math.max(0, now - primaryGlitchStartedAtMs);
+  };
+
+  const previewOptions = (elapsedMs: number): PiecePreviewOptions => ({
+    colorPalette: preferences.colorPalette,
+    reducedMotion: preferences.reducedMotion,
+    reducedFlashes: preferences.reducedFlashes,
+    elapsedMs,
+  });
 
   const resetPresentation = (): void => {
     presentationTimeline = new PresentationTimeline({
@@ -346,7 +418,11 @@ export async function bootstrap(): Promise<void> {
       screenShake: preferences.screenShake,
       particleScale: preferences.reducedEffects ? 0 : 1,
     });
-    presentationRouter = new PresentationRouter(presentationTimeline);
+    presentationRouter = new PresentationRouter(
+      presentationTimeline,
+      undefined,
+      ghostCellsFor,
+    );
   };
 
   const musicIntensityFor = (
@@ -453,6 +529,11 @@ export async function bootstrap(): Promise<void> {
     audio.setMusicMuted(!preferences.musicEnabled);
     audio.setMusicVolume(preferences.musicVolume);
     renderer?.setReducedEffects(preferences.reducedEffects);
+    renderer?.setStaticMarkedCells(shouldUseStaticMarkedCells(
+      preferences.reducedMotion,
+      preferences.reducedFlashes,
+      preferences.reducedEffects,
+    ));
     renderer?.setColorPalette(preferences.colorPalette);
   };
 
@@ -476,17 +557,18 @@ export async function bootstrap(): Promise<void> {
           practicePaused = true;
           practice?.setPaused(true);
           shell.overlay.hidden = false;
-          shell.overlayText.textContent = STRINGS["match.webglPaused"];
+          shell.setOverlayMessage(STRINGS["match.webglPaused"]);
         } else if (mode === "competitive") {
           competitive?.setHidden(true);
         }
       },
       onContextRestored: () => {
         shell.unsupported.hidden = true;
-        if (
-          document.visibilityState !== "hidden" &&
-          (mode !== "practice" || !practicePaused)
-        ) {
+        if (document.visibilityState !== "hidden" && shouldGameplayMusicRun(
+          mode,
+          practicePaused,
+          competitive?.view().phase,
+        )) {
           audio.resumeMusic();
         }
         if (mode === "competitive") resumeCompetitiveTransportAfterHostRestore();
@@ -597,6 +679,7 @@ export async function bootstrap(): Promise<void> {
 
   const leaveRuntime = (): void => {
     stopCompetitivePump();
+    stopGlitchPreview();
     audio.stopMusic();
     currentMusicMatchId = null;
     resetPresentation();
@@ -606,6 +689,8 @@ export async function bootstrap(): Promise<void> {
     spectator = null;
     activeMatch = null;
     practice = null;
+    latestLeftBoard = null;
+    latestRightBoard = null;
     lastScrambleActive = false;
     shell.setScrambled(false);
     announcedConfigHash = null;
@@ -615,9 +700,8 @@ export async function bootstrap(): Promise<void> {
   const showLobby = (): void => {
     leaveRuntime();
     mode = "lobby";
-    audio.startMenuMusic();
     shell.show("lobby");
-    shell.readyButton.hidden = false;
+    shell.readinessPanel.hidden = true;
     shell.pausePracticeButton.hidden = true;
     shell.touchButtons.hidden = true;
     shell.unsupported.hidden = renderer !== null;
@@ -627,6 +711,7 @@ export async function bootstrap(): Promise<void> {
   const showResult = (result: MatchResultV1, localPlayerId: string | null): void => {
     if (resultShownFor === result.matchId && mode === "results") return;
     stopCompetitivePump();
+    stopGlitchPreview();
     audio.stopMusic();
     currentMusicMatchId = null;
     resultShownFor = result.matchId;
@@ -675,6 +760,7 @@ export async function bootstrap(): Promise<void> {
     mode = "results";
     lastScrambleActive = false;
     shell.setScrambled(false);
+    stopGlitchPreview();
     audio.stopMusic();
     currentMusicMatchId = null;
     shell.resultsHeading.textContent = snapshot.player.score > previous
@@ -705,14 +791,25 @@ export async function bootstrap(): Promise<void> {
       else if (effect.kind === "line-clear" && effect.phase === "impact") {
         const cue: AudioCue = effect.rows === 1 ? "single" : effect.rows === 2 ? "double" : effect.rows === 3 ? "triple" : "four-line";
         audio.play(cue, { pan });
-      } else if (effect.kind === "garbage-rise") audio.play("garbage-rise", { pan });
+      } else if (effect.kind === "garbage-rise") {
+        audio.playGarbageRise(effect.rows ?? 1, { pan });
+      }
       else if (effect.kind === "hollow-cross" || effect.kind === "glitch-piece") audio.play("special-trigger", { pan });
+      else if (effect.kind === "blackout-start") {
+        audio.play("power-blackout", { pan });
+        audio.duckMusic();
+      } else if (effect.kind === "barrier-start") {
+        audio.play("power-barrier", { pan });
+      }
       else if (effect.kind === "power-activated" && effect.power !== undefined) {
-        audio.play(cueForPower(effect.power), { pan });
+        audio.play(cueForPower(effect.power), {
+          pan: panForPowerCue(effect.power, pan),
+        });
         if (
           effect.power === "nuke" ||
           effect.power === "collapse" ||
-          effect.power === "blackout" ||
+          effect.power === "oversize" ||
+          effect.power === "ghost-jam" ||
           effect.power === "scramble"
         ) {
           audio.duckMusic();
@@ -778,7 +875,7 @@ export async function bootstrap(): Promise<void> {
     lastScrambleActive = false;
     shell.setScrambled(false);
     announcedConfigHash = null;
-    shell.readyButton.hidden = true;
+    shell.readinessPanel.hidden = true;
     shell.pausePracticeButton.hidden = true;
     shell.touchButtons.hidden = true;
     shell.overlay.hidden = true;
@@ -805,7 +902,7 @@ export async function bootstrap(): Promise<void> {
     shell.arena.dataset.mode = "practice";
     shell.left.pane.classList.add("is-local");
     shell.left.boardTarget.setAttribute("aria-label", STRINGS["match.localBoard"]);
-    shell.readyButton.hidden = true;
+    shell.readinessPanel.hidden = true;
     shell.pausePracticeButton.hidden = false;
     shell.pausePracticeButton.textContent = STRINGS["controls.pauseShort"];
     shell.pausePracticeButton.setAttribute("aria-label", STRINGS["controls.pausePractice"]);
@@ -878,6 +975,7 @@ export async function bootstrap(): Promise<void> {
 
   const startActiveMatch = (match: ActiveMatch): void => {
     stopCompetitivePump();
+    stopGlitchPreview();
     audio.stopMusic();
     currentMusicMatchId = null;
     resetPresentation();
@@ -910,7 +1008,7 @@ export async function bootstrap(): Promise<void> {
     shell.arena.dataset.mode = "versus";
     shell.pausePracticeButton.hidden = true;
     shell.touchButtons.hidden = match.role === "spectator" || preferences.touchControls !== "buttons";
-    shell.readyButton.hidden = match.role === "spectator";
+    shell.readinessPanel.hidden = true;
     shell.left.boardTarget.setAttribute("aria-label", match.role === "spectator" ? STRINGS["match.seatABoard"] : STRINGS["match.localBoard"]);
     shell.right.boardTarget.setAttribute("aria-label", match.role === "spectator" ? STRINGS["match.seatBBoard"] : STRINGS["match.opponentBoard"]);
     shell.show("match");
@@ -929,7 +1027,7 @@ export async function bootstrap(): Promise<void> {
       spectator = spectatorRuntime(match);
       if (spectator === null) {
         shell.overlay.hidden = false;
-        shell.overlayText.textContent = STRINGS["lobby.realtimeUnavailable"];
+        shell.setOverlayMessage(STRINGS["lobby.realtimeUnavailable"]);
         setInputsEnabled(false);
         retryActiveMatch();
         return;
@@ -937,9 +1035,9 @@ export async function bootstrap(): Promise<void> {
       shell.left.pane.classList.remove("is-local");
       shell.right.pane.classList.remove("is-remote");
       shell.overlay.hidden = false;
-      shell.overlayText.textContent = match.duplicateRuntime
+      shell.setOverlayMessage(match.duplicateRuntime
         ? STRINGS["lobby.duplicateSession"]
-        : STRINGS["lobby.spectatorNotice"];
+        : STRINGS["lobby.spectatorNotice"]);
       setInputsEnabled(false);
       return;
     }
@@ -947,7 +1045,7 @@ export async function bootstrap(): Promise<void> {
     const seatB = match.challenge.seatB;
     if (seatB === null) {
       shell.overlay.hidden = false;
-      shell.overlayText.textContent = STRINGS["lobby.realtimeUnavailable"];
+      shell.setOverlayMessage(STRINGS["lobby.realtimeUnavailable"]);
       return;
     }
     let channel: WebxdcRealtimeChannel | undefined;
@@ -958,7 +1056,7 @@ export async function bootstrap(): Promise<void> {
     }
     if (channel === undefined) {
       shell.overlay.hidden = false;
-      shell.overlayText.textContent = STRINGS["lobby.realtimeUnavailable"];
+      shell.setOverlayMessage(STRINGS["lobby.realtimeUnavailable"]);
       retryActiveMatch();
       return;
     }
@@ -997,14 +1095,21 @@ export async function bootstrap(): Promise<void> {
           } else if (phase === "network-pause") {
             audio.pauseMusic();
           }
-          shell.readyButton.hidden = phase !== "lobby";
           shell.overlay.hidden = phase === "playing" || phase === "finished";
-          shell.overlayText.textContent = phaseText(
-            phase,
-            view?.countdownTicks ?? 0,
-            view?.connectionStatus,
-            view?.resuming,
-          );
+          if (phase === "lobby") {
+            shell.overlay.hidden = false;
+            shell.setReadiness(
+              view?.localReady ?? false,
+              view?.peerReady ?? false,
+            );
+          } else {
+            shell.setOverlayMessage(phaseText(
+              phase,
+              view?.countdownTicks ?? 0,
+              view?.connectionStatus,
+              view?.resuming,
+            ));
+          }
           setInputsEnabled(phase === "playing");
         },
         onRemoteBlackout: () => {
@@ -1015,6 +1120,11 @@ export async function bootstrap(): Promise<void> {
         },
         onIncomingAttack: (kind, eventId, value) => {
           presentationRouter.consumeIncomingAttack(kind, eventId, value);
+          const cue = cueForIncomingAttack(kind);
+          if (cue !== null) {
+            audio.play(cue, { pan: -0.45 });
+            audio.duckMusic();
+          }
         },
         onTransportRecoveryNeeded: () => {
           return resumeCompetitiveTransport();
@@ -1031,7 +1141,7 @@ export async function bootstrap(): Promise<void> {
         },
         onDesynchronization: () => {
           shell.overlay.hidden = false;
-          shell.overlayText.textContent = STRINGS["match.desynchronization"];
+          shell.setOverlayMessage(STRINGS["match.desynchronization"]);
         },
       });
       competitive.start();
@@ -1044,14 +1154,14 @@ export async function bootstrap(): Promise<void> {
       }
       competitive = null;
       shell.overlay.hidden = false;
-      shell.overlayText.textContent = STRINGS["lobby.realtimeUnavailable"];
+      shell.setOverlayMessage(STRINGS["lobby.realtimeUnavailable"]);
       retryActiveMatch();
       return;
     }
     startCompetitivePump();
     setInputsEnabled(false);
     shell.overlay.hidden = false;
-    shell.overlayText.textContent = STRINGS["match.waitingForReady"];
+    shell.setReadiness(false, false);
   };
 
   const reconcileLobby = (): void => {
@@ -1371,9 +1481,17 @@ export async function bootstrap(): Promise<void> {
   shell.readyButton.addEventListener("click", () => {
     const session = competitive;
     if (session === null) return;
-    const ready = !session.view().localReady;
-    session.setReady(ready);
-    shell.readyButton.textContent = ready ? STRINGS["match.notReady"] : STRINGS["match.ready"];
+    session.setReady(true);
+    const view = session.view();
+    shell.setReadiness(view.localReady, view.peerReady);
+  });
+
+  shell.cancelReadyButton.addEventListener("click", () => {
+    const session = competitive;
+    if (session === null) return;
+    session.setReady(false);
+    const view = session.view();
+    shell.setReadiness(view.localReady, view.peerReady);
   });
 
   shell.pausePracticeButton.addEventListener("click", () => {
@@ -1390,7 +1508,7 @@ export async function bootstrap(): Promise<void> {
       practicePaused ? STRINGS["controls.resumePractice"] : STRINGS["controls.pausePractice"],
     );
     shell.overlay.hidden = !practicePaused;
-    shell.overlayText.textContent = STRINGS["match.practicePaused"];
+    shell.setOverlayMessage(STRINGS["match.practicePaused"]);
     setInputsEnabled(!practicePaused);
   });
 
@@ -1508,23 +1626,19 @@ export async function bootstrap(): Promise<void> {
       practice.setPaused(practicePaused);
       if (hidden) {
         shell.overlay.hidden = false;
-        shell.overlayText.textContent = STRINGS["match.practicePaused"];
+        shell.setOverlayMessage(STRINGS["match.practicePaused"]);
       }
     } else if (mode === "competitive") {
       if (hidden) competitive?.setHidden(true);
       else {
-        audio.resumeMusic();
         resumeCompetitiveTransportAfterHostRestore();
       }
-    } else if (!hidden && mode === "spectator") {
-      audio.resumeMusic();
     }
-    if (
-      !hidden &&
-      mode !== "competitive" &&
-      mode !== "spectator" &&
-      (mode !== "practice" || !practicePaused)
-    ) {
+    if (!hidden && shouldGameplayMusicRun(
+      mode,
+      practicePaused,
+      competitive?.view().phase,
+    )) {
       audio.resumeMusic();
     }
   });
@@ -1563,7 +1677,16 @@ export async function bootstrap(): Promise<void> {
       musicIntensity = musicIntensityFor(snapshot);
       processSnapshotAudio(snapshot);
       leftBoard = boardModelFromSimulation(snapshot, true, false);
-      updateHud(shell.left, selfActor.displayName, snapshot);
+      const glitchElapsedMs = syncPrimaryGlitchPreview(
+        practicePaused ? undefined : snapshot.preview[0],
+        now,
+      );
+      updateHud(
+        shell.left,
+        selfActor.displayName,
+        snapshot,
+        previewOptions(glitchElapsedMs),
+      );
       shell.left.blackout.hidden = true;
       renderMode = "practice";
     } else if (mode === "competitive" && competitive !== null && activeMatch !== null) {
@@ -1590,18 +1713,26 @@ export async function bootstrap(): Promise<void> {
       if (view.local !== undefined) leftBoard = boardModelFromSimulation(view.local, true, false);
       const remoteConcealed = view.remote?.statuses.some((status) => status.kind === "blackout") ?? false;
       if (view.remote !== undefined) rightBoard = boardModelFromRemoteSnapshot(view.remote, false, remoteConcealed);
-      updateHud(shell.left, localName, view.local);
-      updateHud(shell.right, peerName, view.remote);
+      const glitchElapsedMs = syncPrimaryGlitchPreview(
+        view.phase === "playing" ? view.local?.preview[0] : undefined,
+        now,
+        view.local?.player.forcedQueue[0]?.eventId,
+      );
+      updateHud(shell.left, localName, view.local, previewOptions(glitchElapsedMs));
+      updateHud(shell.right, peerName, view.remote, previewOptions(now));
       shell.left.blackout.hidden = true;
       shell.right.blackout.hidden = !remoteConcealed;
       shell.overlay.hidden = view.phase === "playing" || view.phase === "finished";
-      if (!shell.overlay.hidden) {
-        shell.overlayText.textContent = phaseText(
+      if (view.phase === "lobby") {
+        shell.overlay.hidden = false;
+        shell.setReadiness(view.localReady, view.peerReady);
+      } else if (!shell.overlay.hidden) {
+        shell.setOverlayMessage(phaseText(
           view.phase,
           view.countdownTicks,
           view.connectionStatus,
           view.resuming,
-        );
+        ));
       }
       const scrambled = view.local?.player.statuses.some((status) => status.kind === "scramble") ?? false;
       if (scrambled !== lastScrambleActive) {
@@ -1634,6 +1765,7 @@ export async function bootstrap(): Promise<void> {
         });
       }
     } else if (mode === "spectator" && spectator !== null && activeMatch !== null) {
+      stopGlitchPreview();
       const seatB = activeMatch.challenge.seatB;
       const left = spectator.snapshots.latest(activeMatch.challenge.seatA.playerId);
       const right = seatB === null ? undefined : spectator.snapshots.latest(seatB.playerId);
@@ -1641,8 +1773,18 @@ export async function bootstrap(): Promise<void> {
       const rightConcealed = right?.statuses.some((status) => status.kind === "blackout") ?? false;
       if (left !== undefined) leftBoard = boardModelFromRemoteSnapshot(left, false, leftConcealed);
       if (right !== undefined) rightBoard = boardModelFromRemoteSnapshot(right, false, rightConcealed);
-      updateHud(shell.left, activeMatch.challenge.seatA.displayName, left);
-      updateHud(shell.right, seatB?.displayName ?? STRINGS["common.playerFallback"], right);
+      updateHud(
+        shell.left,
+        activeMatch.challenge.seatA.displayName,
+        left,
+        previewOptions(now),
+      );
+      updateHud(
+        shell.right,
+        seatB?.displayName ?? STRINGS["common.playerFallback"],
+        right,
+        previewOptions(now),
+      );
       shell.left.blackout.hidden = !leftConcealed;
       shell.right.blackout.hidden = !rightConcealed;
       if (left !== undefined || right !== undefined) shell.overlay.hidden = true;
@@ -1657,6 +1799,8 @@ export async function bootstrap(): Promise<void> {
     }
 
     audio.updateMusic(musicIntensity);
+    latestLeftBoard = leftBoard;
+    latestRightBoard = rightBoard;
     renderer?.render(
       {
         mode: renderMode,
@@ -1678,7 +1822,6 @@ export async function bootstrap(): Promise<void> {
       : "";
   shell.pausePracticeButton.hidden = true;
   shell.show("lobby");
-  audio.startMenuMusic();
   renderHistory();
   setInputsEnabled(false);
   window.requestAnimationFrame(renderFrame);

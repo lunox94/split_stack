@@ -2,19 +2,31 @@ export type PlayerId = string;
 export type Tick = number;
 export type Rotation = 0 | 1 | 2 | 3;
 export type StandardShape = "I" | "J" | "L" | "O" | "S" | "T" | "Z";
+export type OversizeShape = Exclude<StandardShape, "O">;
 export type CellKind = StandardShape | "cross" | "monomino" | "garbage";
 export type FallingShape = StandardShape | "cross" | "monomino" | "acid";
-export type SpecialKind = "column-bomb" | "garbage-core" | "glitch-core";
-export type PowerKind =
+export type SpecialKind =
+  | "column-bomb"
+  | "garbage-core"
+  | "glitch-core"
   | "blackout"
+  | "barrier";
+export type PowerKind =
   | "scramble"
   | "nuke"
-  | "barrier"
   | "collapse"
   | "monomino-rush"
-  | "acid-rain";
+  | "acid-rain"
+  | "oversize"
+  | "ghost-jam";
 
-export type PieceSource = "base" | "cross" | "glitch" | "monomino" | "acid";
+export type PieceSource =
+  | "base"
+  | "cross"
+  | "glitch"
+  | "oversize"
+  | "monomino"
+  | "acid";
 
 export interface Cell {
   kind: CellKind;
@@ -79,7 +91,7 @@ export interface GarbagePacket {
 }
 
 export interface TimedStatus {
-  kind: "blackout" | "scramble";
+  kind: "blackout" | "scramble" | "ghost-jam";
   remainingTicks: number;
 }
 
@@ -131,6 +143,7 @@ export interface PlayerGameState {
   powerCharge: number;
   powerDeckCursor: number;
   upcomingPower: PowerKind;
+  oversizePieceCursor: number;
   statuses: StatusState[];
   incomingGarbage: GarbagePacket[];
   lastGarbageHole: number | null;

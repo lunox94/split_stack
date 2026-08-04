@@ -24,6 +24,22 @@ const I_KICKS: Readonly<Record<string, readonly Coordinate[]>> = {
   "0>3": [{ x: 0, y: 0 }, { x: -1, y: 0 }, { x: 2, y: 0 }, { x: -1, y: -2 }, { x: 2, y: 1 }],
 };
 
+const OVERSIZE_KICKS = [
+  { x: 0, y: 0 },
+  { x: -1, y: 0 },
+  { x: 1, y: 0 },
+  { x: -2, y: 0 },
+  { x: 2, y: 0 },
+  { x: 0, y: -1 },
+  { x: -1, y: -1 },
+  { x: 1, y: -1 },
+  { x: 0, y: 1 },
+  { x: -1, y: 1 },
+  { x: 1, y: 1 },
+  { x: 0, y: -2 },
+  { x: 0, y: 2 },
+] as const satisfies readonly Coordinate[];
+
 export function nextRotation(
   rotation: Rotation,
   direction: RotationDirection,
@@ -42,4 +58,15 @@ export function getKickTests(
     throw new RangeError(`SRS supports only quarter-turn transitions: ${from}>${to}`);
   }
   return kicks;
+}
+
+export function getOversizeKickTests(
+  from: Rotation,
+  to: Rotation,
+): readonly Coordinate[] {
+  if (from === to) return [{ x: 0, y: 0 }];
+  if ((from + 1) % 4 !== to && (from + 3) % 4 !== to) {
+    throw new RangeError(`Oversize kicks support only quarter turns: ${from}>${to}`);
+  }
+  return OVERSIZE_KICKS;
 }

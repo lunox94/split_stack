@@ -66,6 +66,69 @@ describe("presentation timeline", () => {
     });
   });
 
+  it("expands Oversize as it travels toward the targeted queue", () => {
+    const timeline = new PresentationTimeline();
+    timeline.schedule(
+      {
+        id: "oversize-a-b",
+        kind: "offensive-transfer",
+        attack: "oversize",
+        source: "left",
+        target: "right",
+      },
+      0,
+    );
+
+    expect(timeline.frameAt(40).effects[0]).toMatchObject({
+      attack: "oversize",
+      moment: "charge",
+    });
+    expect(timeline.frameAt(150).effects[0]).toMatchObject({
+      attack: "oversize",
+      moment: "travel",
+    });
+    expect(timeline.frameAt(220).effects[0]).toMatchObject({
+      attack: "oversize",
+      moment: "impact",
+      board: "right",
+    });
+  });
+
+  it("flickers then dissolves a Ghost Jam target with a static accessible fallback", () => {
+    const full = new PresentationTimeline();
+    const ghostCells = [
+      { column: 3, row: 18 },
+      { column: 4, row: 18 },
+      { column: 5, row: 18 },
+      { column: 4, row: 17 },
+    ];
+    full.schedule({ id: "jam", kind: "ghost-jam", board: "right", ghostCells }, 0);
+
+    expect(full.frameAt(50).effects[0]).toMatchObject({
+      kind: "ghost-jam",
+      moment: "ghost-flicker",
+      visualStyle: "motion",
+      ghostCells,
+    });
+    expect(full.frameAt(220).effects[0]).toMatchObject({
+      stage: "action",
+      moment: "ghost-dissolve",
+    });
+
+    const reduced = new PresentationTimeline({ reducedMotion: true });
+    reduced.schedule({
+      id: "jam-reduced",
+      kind: "ghost-jam",
+      board: "left",
+      ghostCells,
+    }, 0);
+    expect(reduced.frameAt(50).effects[0]).toMatchObject({
+      moment: "ghost-flicker",
+      visualStyle: "fade",
+      particleCount: 0,
+    });
+  });
+
   it("telegraphs a five-by-five Nuke before its shockwave", () => {
     const timeline = new PresentationTimeline();
     timeline.schedule(
@@ -211,6 +274,12 @@ describe("presentation timeline", () => {
       0,
     );
     timeline.schedule({ id: "acid", kind: "acid-rain", board: "left" }, 0);
+    timeline.schedule({
+      id: "ghost-jam",
+      kind: "ghost-jam",
+      board: "right",
+      ghostCells: [],
+    }, 0);
 
     expect(timeline.frameAt(50).effects).toEqual(
       expect.arrayContaining([
@@ -219,6 +288,7 @@ describe("presentation timeline", () => {
         expect.objectContaining({ id: "scramble", moment: "glitch" }),
         expect.objectContaining({ id: "monomino", moment: "fracture" }),
         expect.objectContaining({ id: "acid", moment: "charge" }),
+        expect.objectContaining({ id: "ghost-jam", moment: "ghost-flicker" }),
       ]),
     );
   });

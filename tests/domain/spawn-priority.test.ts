@@ -49,9 +49,25 @@ describe("spawn priority", () => {
 
   it("attaches deterministic markers only to base descriptors", () => {
     const factory = createPieceFactory(SEED);
-    const descriptors = Array.from({ length: 20 }, (_, index) => factory.baseAt(index));
+    const descriptors = Array.from({ length: 18 }, (_, index) => factory.baseAt(index));
 
-    expect(descriptors.filter((piece) => piece.specialCellIndex !== undefined)).toHaveLength(2);
+    expect(descriptors.filter((piece) => piece.specialCellIndex !== undefined)).toHaveLength(3);
     expect(descriptors.every((piece) => piece.source === "base")).toBe(true);
+  });
+
+  it("creates mode-specific player power decks and a separate Oversize shape cursor", () => {
+    const competitiveFactory = createPieceFactory(SEED, "competitive");
+    const practiceFactory = createPieceFactory(SEED, "practice");
+    const competitive = createPlayerState("competitive", SEED, "competitive");
+    const practice = createPlayerState("practice", SEED, "practice");
+
+    expect(competitive.upcomingPower).toBe(competitiveFactory.powerAt(0));
+    expect(practice.upcomingPower).toBe(practiceFactory.powerAt(0));
+    expect(practiceFactory.powerAt(0)).toBeOneOf([
+      "nuke", "collapse", "monomino-rush", "acid-rain",
+    ]);
+    expect(Array.from({ length: 6 }, (_, index) => competitiveFactory.oversizeAt(index)).sort())
+      .toEqual(["I", "J", "L", "S", "T", "Z"]);
+    expect(competitive.oversizePieceCursor).toBe(0);
   });
 });

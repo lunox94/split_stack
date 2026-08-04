@@ -94,4 +94,25 @@ describe("board operations", () => {
     )).toBe(4);
     expect(grid.every((row) => row.every((cell) => cell === null))).toBe(true);
   });
+
+  it("never embeds a marker carried by a non-base Oversize descriptor", () => {
+    const piece: ActivePiece = {
+      descriptor: {
+        source: "oversize",
+        shape: "I",
+        specialCellIndex: 2,
+        specialKind: "blackout",
+      },
+      x: 2,
+      y: 17,
+      rotation: 0,
+      lockTicksRemaining: 0,
+      lockResetCount: 0,
+    };
+
+    const merged = mergePiece(createBoard(), piece);
+
+    expect(merged.flat().filter((cell) => cell?.special !== undefined)).toEqual([]);
+    expect(merged.flat().filter((cell) => cell?.kind === "I")).toHaveLength(5);
+  });
 });

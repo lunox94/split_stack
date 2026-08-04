@@ -60,7 +60,9 @@ export type CompetitiveIncomingAttackKind =
   | "garbage"
   | "hollow-cross"
   | "glitch"
+  | "oversize"
   | "scramble"
+  | "ghost-jam"
   | "blackout";
 
 export type CompetitivePhase =
@@ -164,7 +166,9 @@ type GameplayCriticalKind =
   | "GARBAGE_ATTACK"
   | "HOLLOW_CROSS"
   | "GLITCH_PIECE"
+  | "OVERSIZE_PIECE"
   | "SCRAMBLE_START"
+  | "GHOST_JAM_START"
   | "BLACKOUT_START";
 
 type GameplayCriticalEnvelope = RealtimeEnvelope<GameplayCriticalKind>;
@@ -1104,9 +1108,21 @@ export class CompetitiveSession {
           { eventId, targetPlayerId: this.options.peer.senderId },
           tick,
         );
+      } else if (effect.kind === "oversize-piece") {
+        this.reliability.sendCritical(
+          "OVERSIZE_PIECE",
+          { eventId, targetPlayerId: this.options.peer.senderId },
+          tick,
+        );
       } else if (effect.kind === "scramble-start") {
         this.reliability.sendCritical(
           "SCRAMBLE_START",
+          { eventId, targetPlayerId: this.options.peer.senderId },
+          tick,
+        );
+      } else if (effect.kind === "ghost-jam-start") {
+        this.reliability.sendCritical(
+          "GHOST_JAM_START",
           { eventId, targetPlayerId: this.options.peer.senderId },
           tick,
         );
@@ -1222,10 +1238,38 @@ export class CompetitiveSession {
         simulationChanged = this.simulation !== null;
         break;
       }
+      case "OVERSIZE_PIECE": {
+        const message = entry.envelope as RealtimeEnvelope<"OVERSIZE_PIECE">;
+        const effects = this.simulation?.receiveOversize(
+          message.payload.eventId,
+          message.senderId,
+          message.matchTick,
+        ) ?? [];
+        const overflow = effects.find((effect) => effect.kind === "oversize-overflow");
+        if (notify) {
+          if (overflow !== undefined) {
+            const rows = overflow.rows ?? RULES.power.oversizeOverflowGarbageRows;
+            const overflowEventId = `${message.payload.eventId}:overflow`;
+            this.options.onIncomingAttack?.("garbage", overflowEventId, rows);
+            this.options.onIncomingGarbage?.(rows, overflowEventId);
+          } else {
+            this.options.onIncomingAttack?.("oversize", message.payload.eventId);
+          }
+        }
+        simulationChanged = this.simulation !== null;
+        break;
+      }
       case "SCRAMBLE_START": {
         const message = entry.envelope as RealtimeEnvelope<"SCRAMBLE_START">;
         if (notify) this.options.onIncomingAttack?.("scramble", message.payload.eventId);
         this.simulation?.receiveScramble();
+        simulationChanged = this.simulation !== null;
+        break;
+      }
+      case "GHOST_JAM_START": {
+        const message = entry.envelope as RealtimeEnvelope<"GHOST_JAM_START">;
+        if (notify) this.options.onIncomingAttack?.("ghost-jam", message.payload.eventId);
+        this.simulation?.receiveGhostJam();
         simulationChanged = this.simulation !== null;
         break;
       }
@@ -1300,7 +1344,9 @@ export class CompetitiveSession {
       case "GARBAGE_ATTACK":
       case "HOLLOW_CROSS":
       case "GLITCH_PIECE":
+      case "OVERSIZE_PIECE":
       case "SCRAMBLE_START":
+      case "GHOST_JAM_START":
       case "BLACKOUT_START": {
         this.receiveGameplayCritical(envelope as GameplayCriticalEnvelope);
         return;

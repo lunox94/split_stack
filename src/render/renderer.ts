@@ -33,12 +33,22 @@ import {
   type PresentationEffect,
   type PresentationFrame,
 } from "./presentation-timeline";
-import { SPECIAL_ICON_PATHS } from "./special-icons";
+import {
+  SPECIAL_ACCENT_HEX,
+  SPECIAL_ICON_PATHS,
+} from "./special-icons";
+import {
+  COLORBLIND_PIECE_COLORS,
+  PIECE_PATTERNS,
+  STANDARD_PIECE_COLORS,
+  type PieceVisualKind,
+} from "./piece-visual-tokens";
 import {
   QualityController,
   type EffectQuality,
   type RenderQualityProfile,
 } from "./quality";
+import { MarkedCellPulseTracker } from "./marked-cell-pulses";
 
 export type RenderCellKind = CellKind | "acid";
 export type RenderCellRole = "settled" | "active" | "ghost";
@@ -49,10 +59,14 @@ export interface RenderCellModel {
   readonly kind: RenderCellKind;
   readonly role: RenderCellRole;
   readonly special?: SpecialKind;
+  /** Optional 0..1 spawn/lock emphasis supplied by the presentation layer. */
+  readonly specialEmphasis?: number;
 }
 
 export interface BoardRenderModel {
   readonly playerId: PlayerId;
+  /** Stable for one active piece across movement and rotation. */
+  readonly activePieceKey?: string;
   readonly cells: readonly RenderCellModel[];
   readonly focused: boolean;
   readonly concealed: boolean;
@@ -94,6 +108,65 @@ export interface PresentationMotionTransform {
   readonly nukeScale: number;
   readonly collapseTravel: number;
   readonly scrambleOscillation: number;
+  readonly oversizeScale: number;
+  readonly ghostJamFlicker: number;
+  readonly ghostJamOpacity: number;
+}
+
+export interface MarkedCellPresentation {
+  readonly accent: number;
+  readonly emissiveIntensity: number;
+  readonly rimOpacity: number;
+  readonly rimScale: number;
+  readonly haloOpacity: number;
+  readonly haloScale: number;
+}
+
+/**
+ * Public, deterministic marked-cell visual state. The glyph itself stays
+ * static; only its surrounding light breathes. Reduced effects intentionally
+ * ignores time and uses an equally legible bright static treatment.
+ */
+export function markedCellPresentationAt(
+  special: SpecialKind,
+  role: RenderCellRole,
+  quality: EffectQuality,
+  timestampMs: number,
+  emphasis = 0,
+): MarkedCellPresentation {
+  const pulse = Math.max(0, Math.min(1, emphasis));
+  if (role === "ghost") {
+    const breath = quality === "reduced"
+      ? 0.5
+      : (Math.sin(timestampMs / 1_100 * Math.PI * 2) + 1) / 2;
+    return {
+      accent: SPECIAL_ACCENT_HEX[special],
+      emissiveIntensity: 0.14 + breath * 0.08,
+      rimOpacity: 0.12 + breath * 0.14,
+      rimScale: 0.75 + breath * 0.05,
+      haloOpacity: 0.035 + breath * 0.065,
+      haloScale: 0.84 + breath * 0.07,
+    };
+  }
+  if (quality === "reduced") {
+    return {
+      accent: SPECIAL_ACCENT_HEX[special],
+      emissiveIntensity: 0.95,
+      rimOpacity: 0.86,
+      rimScale: 0.94,
+      haloOpacity: 0.34,
+      haloScale: 1.14,
+    };
+  }
+  const breath = (Math.sin(timestampMs / 1_100 * Math.PI * 2) + 1) / 2;
+  return {
+    accent: SPECIAL_ACCENT_HEX[special],
+    emissiveIntensity: 0.72 + breath * 0.35,
+    rimOpacity: Math.min(1, 0.68 + breath * 0.27 + pulse * 0.08),
+    rimScale: 0.92 + breath * 0.05 + pulse * 0.04,
+    haloOpacity: Math.min(0.68, 0.18 + breath * 0.22 + pulse * 0.18),
+    haloScale: 1.06 + breath * 0.16 + pulse * 0.12,
+  };
 }
 
 export function presentationMotionTransform(
@@ -106,13 +179,26 @@ export function presentationMotionTransform(
       nukeScale: 1,
       collapseTravel: 0,
       scrambleOscillation: 0,
+      oversizeScale: effect.attack === "oversize" ? 1.35 : 1,
+      ghostJamFlicker: 0,
+      ghostJamOpacity: 0.62,
     };
   }
+  const transferTravel = effect.moment === "travel"
+    ? Math.max(0, Math.min(1, (effect.stageProgress - 0.36) / 0.64))
+    : effect.moment === "charge" ? 0 : 1;
+  const oversizeScale = effect.attack !== "oversize"
+    ? 1
+    : effect.moment === "charge"
+      ? 0.5 + effect.stageProgress * 0.2
+      : effect.moment === "travel"
+        ? 0.72 + transferTravel * 0.5
+        : effect.moment === "impact"
+          ? 1.5 - effect.stageProgress * 0.1
+          : 1.25;
   return {
     garbageLift: effect.moment === "lift" ? effect.stageProgress : 0,
-    transferTravel: effect.moment === "travel"
-      ? Math.max(0, Math.min(1, (effect.stageProgress - 0.36) / 0.64))
-      : effect.moment === "charge" ? 0 : 1,
+    transferTravel,
     nukeScale: effect.moment === "shockwave"
       ? 1 + effect.stageProgress * 0.38
       : 0.9 + Math.sin(effect.progress * Math.PI * 12) * 0.035,
@@ -122,6 +208,13 @@ export function presentationMotionTransform(
         : effect.stage === "anticipation" ? 1 : 0
       : 1 - effect.stageProgress,
     scrambleOscillation: Math.sin(effect.progress * Math.PI * 18),
+    oversizeScale,
+    ghostJamFlicker: effect.kind === "ghost-jam"
+      ? Math.sin(effect.progress * Math.PI * 18)
+      : 0,
+    ghostJamOpacity: effect.kind === "ghost-jam" && effect.moment === "ghost-dissolve"
+      ? 1 - effect.stageProgress
+      : 1,
   };
 }
 
@@ -171,6 +264,27 @@ function boardMovementEffectFor(
   return undefined;
 }
 
+function offensiveTransferColor(attack: PresentationEffect["attack"]): number {
+  switch (attack) {
+    case "blackout":
+      return SPECIAL_ACCENT_HEX.blackout;
+    case "garbage":
+      return SPECIAL_ACCENT_HEX["garbage-core"];
+    case "glitch":
+      return SPECIAL_ACCENT_HEX["glitch-core"];
+    case "oversize":
+      return SPECIAL_ACCENT_HEX["column-bomb"];
+    case "ghost-jam":
+      return SPECIAL_ACCENT_HEX.barrier;
+    case "scramble":
+      return 0xff5cdb;
+    case "hollow-cross":
+      return 0xf5ff72;
+    default:
+      return 0xb5ff62;
+  }
+}
+
 export interface ThreeRendererOptions {
   readonly initialQuality?: EffectQuality;
   readonly onContextLost?: () => void;
@@ -190,34 +304,6 @@ export class WebGlUnavailableError extends Error {
   }
 }
 
-const BASE_COLORS: Record<RenderCellKind, number> = {
-  I: 0x2bd9fe,
-  J: 0x3975ff,
-  L: 0xff9029,
-  O: 0xffd83d,
-  S: 0x43dc78,
-  T: 0xb65cff,
-  Z: 0xff4f62,
-  cross: 0xf5ff72,
-  monomino: 0xf2f6ff,
-  garbage: 0x768094,
-  acid: 0x8dff5a,
-};
-
-const COLORBLIND_COLORS: Record<RenderCellKind, number> = {
-  I: 0x56b4e9,
-  J: 0x0072b2,
-  L: 0xe69f00,
-  O: 0xf0e442,
-  S: 0x009e73,
-  T: 0xcc79a7,
-  Z: 0xd55e00,
-  cross: 0xffffff,
-  monomino: 0xbde8ff,
-  garbage: 0x777777,
-  acid: 0x8cff00,
-};
-
 const MAX_INSTANCES_PER_POOL = 512;
 export const MAX_PRESENTATION_PARTICLES = 96;
 const BOARD_GUTTER_PX = 12;
@@ -231,6 +317,12 @@ interface CellPool {
 interface EffectPool {
   readonly mesh: InstancedMesh;
   readonly material: MeshBasicMaterial;
+}
+
+interface EffectRectOptions {
+  readonly additive?: boolean;
+  readonly z?: number;
+  readonly countsTowardPresentationLimit?: boolean;
 }
 
 function createAcidDropGeometry(): ShapeGeometry {
@@ -329,6 +421,7 @@ export class ThreeRenderer {
   readonly #position = new Vector3();
   readonly #scale = new Vector3();
   readonly #quality: QualityController;
+  readonly #markedCellPulses = new MarkedCellPulseTracker();
   readonly #panels: readonly [BoardPanel, BoardPanel];
   #layout: RendererLayout = calculateRendererLayout(1, 1, "versus");
   #lastLayoutKey = "";
@@ -338,6 +431,7 @@ export class ThreeRenderer {
   #palette: "standard" | "colorblind" = "standard";
   #effectInstanceCount = 0;
   #frameTimestampMs = 0;
+  #staticMarkedCells = false;
 
   constructor(canvas: HTMLCanvasElement, options: ThreeRendererOptions = {}) {
     this.#canvas = canvas;
@@ -405,6 +499,10 @@ export class ThreeRenderer {
     this.setQuality(reduced ? "reduced" : "full");
   }
 
+  setStaticMarkedCells(staticPresentation: boolean): void {
+    this.#staticMarkedCells = staticPresentation;
+  }
+
   setColorPalette(palette: "standard" | "colorblind"): void {
     if (this.#palette === palette) return;
     this.#palette = palette;
@@ -415,12 +513,11 @@ export class ThreeRenderer {
         string,
       ];
       const color = new Color(this.#colors()[kind]);
-      if (special !== "ordinary") color.offsetHSL(0, 0.08, 0.18);
       pool.material.color.copy(color);
       pool.material.emissive.setHex(
         special === "ordinary"
           ? 0x000000
-          : color.clone().multiplyScalar(role === "ghost" ? 0.1 : 0.28).getHex(),
+          : SPECIAL_ACCENT_HEX[special as SpecialKind],
       );
       pool.material.needsUpdate = true;
     }
@@ -437,35 +534,40 @@ export class ThreeRenderer {
     if (!this.#quality.shouldRender(timestampMs)) return;
 
     this.#frameTimestampMs = timestampMs;
-    this.#resize(frame.mode);
+    const decoratedFrame = this.#markedCellPulses.decorateFrame(frame, timestampMs);
+    this.#resize(decoratedFrame.mode);
     for (const [key, pool] of this.#pools) {
       pool.mesh.count = 0;
       if (!key.endsWith(":ordinary")) {
-        const role = key.split(":")[1];
-        pool.material.emissiveIntensity =
-          role === "ghost"
-            ? 0.18
-            : this.#quality.profile.effects === "reduced"
-              ? 0.72
-            : 0.85 + Math.sin(timestampMs / 180) * 0.2;
+        const [, role, special] = key.split(":") as [
+          RenderCellKind,
+          RenderCellRole,
+          SpecialKind,
+        ];
+        pool.material.emissiveIntensity = markedCellPresentationAt(
+          special,
+          role,
+          this.#markedCellQuality(),
+          timestampMs,
+        ).emissiveIntensity;
       }
     }
     for (const pool of this.#effectPools.values()) pool.mesh.count = 0;
     this.#effectInstanceCount = 0;
     this.#scene.position.set(0, 0, 0);
     this.#drawBoard(
-      frame.left,
+      decoratedFrame.left,
       this.#layout.left,
       this.#panels[0],
-      boardMovementEffectFor(frame.presentation, "left"),
+      boardMovementEffectFor(decoratedFrame.presentation, "left"),
     );
     this.#drawBoard(
-      frame.right,
+      decoratedFrame.right,
       this.#layout.right,
       this.#panels[1],
-      boardMovementEffectFor(frame.presentation, "right"),
+      boardMovementEffectFor(decoratedFrame.presentation, "right"),
     );
-    this.#drawPresentation(frame.presentation);
+    this.#drawPresentation(decoratedFrame.presentation);
     for (const pool of this.#pools.values()) {
       pool.mesh.instanceMatrix.needsUpdate = true;
     }
@@ -486,6 +588,7 @@ export class ThreeRenderer {
     this.#effectPools.clear();
     for (const texture of this.#textures.values()) texture.dispose();
     this.#textures.clear();
+    this.#markedCellPulses.clear();
     this.#cellGeometry.dispose();
     this.#acidGeometry.dispose();
     this.#effectGeometry.dispose();
@@ -595,14 +698,27 @@ export class ThreeRenderer {
     pool.mesh.setMatrixAt(pool.mesh.count, this.#matrix);
     pool.mesh.count += 1;
     if (cell.special !== undefined) {
-      const ghost = cell.role === "ghost";
-      const pulse = this.#quality.profile.effects === "reduced"
-        ? 0.42
-        : 0.48 + Math.sin(this.#frameTimestampMs / 180) * 0.14;
-      const opacity = ghost ? 0.13 : pulse;
-      const span = viewport.cellSize * (ghost ? 0.68 : 0.86);
-      const edge = viewport.cellSize * 0.055;
-      const color = this.#colors()[cell.kind];
+      const presentation = markedCellPresentationAt(
+        cell.special,
+        cell.role,
+        this.#markedCellQuality(),
+        this.#frameTimestampMs,
+        cell.specialEmphasis,
+      );
+      const emphasisKey = (cell.specialEmphasis ?? 0) > 0 ? "emphasis" : "base";
+      const haloZ = cell.role === "active" ? 0.45 : -0.2;
+      this.#drawEffectRect(
+        `special-halo-${cell.role}-${cell.special}-${emphasisKey}`,
+        presentation.accent,
+        x,
+        y,
+        viewport.cellSize * presentation.haloScale,
+        viewport.cellSize * presentation.haloScale,
+        presentation.haloOpacity,
+        { z: haloZ, countsTowardPresentationLimit: false },
+      );
+      const span = viewport.cellSize * presentation.rimScale;
+      const edge = viewport.cellSize * (cell.role === "ghost" ? 0.035 : 0.07);
       for (const [rimX, rimY, width, height] of [
         [x, y - span / 2, span, edge],
         [x, y + span / 2, span, edge],
@@ -610,13 +726,17 @@ export class ThreeRenderer {
         [x + span / 2, y, edge, span],
       ] as const) {
         this.#drawEffectRect(
-          `special-rim-${cell.role}-${cell.special}`,
-          color,
+          `special-rim-${cell.role}-${cell.special}-${emphasisKey}`,
+          presentation.accent,
           rimX,
           rimY,
           width,
           height,
-          opacity,
+          presentation.rimOpacity,
+          {
+            z: cell.role === "active" ? 1.2 : 0.65,
+            countsTowardPresentationLimit: false,
+          },
         );
       }
     }
@@ -714,14 +834,17 @@ export class ThreeRenderer {
     effect: PresentationEffect,
     viewport: BoardViewport,
   ): void {
-    const motion = presentationMotionTransform(effect);
+    const visualEffect = this.#quality.profile.effects === "reduced"
+      ? { ...effect, visualStyle: "fade" as const }
+      : effect;
+    const motion = presentationMotionTransform(visualEffect);
     const bottomY = this.#layout.height - (viewport.boardY + viewport.boardHeight);
     const centerX = viewport.boardX + viewport.boardWidth / 2;
     const centerY = bottomY + viewport.boardHeight / 2;
     if (effect.kind === "line-clear") {
       for (const row of effect.rows ?? []) {
         const point = this.#cellPoint(viewport, 0, row);
-        const height = viewport.cellSize * (effect.visualStyle === "fade"
+        const height = viewport.cellSize * (visualEffect.visualStyle === "fade"
           ? 0.28
           : effect.moment === "compress" ? 1 - effect.stageProgress * 0.62 : 0.28);
         this.#drawEffectRect(
@@ -756,15 +879,39 @@ export class ThreeRenderer {
       if (sourceViewport !== null && targetViewport !== null) {
         const sourceX = sourceViewport.boardX + sourceViewport.boardWidth / 2;
         const targetX = targetViewport.boardX + targetViewport.boardWidth / 2;
-        this.#drawEffectRect(
-          `transfer-${effect.attack ?? "power"}`,
-          effect.attack === "blackout" ? 0x7563ff : 0xb5ff62,
-          sourceX + (targetX - sourceX) * motion.transferTravel,
-          centerY,
-          viewport.cellSize * (0.55 + (effect.moment === "impact" ? 0.8 : 0)),
-          viewport.cellSize * 0.55,
-          0.82,
-        );
+        const transferX = sourceX + (targetX - sourceX) * motion.transferTravel;
+        const color = offensiveTransferColor(effect.attack);
+        if (effect.attack === "oversize") {
+          const blockSize = viewport.cellSize * 0.42 * motion.oversizeScale;
+          for (const [column, row] of [
+            [-1, 0],
+            [0, 0],
+            [1, 0],
+            [0, -1],
+          ] as const) {
+            this.#drawEffectRect(
+              "transfer-oversize",
+              color,
+              transferX + column * blockSize,
+              centerY + row * blockSize,
+              blockSize * 0.84,
+              blockSize * 0.84,
+              visualEffect.visualStyle === "fade" ? 0.7 : 0.86,
+            );
+          }
+        } else {
+          this.#drawEffectRect(
+            `transfer-${effect.attack ?? "power"}`,
+            color,
+            transferX,
+            centerY,
+            viewport.cellSize * (0.55 + (effect.moment === "impact" ? 0.8 : 0)),
+            effect.attack === "ghost-jam"
+              ? viewport.cellSize * 0.18
+              : viewport.cellSize * 0.55,
+            0.82,
+          );
+        }
       }
     } else if (effect.kind === "nuke" && effect.center !== undefined) {
       const point = this.#cellPoint(
@@ -808,7 +955,7 @@ export class ThreeRenderer {
     } else if (effect.kind === "acid-dissolve") {
       for (const row of effect.resolvedRows ?? []) {
         const point = this.#cellPoint(viewport, effect.column ?? 0, row);
-        const scale = effect.visualStyle === "fade"
+        const scale = visualEffect.visualStyle === "fade"
           ? 1
           : Math.max(0.12, 1 - effect.stageProgress * 0.72);
         this.#drawEffectRect(
@@ -860,7 +1007,7 @@ export class ThreeRenderer {
         );
       }
     } else if (effect.kind === "blackout") {
-      const scale = effect.visualStyle === "fade"
+      const scale = visualEffect.visualStyle === "fade"
         ? 1
         : Math.max(0.04, effect.stageProgress);
       this.#drawEffectRect(
@@ -871,7 +1018,7 @@ export class ThreeRenderer {
         viewport.boardWidth * scale,
         viewport.boardHeight,
         0.86,
-        false,
+        { additive: false },
       );
     } else if (effect.kind === "scramble") {
       const offset = motion.scrambleOscillation * viewport.cellSize;
@@ -884,8 +1031,48 @@ export class ThreeRenderer {
         viewport.cellSize * 0.16,
         0.58,
       );
+    } else if (effect.kind === "ghost-jam") {
+      if (effect.stage === "follow-through") {
+        this.#drawParticleBurst(
+          effect,
+          viewport,
+          centerX,
+          centerY,
+          SPECIAL_ACCENT_HEX.barrier,
+        );
+      } else {
+        const jitter = visualEffect.visualStyle === "fade"
+          ? 0
+          : motion.ghostJamFlicker * viewport.cellSize * 0.16;
+        const opacity = visualEffect.visualStyle === "fade"
+          ? 0.58
+          : motion.ghostJamOpacity *
+            (0.46 + Math.abs(motion.ghostJamFlicker) * 0.34);
+        const blockSize = viewport.cellSize * 0.74;
+        for (const point of effect.ghostCells ?? []) {
+          if (
+            point.column < 0 ||
+            point.column >= RULES.board.width ||
+            point.row < RULES.board.hiddenRows ||
+            point.row >= RULES.board.height
+          ) continue;
+          const cellX = viewport.boardX + (point.column + 0.5) * viewport.cellSize;
+          const cellTop = viewport.boardY +
+            (point.row - RULES.board.hiddenRows + 0.5) * viewport.cellSize;
+          const cellY = this.#layout.height - cellTop;
+          this.#drawEffectRect(
+            "ghost-jam-cell",
+            SPECIAL_ACCENT_HEX.barrier,
+            cellX + jitter * (point.column % 2 === 0 ? 1 : -1),
+            cellY,
+            blockSize,
+            blockSize,
+            opacity * 0.48,
+          );
+        }
+      }
     } else if (effect.kind === "monomino-rush") {
-      if (effect.visualStyle === "fade") {
+      if (visualEffect.visualStyle === "fade") {
         this.#drawEffectRect(
           "monomino-fade",
           0xc5f5ff,
@@ -915,7 +1102,7 @@ export class ThreeRenderer {
     } else if (effect.kind === "special-chain") {
       for (const special of effect.resolvedSpecials ?? []) {
         const point = this.#cellPoint(viewport, special.column, special.row);
-        const color = special.special === "garbage-core" ? 0xff755d : 0xb5ff62;
+        const color = SPECIAL_ACCENT_HEX[special.special];
         this.#drawEffectRect(
           `special-${special.special}`,
           color,
@@ -986,22 +1173,42 @@ export class ThreeRenderer {
     width: number,
     height: number,
     opacity: number,
-    additive = true,
+    options: EffectRectOptions = {},
   ): void {
-    if (this.#effectInstanceCount >= MAX_PRESENTATION_PARTICLES) return;
-    const pool = this.#effectPoolFor(key, color, additive);
-    if (pool.mesh.count >= MAX_PRESENTATION_PARTICLES) return;
+    const countsTowardPresentationLimit =
+      options.countsTowardPresentationLimit ?? true;
+    if (
+      countsTowardPresentationLimit &&
+      this.#effectInstanceCount >= MAX_PRESENTATION_PARTICLES
+    ) {
+      return;
+    }
+    const instanceLimit = countsTowardPresentationLimit
+      ? MAX_PRESENTATION_PARTICLES
+      : MAX_INSTANCES_PER_POOL;
+    const pool = this.#effectPoolFor(
+      key,
+      color,
+      options.additive ?? true,
+      instanceLimit,
+    );
+    if (pool.mesh.count >= instanceLimit) return;
     pool.material.opacity = Math.max(0, Math.min(1, opacity));
-    this.#position.set(x, y, 3);
+    this.#position.set(x, y, options.z ?? 3);
     this.#scale.set(Math.max(0.01, width), Math.max(0.01, height), 1);
     this.#matrix.compose(this.#position, this.#camera.quaternion, this.#scale);
     pool.mesh.setMatrixAt(pool.mesh.count, this.#matrix);
     pool.mesh.count += 1;
-    this.#effectInstanceCount += 1;
+    if (countsTowardPresentationLimit) this.#effectInstanceCount += 1;
   }
 
-  #effectPoolFor(key: string, color: number, additive: boolean): EffectPool {
-    const poolKey = `${key}:${additive ? "add" : "normal"}`;
+  #effectPoolFor(
+    key: string,
+    color: number,
+    additive: boolean,
+    instanceLimit: number,
+  ): EffectPool {
+    const poolKey = `${key}:${additive ? "add" : "normal"}:${instanceLimit}`;
     const existing = this.#effectPools.get(poolKey);
     if (existing !== undefined) return existing;
     const material = new MeshBasicMaterial({
@@ -1014,7 +1221,7 @@ export class ThreeRenderer {
     const mesh = new InstancedMesh(
       this.#effectGeometry,
       material,
-      MAX_PRESENTATION_PARTICLES,
+      instanceLimit,
     );
     mesh.count = 0;
     mesh.frustumCulled = false;
@@ -1033,13 +1240,22 @@ export class ThreeRenderer {
     const baseColor = new Color(this.#colors()[cell.kind]);
     const isGhost = cell.role === "ghost";
     const isSpecial = cell.special !== undefined;
-    if (isSpecial) baseColor.offsetHSL(0, 0.08, 0.18);
+    const texture = isGhost ? null : this.#patternTexture(cell.kind, cell.special);
     const material = new MeshStandardMaterial({
       color: baseColor,
-      map: isGhost ? null : this.#patternTexture(cell.kind, cell.special),
+      map: texture,
       emissive: isSpecial
-        ? baseColor.clone().multiplyScalar(isGhost ? 0.1 : 0.28)
+        ? SPECIAL_ACCENT_HEX[cell.special!]
         : 0x000000,
+      emissiveMap: isSpecial ? texture : null,
+      emissiveIntensity: isSpecial
+        ? markedCellPresentationAt(
+            cell.special!,
+            cell.role,
+            this.#markedCellQuality(),
+            this.#frameTimestampMs,
+          ).emissiveIntensity
+        : 1,
       metalness: cell.kind === "garbage" ? 0.58 : 0.22,
       roughness: cell.kind === "garbage" ? 0.78 : 0.42,
       transparent: isGhost,
@@ -1061,8 +1277,14 @@ export class ThreeRenderer {
     return created;
   }
 
-  #colors(): Readonly<Record<RenderCellKind, number>> {
-    return this.#palette === "colorblind" ? COLORBLIND_COLORS : BASE_COLORS;
+  #colors(): Readonly<Record<PieceVisualKind, string>> {
+    return this.#palette === "colorblind"
+      ? COLORBLIND_PIECE_COLORS
+      : STANDARD_PIECE_COLORS;
+  }
+
+  #markedCellQuality(): EffectQuality {
+    return this.#staticMarkedCells ? "reduced" : this.#quality.profile.effects;
   }
 
   #patternTexture(
@@ -1083,8 +1305,8 @@ export class ThreeRenderer {
     context.fillStyle = "rgba(18, 24, 38, 0.25)";
     context.lineWidth = 5;
 
-    switch (kind) {
-      case "I":
+    switch (PIECE_PATTERNS[kind]) {
+      case "diagonal":
         for (let offset = -64; offset <= 64; offset += 16) {
           context.beginPath();
           context.moveTo(offset, 64);
@@ -1092,13 +1314,13 @@ export class ThreeRenderer {
           context.stroke();
         }
         break;
-      case "J":
+      case "vertical":
         for (let x = 8; x < 64; x += 16) context.fillRect(x, 0, 5, 64);
         break;
-      case "L":
+      case "horizontal":
         for (let y = 8; y < 64; y += 16) context.fillRect(0, y, 64, 5);
         break;
-      case "O":
+      case "dots":
         for (let y = 12; y < 64; y += 20) {
           for (let x = 12; x < 64; x += 20) {
             context.beginPath();
@@ -1107,7 +1329,7 @@ export class ThreeRenderer {
           }
         }
         break;
-      case "S":
+      case "chevron-left":
         for (let x = -16; x < 64; x += 24) {
           context.beginPath();
           context.moveTo(x, 16);
@@ -1116,7 +1338,7 @@ export class ThreeRenderer {
           context.stroke();
         }
         break;
-      case "T":
+      case "crosses":
         for (let y = 16; y < 64; y += 32) {
           for (let x = 16; x < 64; x += 32) {
             context.fillRect(x - 3, y - 10, 6, 20);
@@ -1124,7 +1346,7 @@ export class ThreeRenderer {
           }
         }
         break;
-      case "Z":
+      case "chevron-right":
         for (let offset = -32; offset <= 64; offset += 24) {
           context.beginPath();
           context.moveTo(offset, 0);
@@ -1133,7 +1355,7 @@ export class ThreeRenderer {
           context.stroke();
         }
         break;
-      case "garbage":
+      case "grid":
         context.lineWidth = 3;
         for (let index = 0; index <= 64; index += 16) {
           context.beginPath();
@@ -1153,13 +1375,13 @@ export class ThreeRenderer {
         context.lineTo(59, 32);
         context.stroke();
         break;
-      case "monomino":
+      case "circle":
         context.lineWidth = 6;
         context.beginPath();
         context.arc(32, 32, 17, 0, Math.PI * 2);
         context.stroke();
         break;
-      case "acid":
+      case "bubbles":
         for (const [x, y, radius] of [
           [16, 18, 6],
           [43, 14, 4],
@@ -1174,16 +1396,20 @@ export class ThreeRenderer {
     }
 
     if (special !== undefined) {
-      context.fillStyle = "rgba(255, 255, 255, 0.86)";
-      context.strokeStyle = "rgba(9, 12, 22, 0.92)";
+      // Match the DOM guide/preview badge: dark disc, bright canonical glyph.
+      // The marked material's accent emissive map colors the bright strokes.
+      context.fillStyle = "rgba(9, 12, 22, 0.92)";
+      context.strokeStyle = "rgba(255, 255, 255, 0.86)";
       context.lineWidth = 5;
       context.beginPath();
       context.arc(32, 32, 16, 0, Math.PI * 2);
       context.fill();
       context.stroke();
-      context.strokeStyle = "rgba(9, 12, 22, 0.96)";
-      context.fillStyle = "rgba(9, 12, 22, 0.96)";
-      context.lineWidth = 4;
+      context.strokeStyle = "rgba(255, 255, 255, 0.96)";
+      context.fillStyle = "rgba(255, 255, 255, 0.96)";
+      context.lineCap = "round";
+      context.lineJoin = "round";
+      context.lineWidth = 5;
       context.stroke(new Path2D(SPECIAL_ICON_PATHS[special]));
     }
 

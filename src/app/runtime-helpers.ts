@@ -1,4 +1,5 @@
 import { RULES } from "../config/rules";
+import type { CompetitivePhase } from "../match/competitive-session";
 import type {
   PieceDescriptor,
   PlayerLiveStats,
@@ -20,6 +21,32 @@ export interface RuntimeRoster {
 
 export interface DurableEventIdentity {
   eventId: string;
+}
+
+export type AppRuntimeMode =
+  | "lobby"
+  | "practice"
+  | "competitive"
+  | "spectator"
+  | "results";
+
+export function shouldGameplayMusicRun(
+  mode: AppRuntimeMode,
+  practicePaused: boolean,
+  competitivePhase?: CompetitivePhase,
+): boolean {
+  if (mode === "competitive") {
+    return competitivePhase === "countdown" || competitivePhase === "playing";
+  }
+  return mode === "spectator" || (mode === "practice" && !practicePaused);
+}
+
+export function shouldUseStaticMarkedCells(
+  reducedMotion: boolean,
+  reducedFlashes: boolean,
+  reducedEffects: boolean,
+): boolean {
+  return reducedMotion || reducedFlashes || reducedEffects;
 }
 
 /** A runtime-scoped, non-identifying 128-bit token. */

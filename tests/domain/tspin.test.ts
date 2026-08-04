@@ -43,4 +43,15 @@ describe("simplified T-Spin recognition", () => {
 
     expect(classifyTSpin(grid, piece, 0)).toBe("t-spin-none");
   });
+
+  it("never classifies an Oversize T as a T-Spin", () => {
+    const piece = active("rotate-cw");
+    piece.descriptor = { source: "oversize", shape: "T" };
+    const grid = createBoard();
+    grid[10]![3] = { kind: "garbage" };
+    grid[10]![5] = { kind: "garbage" };
+    grid[12]![3] = { kind: "garbage" };
+
+    expect(classifyTSpin(grid, piece, 2)).toBe("double");
+  });
 });

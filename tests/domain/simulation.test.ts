@@ -275,7 +275,7 @@ describe("simulation facade", () => {
     player.active!.y = 18;
     player.active!.rotation = 1;
     player.powerCharge = 13;
-    player.upcomingPower = "barrier";
+    player.upcomingPower = "nuke";
     const simulation = createSimulation({
       seed: SEED,
       playerId: "a",
@@ -289,18 +289,18 @@ describe("simulation facade", () => {
     expect(activationEffects).toContainEqual(
       expect.objectContaining({
         kind: "power-activated",
-        power: "barrier",
+        power: "nuke",
         phase: "anticipation",
       }),
     );
     expect(simulation.readSnapshot().player.powerCharge).toBe(8);
     expect(simulation.readSnapshot().player.stats.powersActivated).toBe(1);
     expect(simulation.readSnapshot().player.statuses).not.toContainEqual(
-      expect.objectContaining({ kind: "barrier" }),
+      expect.objectContaining({ kind: "blackout" }),
     );
     expect(simulation.readSnapshot().resolution).toMatchObject({
       kind: "power-impact",
-      power: "barrier",
+      power: "nuke",
       remainingTicks: 12,
       totalTicks: 12,
     });
@@ -313,15 +313,13 @@ describe("simulation facade", () => {
     expect(impactEffects).toContainEqual(
       expect.objectContaining({
         kind: "power-impact",
-        power: "barrier",
+        power: "nuke",
         phase: "impact",
       }),
     );
-    expect(simulation.readSnapshot().player.statuses).toContainEqual({
-      kind: "barrier",
-      remainingTicks: 1_200,
-      capacity: 4,
-    });
+    expect(impactEffects).toContainEqual(
+      expect.objectContaining({ kind: "nuke", phase: "impact" }),
+    );
   });
 
   it("emits a distinct T-Spin effect for audio and presentation", () => {
@@ -352,12 +350,12 @@ describe("simulation facade", () => {
     for (let column = 0; column < 10; column += 1) {
       if (column !== 4 && column !== 5) player.grid[21]![column] = { kind: "J" };
     }
-    player.grid[21]![0] = { kind: "J", special: "garbage-core" };
+    player.grid[21]![0] = { kind: "J", special: "barrier" };
     player.active = spawnPiece(player.grid, { source: "base", shape: "O" });
     player.active!.x = 3;
     player.active!.y = 20;
     player.powerCharge = 19;
-    player.upcomingPower = "barrier";
+    player.upcomingPower = "nuke";
     player.incomingGarbage = [{ id: "incoming", rows: 1, readyTick: 0, hole: 2 }];
     const simulation = createSimulation({
       seed: SEED,
@@ -391,7 +389,7 @@ describe("simulation facade", () => {
     expect(simulation.readSnapshot().player.statuses).toContainEqual({
       kind: "barrier",
       remainingTicks: 1_200,
-      capacity: 4,
+      capacity: 3,
     });
   });
 
@@ -945,5 +943,214 @@ describe("simulation facade", () => {
       shape: "L",
       eventId: "glitch:1",
     });
+  });
+
+  it("limits a new Practice simulation to the self-benefit meter deck", () => {
+    const simulation = createSimulation({ seed: SEED, playerId: "a", practice: true });
+
+    expect(["nuke", "collapse", "monomino-rush", "acid-rain"]).toContain(
+      simulation.readSnapshot().player.upcomingPower,
+    );
+  });
+
+  it("emits target attack effects for the new meter powers without self-applying them", () => {
+    const simulation = createSimulation({ seed: SEED, playerId: "a", practice: true });
+
+    const oversizeStart = simulation.activatePower("oversize");
+    const oversizeImpact = simulation.tick(12);
+    expect(oversizeStart).toContainEqual(
+      expect.objectContaining({ kind: "power-activated", power: "oversize" }),
+    );
+    expect(oversizeImpact).toContainEqual(
+      expect.objectContaining({ kind: "oversize-piece" }),
+    );
+    expect(simulation.readSnapshot().player.forcedQueue).toEqual([]);
+
+    const ghostJamStart = simulation.activatePower("ghost-jam");
+    const ghostJamImpact = simulation.tick(12);
+    expect(ghostJamStart).toContainEqual(
+      expect.objectContaining({ kind: "power-activated", power: "ghost-jam" }),
+    );
+    expect(ghostJamImpact).toContainEqual(
+      expect.objectContaining({ kind: "ghost-jam-start" }),
+    );
+    expect(simulation.readSnapshot().player.statuses).not.toContainEqual(
+      expect.objectContaining({ kind: "ghost-jam" }),
+    );
+  });
+
+  it("preserves an Oversize descriptor through a normal Hold round trip", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    player.active = spawnPiece(player.grid, {
+      source: "oversize",
+      shape: "T",
+      eventId: "oversize:hold",
+    });
+    const simulation = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: false,
+      initialPlayer: player,
+    });
+
+    simulation.dispatch("hold");
+    expect(simulation.readSnapshot().player.hold).toEqual({
+      source: "oversize",
+      shape: "T",
+      eventId: "oversize:hold",
+    });
+    simulation.dispatch("hard-drop");
+    simulation.dispatch("hold");
+    expect(simulation.readSnapshot().player.active?.descriptor).toEqual({
+      source: "oversize",
+      shape: "T",
+      eventId: "oversize:hold",
+    });
+  });
+
+  it("derives Oversize attacks from a restorable six-shape cursor and converts overflow", () => {
+    const simulation = createSimulation({ seed: SEED, playerId: "a", practice: false });
+
+    const accepted = simulation.receiveOversize("oversize:1");
+    const afterAccepted = simulation.readSnapshot();
+    const overflow = simulation.receiveOversize("oversize:2");
+    const afterOverflow = simulation.readSnapshot();
+
+    expect(accepted).toEqual([
+      expect.objectContaining({ kind: "oversize-piece", eventId: "oversize:1" }),
+    ]);
+    expect(afterAccepted.player.forcedQueue).toEqual([
+      expect.objectContaining({ source: "oversize", eventId: "oversize:1" }),
+    ]);
+    expect(afterAccepted.player.oversizePieceCursor).toBe(1);
+    expect(overflow).toEqual([
+      { kind: "oversize-overflow", eventId: "oversize:2", rows: 2 },
+    ]);
+    expect(afterOverflow.player.forcedQueue).toEqual(afterAccepted.player.forcedQueue);
+    expect(afterOverflow.player.oversizePieceCursor).toBe(2);
+    expect(afterOverflow.player.incomingGarbage).toContainEqual(
+      expect.objectContaining({ id: "oversize:2:overflow", rows: 2 }),
+    );
+
+    const checkpoint = simulation.checkpoint();
+    const restored = createSimulation({ seed: SEED, playerId: "a", practice: false });
+    restored.restore(checkpoint);
+    expect(restored.readSnapshot().player.oversizePieceCursor).toBe(2);
+    expect(restored.readSnapshot().stateHash).toBe(simulation.readSnapshot().stateHash);
+
+    const advancedCursor = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: false,
+    });
+    advancedCursor.restore({
+      ...checkpoint,
+      player: {
+        ...checkpoint.player,
+        oversizePieceCursor: checkpoint.player.oversizePieceCursor + 1,
+      },
+    });
+    expect(advancedCursor.readSnapshot().stateHash).not.toBe(
+      simulation.readSnapshot().stateHash,
+    );
+  });
+
+  it("suppresses the target board's ghost for everyone while Ghost Jam is active", () => {
+    const simulation = createSimulation({ seed: SEED, playerId: "a", practice: false });
+
+    expect(simulation.readSnapshot().ghostY).not.toBeNull();
+    simulation.receiveGhostJam();
+    expect(simulation.readSnapshot()).toMatchObject({
+      ghostY: null,
+      player: {
+        statuses: expect.arrayContaining([
+          { kind: "ghost-jam", remainingTicks: 900 },
+        ]),
+      },
+    });
+
+    simulation.tick(1);
+    expect(simulation.readSnapshot().player.statuses).toContainEqual({
+      kind: "ghost-jam",
+      remainingTicks: 899,
+    });
+    simulation.receiveGhostJam();
+    expect(simulation.readSnapshot().player.statuses).toContainEqual({
+      kind: "ghost-jam",
+      remainingTicks: 900,
+    });
+  });
+
+  it("activates embedded Blackout and Barrier with canonical reset values", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    for (let column = 0; column < 10; column += 1) {
+      if (column !== 4 && column !== 5) player.grid[21]![column] = { kind: "J" };
+    }
+    player.grid[21]![0] = { kind: "J", special: "blackout" };
+    player.grid[21]![1] = { kind: "J", special: "barrier" };
+    player.active = spawnPiece(player.grid, { source: "base", shape: "O" });
+    player.active!.x = 3;
+    player.active!.y = 20;
+    const simulation = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: false,
+      initialPlayer: player,
+    });
+
+    simulation.dispatch("hard-drop");
+    const effects = simulation.tick(9);
+
+    expect(effects).toContainEqual(
+      expect.objectContaining({ kind: "blackout-start", eventId: "a:0:1:lock:blackout:1" }),
+    );
+    expect(effects).toContainEqual(
+      expect.objectContaining({ kind: "barrier-start", eventId: "a:0:1:lock:barrier:1" }),
+    );
+    expect(simulation.readSnapshot().player.statuses).toEqual(
+      expect.arrayContaining([
+        { kind: "blackout", remainingTicks: 900 },
+        { kind: "barrier", remainingTicks: 1_200, capacity: 4 },
+      ]),
+    );
+  });
+
+  it("removes and counts five rows while reusing Tetris rewards", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    for (let row = 17; row < 22; row += 1) {
+      for (let column = 0; column < 10; column += 1) {
+        if (column !== 4) player.grid[row]![column] = { kind: "J" };
+      }
+    }
+    player.active = spawnPiece(player.grid, { source: "oversize", shape: "I" });
+    player.active!.x = 2;
+    player.active!.y = 17;
+    player.active!.rotation = 1;
+    const simulation = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: false,
+      initialPlayer: player,
+    });
+
+    simulation.dispatch("hard-drop");
+    const effects = simulation.tick(9);
+    const snapshot = simulation.readSnapshot();
+
+    expect(snapshot.player.lines).toBe(5);
+    expect(snapshot.player.score).toBe(800);
+    expect(snapshot.player.powerCharge).toBe(5);
+    expect(snapshot.player.backToBack).toBe(true);
+    expect(snapshot.player.stats.tetrises).toBe(1);
+    expect(effects).toContainEqual(
+      expect.objectContaining({ kind: "line-clear", phase: "impact", rows: 5, value: 800 }),
+    );
+    expect(effects).toContainEqual(
+      expect.objectContaining({ kind: "garbage-attack", rows: 3 }),
+    );
+    expect(effects).toContainEqual(expect.objectContaining({ kind: "hollow-cross" }));
   });
 });

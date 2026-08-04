@@ -1,6 +1,12 @@
 import { RULES, STANDARD_SHAPES } from "../config/rules";
 import { deriveEventUint32 } from "./rng";
-import type { Coordinate, Grid, PieceDescriptor, SpecialKind } from "./types";
+import type {
+  Coordinate,
+  Grid,
+  OversizeShape,
+  PieceDescriptor,
+  SpecialKind,
+} from "./types";
 
 export interface ForcedQueueResult {
   queue: PieceDescriptor[];
@@ -48,6 +54,24 @@ export function enqueueGlitch(
   return { queue, overflowGarbageRows: 0 };
 }
 
+export function enqueueOversize(
+  forcedQueue: readonly PieceDescriptor[],
+  shape: OversizeShape,
+  eventId: string,
+): ForcedQueueResult {
+  const pending = forcedQueue.filter((piece) => piece.source === "oversize").length;
+  if (pending >= RULES.power.oversizeQueueCap) {
+    return {
+      queue: [...forcedQueue],
+      overflowGarbageRows: RULES.power.oversizeOverflowGarbageRows,
+    };
+  }
+  return {
+    queue: [...forcedQueue, { source: "oversize", shape, eventId }],
+    overflowGarbageRows: 0,
+  };
+}
+
 export interface CapturedSpecial {
   kind: SpecialKind;
   row: number;
@@ -75,6 +99,8 @@ export interface SpecialResolution {
   grid: Grid;
   garbageCoreEvents: string[];
   glitchEvents: string[];
+  blackoutEvents: string[];
+  barrierEvents: string[];
   events: SpecialResolutionEvent[];
   destroyedCells: number;
 }
@@ -96,10 +122,14 @@ export function resolveSpecialTriggers(
   );
   const garbageCoreEvents: string[] = [];
   const glitchEvents: string[] = [];
+  const blackoutEvents: string[] = [];
+  const barrierEvents: string[] = [];
   const events: SpecialResolutionEvent[] = [];
   let columnBombOrdinal = 0;
   let garbageOrdinal = 0;
   let glitchOrdinal = 0;
+  let blackoutOrdinal = 0;
+  let barrierOrdinal = 0;
   let destroyedCells = 0;
 
   const ordered = [...captured].sort(
@@ -127,12 +157,30 @@ export function resolveSpecialTriggers(
       const eventId = `${lockEventId}:garbage-core:${garbageOrdinal}`;
       garbageCoreEvents.push(eventId);
       events.push({ ...trigger, order, eventId, affectedCells: [] });
-    } else {
+    } else if (trigger.kind === "glitch-core") {
       glitchOrdinal += 1;
       const eventId = `${lockEventId}:glitch-core:${glitchOrdinal}`;
       glitchEvents.push(eventId);
       events.push({ ...trigger, order, eventId, affectedCells: [] });
+    } else if (trigger.kind === "blackout") {
+      blackoutOrdinal += 1;
+      const eventId = `${lockEventId}:blackout:${blackoutOrdinal}`;
+      blackoutEvents.push(eventId);
+      events.push({ ...trigger, order, eventId, affectedCells: [] });
+    } else {
+      barrierOrdinal += 1;
+      const eventId = `${lockEventId}:barrier:${barrierOrdinal}`;
+      barrierEvents.push(eventId);
+      events.push({ ...trigger, order, eventId, affectedCells: [] });
     }
   }
-  return { grid, garbageCoreEvents, glitchEvents, events, destroyedCells };
+  return {
+    grid,
+    garbageCoreEvents,
+    glitchEvents,
+    blackoutEvents,
+    barrierEvents,
+    events,
+    destroyedCells,
+  };
 }

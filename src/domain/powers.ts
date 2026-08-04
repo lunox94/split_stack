@@ -22,10 +22,14 @@ export function tickStatuses(statuses: readonly StatusState[], ticks = 1): Statu
 
 export function activateTimedStatus(
   statuses: readonly StatusState[],
-  kind: "blackout" | "scramble",
+  kind: "blackout" | "scramble" | "ghost-jam",
 ): StatusState[] {
   const remainingTicks =
-    kind === "blackout" ? RULES.power.blackoutTicks : RULES.power.scrambleTicks;
+    kind === "blackout"
+      ? RULES.power.blackoutTicks
+      : kind === "ghost-jam"
+        ? RULES.power.ghostJamTicks
+        : RULES.power.scrambleTicks;
   return [
     ...statuses.filter((status) => status.kind !== kind),
     { kind, remainingTicks },

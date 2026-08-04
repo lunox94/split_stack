@@ -37,6 +37,15 @@ export const STRINGS = {
     "This seat is controlled by a newer open Split Stack session. Watching only.",
   "match.ready": "Ready",
   "match.notReady": "Not ready",
+  "match.readyUp": "Ready up",
+  "match.youAreReady": "✓ You’re ready",
+  "match.readyHeading": "Ready to play?",
+  "match.readyHint": "Click when you’re prepared",
+  "match.waitingForOpponentReady": "Waiting for opponent…",
+  "match.bothPlayersReady": "Both players are ready. Starting…",
+  "match.cancelReady": "Cancel readiness",
+  "match.you": "You",
+  "match.opponent": "Opponent",
   "match.waitingForReady": "Waiting for both players…",
   "match.countdown": "Match starts in {seconds}",
   "match.connectionUnstable": "Connection unstable…",
@@ -140,7 +149,7 @@ export const STRINGS = {
     "Line clears charge your meter. The displayed power activates automatically when the meter is full.",
   "help.specialCells":
     "A marked cell triggers only when it participates in a normal line clear.",
-  "help.specialCellsHeading": "Marked piece powers",
+  "help.specialCellsHeading": "Marked-piece powers",
   "help.noAutoTutorial": "Help opens only when you choose it from the lobby.",
   "power.blackout": "Blackout",
   "power.scramble": "Scramble",
@@ -149,6 +158,8 @@ export const STRINGS = {
   "power.collapse": "Collapse",
   "power.monominoRush": "Monomino Rush",
   "power.acidRain": "Acid Rain",
+  "power.oversize": "Oversize",
+  "power.ghostJam": "Ghost Jam",
   "power.blackoutDescription": "Hide your board from everyone else for 15 seconds.",
   "power.scrambleDescription":
     "Reverse your opponent’s horizontal and rotation controls for 10 seconds.",
@@ -160,21 +171,48 @@ export const STRINGS = {
   "power.monominoRushDescription": "Place one-cell pieces for eight seconds.",
   "power.acidRainDescription":
     "Use three drops that dissolve their selected columns.",
+  "power.oversizeDescription":
+    "Queue one enlarged I, J, L, S, T, or Z piece for your opponent.",
+  "power.ghostJamDescription":
+    "Hide the target board’s ghost projection from everyone for 15 seconds.",
   "special.columnBomb": "Column Bomb",
   "special.garbageCore": "Garbage Core",
   "special.glitchCore": "Glitch Core",
+  "special.blackoutDescription":
+    "Conceals your board from your opponent for 15 seconds when its marked cell participates in a line clear.",
+  "special.barrierDescription":
+    "Blocks up to four incoming garbage rows for 20 seconds when its marked cell participates in a line clear.",
   "special.columnBombDescription":
     "Clears its entire column when its marked cell participates in a line clear.",
   "special.garbageCoreDescription":
     "Sends extra garbage when its marked cell participates in a line clear.",
   "special.glitchCoreDescription":
-    "Sends a Glitch piece when its marked cell participates in a line clear.",
+    "Sends your opponent a Glitch Piece. Its preview rapidly cycles through every tetromino, hiding its real shape until it spawns. Once revealed, it plays like a normal piece but cannot be held.",
   "help.touchRotate":
     "Tap to rotate clockwise; two-finger tap rotates counterclockwise.",
   "help.touchMove": "Drag across columns to move. Hold downward to soft drop.",
   "help.touchDrop": "Flick downward to hard drop. Swipe upward to Hold.",
   "help.keyboard":
     "Keyboard: arrows or A/D/S, Z/Q and X/E, Space, C or Shift.",
+  "help.touchControlsHeading": "Touch controls",
+  "help.keyboardControlsHeading": "Keyboard controls",
+  "help.actionHeading": "Action",
+  "help.keysHeading": "Keys",
+  "help.moveLeftRight": "Move left/right",
+  "help.holdAction": "Hold",
+  "help.pausePracticeAction": "Pause Practice",
+  "help.meterPowersHeading": "Meter powers",
+  "help.markedPowersHeading": "Marked-piece powers",
+  "help.specialPiecesHeading": "Special pieces",
+  "help.hollowCross": "Hollow Cross",
+  "help.hollowCrossDescription":
+    "A complete eight-cell hollow cross sent through the forced-piece queue.",
+  "help.glitchPiece": "Glitch Piece",
+  "help.glitchPieceDescription":
+    "Its preview rapidly cycles through every tetromino, hiding its real shape until it spawns. Once revealed, it plays like a normal piece but cannot be held.",
+  "help.oversizeShapes": "Oversize shapes",
+  "help.oversizeShapesDescription":
+    "Enlarged I, J, L, S, T, and Z shapes that handle normally and can be held.",
 } as const;
 
 export type StringKey = keyof typeof STRINGS;

@@ -1,7 +1,12 @@
 import { RULES } from "../config/rules";
 import { canSpawn, collides, isGrounded } from "./collision";
 import { getSpawnPosition, isStandardShape } from "./pieces";
-import { getKickTests, nextRotation, type RotationDirection } from "./srs";
+import {
+  getKickTests,
+  getOversizeKickTests,
+  nextRotation,
+  type RotationDirection,
+} from "./srs";
 import type { ActivePiece, Grid, PieceDescriptor } from "./types";
 
 export function spawnPiece(grid: Grid, descriptor: PieceDescriptor): ActivePiece | null {
@@ -67,7 +72,10 @@ export function tryRotate(
   if (piece.descriptor.shape === "O") return null;
 
   const rotation = nextRotation(piece.rotation, direction);
-  for (const kick of getKickTests(piece.descriptor.shape, piece.rotation, rotation)) {
+  const kicks = piece.descriptor.source === "oversize"
+    ? getOversizeKickTests(piece.rotation, rotation)
+    : getKickTests(piece.descriptor.shape, piece.rotation, rotation);
+  for (const kick of kicks) {
     const rotated: ActivePiece = {
       ...piece,
       x: piece.x + kick.x,

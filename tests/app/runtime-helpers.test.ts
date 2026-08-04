@@ -7,6 +7,8 @@ import {
   formatDuration,
   isSameRuntimeRoster,
   resultStats,
+  shouldGameplayMusicRun,
+  shouldUseStaticMarkedCells,
 } from "../../src/app/runtime-helpers";
 
 describe("runtime helpers", () => {
@@ -96,6 +98,26 @@ describe("runtime helpers", () => {
     expect(displayShapeAt(concealed, 150)).toBe("J");
     expect(displayShapeAt(concealed, 900)).toBe("Z");
     expect(displayShapeAt({ source: "base", shape: "T" }, 300)).toBe("T");
+  });
+
+  it("runs music only while gameplay or spectating is active", () => {
+    expect(shouldGameplayMusicRun("lobby", false)).toBe(false);
+    expect(shouldGameplayMusicRun("results", false)).toBe(false);
+    expect(shouldGameplayMusicRun("practice", false)).toBe(true);
+    expect(shouldGameplayMusicRun("practice", true)).toBe(false);
+    expect(shouldGameplayMusicRun("competitive", false, "countdown")).toBe(true);
+    expect(shouldGameplayMusicRun("competitive", false, "playing")).toBe(true);
+    expect(shouldGameplayMusicRun("competitive", false, "network-pause")).toBe(false);
+    expect(shouldGameplayMusicRun("competitive", false, "synchronizing")).toBe(false);
+    expect(shouldGameplayMusicRun("competitive", false)).toBe(false);
+    expect(shouldGameplayMusicRun("spectator", false)).toBe(true);
+  });
+
+  it("keeps marked-cell motion static for every reduced visual preference", () => {
+    expect(shouldUseStaticMarkedCells(false, false, false)).toBe(false);
+    expect(shouldUseStaticMarkedCells(true, false, false)).toBe(true);
+    expect(shouldUseStaticMarkedCells(false, true, false)).toBe(true);
+    expect(shouldUseStaticMarkedCells(false, false, true)).toBe(true);
   });
 
   it("deduplicates and bounds untrusted durable event buffers", () => {

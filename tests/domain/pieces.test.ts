@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  getDescriptorCells,
   getPieceCells,
   getSpawnPosition,
   isHoldable,
@@ -100,14 +101,44 @@ describe("canonical piece geometry", () => {
     expect(getPieceCells("acid", 2)).toEqual([{ x: 0, y: 0, index: 0 }]);
   });
 
+  it("uses the six curated Oversize spawn geometries", () => {
+    const coordinates = (shape: "I" | "J" | "L" | "S" | "T" | "Z") =>
+      getDescriptorCells({ source: "oversize", shape }, 0).map(({ x, y }) => [x, y]);
+
+    expect(coordinates("I")).toEqual([[0, 2], [1, 2], [2, 2], [3, 2], [4, 2]]);
+    expect(coordinates("J")).toEqual([[0, 0], [0, 1], [0, 2], [1, 2], [2, 2]]);
+    expect(coordinates("L")).toEqual([[2, 0], [2, 1], [0, 2], [1, 2], [2, 2]]);
+    expect(coordinates("S")).toEqual([
+      [1, 1], [2, 1], [3, 1], [0, 2], [1, 2], [2, 2],
+    ]);
+    expect(coordinates("T")).toEqual([
+      [0, 1], [1, 1], [2, 1], [3, 1], [4, 1], [2, 2], [2, 3],
+    ]);
+    expect(coordinates("Z")).toEqual([
+      [0, 1], [1, 1], [2, 1], [1, 2], [2, 2], [3, 2],
+    ]);
+  });
+
+  it("rotates an Oversize shape rigidly while preserving cell identities", () => {
+    expect(getDescriptorCells({ source: "oversize", shape: "J" }, 1)).toEqual([
+      { x: 2, y: 0, index: 0 },
+      { x: 1, y: 0, index: 1 },
+      { x: 0, y: 0, index: 2 },
+      { x: 0, y: 1, index: 3 },
+      { x: 0, y: 2, index: 4 },
+    ]);
+  });
+
   it("spawns each source at its deterministic lower-center alignment", () => {
     expect(getSpawnPosition({ source: "base", shape: "T" })).toEqual({ x: 3, y: 0 });
     expect(getSpawnPosition({ source: "cross", shape: "cross" })).toEqual({ x: 2, y: 0 });
     expect(getSpawnPosition({ source: "monomino", shape: "monomino" })).toEqual({ x: 4, y: 0 });
     expect(getSpawnPosition({ source: "acid", shape: "acid" })).toEqual({ x: 4, y: 0 });
+    expect(getSpawnPosition({ source: "oversize", shape: "I" })).toEqual({ x: 2, y: 0 });
+    expect(getSpawnPosition({ source: "oversize", shape: "J" })).toEqual({ x: 3, y: 0 });
   });
 
-  it("allows Hold only for base-sequence tetrominoes", () => {
+  it("allows Hold for base and Oversize pieces but not other forced sources", () => {
     expect(isHoldable({
       source: "base",
       shape: "T",
@@ -118,6 +149,7 @@ describe("canonical piece geometry", () => {
     expect(isHoldable({ source: "cross", shape: "cross" })).toBe(false);
     expect(isHoldable({ source: "monomino", shape: "monomino" })).toBe(false);
     expect(isHoldable({ source: "acid", shape: "acid" })).toBe(false);
+    expect(isHoldable({ source: "oversize", shape: "T" })).toBe(true);
   });
 });
 
@@ -242,6 +274,22 @@ describe("piece movement", () => {
     });
     expect(tryRotate(grid, active({ source: "cross", shape: "cross" }, 2, 4), "cw"))
       .toBeNull();
+  });
+
+  it("uses wider nearby kicks when an Oversize rotation needs extra wall clearance", () => {
+    const againstRightWall = active(
+      { source: "oversize", shape: "I" },
+      7,
+      8,
+      1,
+    );
+
+    expect(collides(createBoard(), againstRightWall)).toBe(false);
+    expect(tryRotate(createBoard(), againstRightWall, "cw")).toMatchObject({
+      x: 5,
+      rotation: 2,
+      lastSuccessfulAction: "rotate-cw",
+    });
   });
 
   it("treats O rotation as a true no-op without a lock reset", () => {

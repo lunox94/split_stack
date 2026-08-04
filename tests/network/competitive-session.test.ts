@@ -437,6 +437,18 @@ describe("CompetitiveSession", () => {
       seq: 5,
       payload: { eventId: "b:glitch:1", targetPlayerId: "player-a" },
     });
+    sendFromB({
+      ...base,
+      kind: "OVERSIZE_PIECE",
+      seq: 6,
+      payload: { eventId: "b:oversize:1", targetPlayerId: "player-a" },
+    });
+    sendFromB({
+      ...base,
+      kind: "GHOST_JAM_START",
+      seq: 7,
+      payload: { eventId: "b:ghost-jam:1", targetPlayerId: "player-a" },
+    });
 
     const local = pair.a.view().local;
     expect(local?.player.incomingGarbage).toHaveLength(1);
@@ -445,6 +457,15 @@ describe("CompetitiveSession", () => {
       kind: "scramble",
       remainingTicks: RULES.power.scrambleTicks,
     });
+    expect(local?.player.statuses).toContainEqual({
+      kind: "ghost-jam",
+      remainingTicks: RULES.power.ghostJamTicks,
+    });
+    expect(local?.player.forcedQueue).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source: "oversize", eventId: "b:oversize:1" }),
+      ]),
+    );
     expect(onBlackout).toHaveBeenCalledWith("player-b", "b:blackout:1");
     expect(onIncomingGarbage).toHaveBeenCalledWith(2, "b:garbage:1");
     expect(onIncomingAttack.mock.calls).toEqual([
@@ -453,7 +474,54 @@ describe("CompetitiveSession", () => {
       ["blackout", "b:blackout:1"],
       ["hollow-cross", "b:cross:1"],
       ["glitch", "b:glitch:1"],
+      ["oversize", "b:oversize:1"],
+      ["ghost-jam", "b:ghost-jam:1"],
     ]);
+  });
+
+  it("converts a second pending Oversize into source-timed warned garbage", () => {
+    const onIncomingGarbage = vi.fn();
+    const onIncomingAttack = vi.fn();
+    const pair = createPair({
+      onAIncomingGarbage: onIncomingGarbage,
+      onAIncomingAttack: onIncomingAttack,
+    });
+    ready(pair);
+    advanceBoth(pair, 3_500, 100);
+    const sourceTick = Math.max(0, pair.a.view().matchTick - 5);
+
+    for (const [seq, eventId] of [[1, "b:oversize:1"], [2, "b:oversize:2"]] as const) {
+      pair.bEndpoint.send(encodeEnvelope({
+        protocol: 1,
+        matchId: "match-1",
+        senderId: "player-b",
+        sessionId: "session-b",
+        kind: "OVERSIZE_PIECE",
+        seq,
+        matchTick: sourceTick,
+        sentAtMonotonicMs: pair.bClock.now(),
+        payload: { eventId, targetPlayerId: "player-a" },
+      }));
+    }
+
+    const local = pair.a.view().local?.player;
+    expect(local?.forcedQueue).toEqual([
+      expect.objectContaining({ source: "oversize", eventId: "b:oversize:1" }),
+    ]);
+    expect(local?.incomingGarbage).toContainEqual(expect.objectContaining({
+      id: "b:oversize:2:overflow",
+      rows: RULES.power.oversizeOverflowGarbageRows,
+      readyTick: sourceTick + RULES.garbage.warningTicks,
+      senderId: "player-b",
+    }));
+    expect(onIncomingAttack.mock.calls).toEqual([
+      ["oversize", "b:oversize:1"],
+      ["garbage", "b:oversize:2:overflow", RULES.power.oversizeOverflowGarbageRows],
+    ]);
+    expect(onIncomingGarbage).toHaveBeenCalledWith(
+      RULES.power.oversizeOverflowGarbageRows,
+      "b:oversize:2:overflow",
+    );
   });
 
   it("reports effects produced by automatic simulation ticks", () => {
@@ -1022,7 +1090,9 @@ describe("CompetitiveSession", () => {
       "GARBAGE_ATTACK",
       "HOLLOW_CROSS",
       "GLITCH_PIECE",
+      "OVERSIZE_PIECE",
       "SCRAMBLE_START",
+      "GHOST_JAM_START",
       "BLACKOUT_START",
     ]);
     const holdId = pair.bus.holdMatching("runtime-b", "runtime-a", (data) => {
@@ -1092,7 +1162,9 @@ describe("CompetitiveSession", () => {
       "GARBAGE_ATTACK",
       "HOLLOW_CROSS",
       "GLITCH_PIECE",
+      "OVERSIZE_PIECE",
       "SCRAMBLE_START",
+      "GHOST_JAM_START",
       "BLACKOUT_START",
     ]);
     let heldGameplay = 0;
@@ -1159,7 +1231,9 @@ describe("CompetitiveSession", () => {
       "GARBAGE_ATTACK",
       "HOLLOW_CROSS",
       "GLITCH_PIECE",
+      "OVERSIZE_PIECE",
       "SCRAMBLE_START",
+      "GHOST_JAM_START",
       "BLACKOUT_START",
     ]);
     const gameplayHold = pair.bus.holdMatching(

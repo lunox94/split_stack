@@ -17,6 +17,27 @@ describe("board view projection", () => {
     expect(model.cells.filter((cell) => cell.role === "ghost")).toHaveLength(4);
   });
 
+  it("provides a movement-stable active-piece key that changes on spawn", () => {
+    const snapshot = createSimulation({
+      seed: "00112233445566778899aabbccddeeff",
+      playerId: "a",
+      practice: true,
+    }).readSnapshot();
+    if (snapshot.player.active === null) throw new Error("Expected an active piece");
+    snapshot.player.active.descriptor.specialKind = "glitch-core";
+    snapshot.player.active.descriptor.specialCellIndex = 0;
+
+    const spawned = boardModelFromSimulation(snapshot, true, false).activePieceKey;
+    snapshot.player.active.x += 1;
+    const moved = boardModelFromSimulation(snapshot, true, false).activePieceKey;
+    snapshot.player.basePieceCursor += 1;
+    const nextSpawn = boardModelFromSimulation(snapshot, true, false).activePieceKey;
+
+    expect(spawned).toBeDefined();
+    expect(moved).toBe(spawned);
+    expect(nextSpawn).not.toBe(spawned);
+  });
+
   it("projects no board cells when Blackout conceals a remote owner", () => {
     const snapshot = createSimulation({
       seed: "00112233445566778899aabbccddeeff",
@@ -25,6 +46,20 @@ describe("board view projection", () => {
     }).readSnapshot();
 
     expect(boardModelFromSimulation(snapshot, false, true).cells).toEqual([]);
+  });
+
+  it("suppresses a Ghost-Jammed board projection for every viewer", () => {
+    const snapshot = createSimulation({
+      seed: "00112233445566778899aabbccddeeff",
+      playerId: "a",
+      practice: false,
+    }).readSnapshot();
+    snapshot.player.statuses.push({ kind: "ghost-jam", remainingTicks: 900 });
+
+    const model = boardModelFromSimulation(snapshot, false, false);
+
+    expect(model.cells.filter((cell) => cell.role === "ghost")).toEqual([]);
+    expect(model.cells.filter((cell) => cell.role === "active")).toHaveLength(4);
   });
 
   it("projects incoming pressure and active defensive/status presentation", () => {

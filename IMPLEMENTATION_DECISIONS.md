@@ -66,6 +66,40 @@ rules version 2 and must change together with the peer rules hash.
   count toward that attempt boundary because they were rows that would have
   risen; later queued rows wait for the next lock.
 
+## Power refresh domain rules
+
+- Competitive meter draws use the seven-card Scramble, Nuke, Collapse,
+  Monomino Rush, Acid Rain, Oversize, and Ghost Jam bag. Practice uses an
+  independent deterministic four-card Nuke, Collapse, Monomino Rush, and Acid
+  Rain bag, so opponent-targeting powers are neither self-applied nor spent as
+  no-ops.
+- Standard base descriptors are divided into deterministic six-piece cadence
+  windows containing exactly one marked cell. Mark types come from a separate
+  five-card Column Bomb, Garbage Core, Glitch Core, Blackout, and Barrier bag.
+  Forced descriptors cannot place marked cells even if malformed descriptor
+  data reaches board merging.
+- Embedded Blackout resets a 900-tick owner status. Embedded Barrier resets a
+  1,200-tick, four-row status before ready garbage is evaluated for that lock.
+  Ghost Jam resets a 900-tick target status; while present, the target
+  simulation publishes no ghost row, which suppresses that projection for the
+  owner, opponent, and spectators alike.
+- Oversize attacks consume a separate deterministic six-shape I/J/L/S/T/Z
+  bag on the recipient. Its cursor advances for every received attack,
+  including overflow, and is checkpointed and hashed. One Oversize descriptor
+  may wait in the forced FIFO; another pending attack becomes two ordinary
+  warned garbage rows.
+- Oversize shapes use their curated literal geometries and source-aware piece
+  lookup. I is a five-cell line; mirrored J/L use a three-cell foot and
+  three-high outer stem; mirrored S/Z use two offset three-cell runs; T uses a
+  five-cell bar and two-cell center stem. They use normal movement, gravity,
+  lock, drop, and Hold rules, plus deterministic nearby wall kicks. Oversize T
+  is excluded from T-Spin recognition.
+- A normal five-row clear removes and counts all five rows but deliberately
+  classifies its rewards as a Tetris: score, attack, charge, back-to-back,
+  Tetris statistics, Hollow Cross creation, and presentation all reuse the
+  existing four-line values until the Pentris rewards tracked in GitHub issue
+  #1 are designed and implemented.
+
 ## Webxdc constraints
 
 - Webxdc durable `update.serial` is a replica-local replay cursor, not a

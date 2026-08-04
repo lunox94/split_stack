@@ -54,22 +54,31 @@ describe("approved balance configuration", () => {
     });
   });
 
-  it("contains exactly the seven approved powers and three special types", () => {
+  it("contains exactly the approved competitive, Practice, and marked power sets", () => {
     expect(new Set(RULES.power.deck)).toEqual(
       new Set([
-        "blackout",
         "scramble",
         "nuke",
-        "barrier",
         "collapse",
         "monomino-rush",
         "acid-rain",
+        "oversize",
+        "ghost-jam",
       ]),
     );
+    expect(RULES.power.practiceDeck).toEqual([
+      "nuke",
+      "collapse",
+      "monomino-rush",
+      "acid-rain",
+    ]);
+    expect(RULES.special.frequency).toBe(6);
     expect(RULES.special.typeBag).toEqual([
       "column-bomb",
       "garbage-core",
       "glitch-core",
+      "blackout",
+      "barrier",
     ]);
   });
 });

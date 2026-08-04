@@ -1,8 +1,12 @@
 import { RULES } from "../config/rules";
 import { STRINGS, formatString, type StringKey } from "../app/strings";
-import type { SpecialKind } from "../domain/types";
+import type { PieceDescriptor, SpecialKind } from "../domain/types";
 import type { Preferences } from "../persistence/settings";
-import { createSpecialIcon } from "../render/special-icons";
+import {
+  createMarkedCellSample,
+  renderPiecePreviewSlot,
+  type PiecePreviewOptions,
+} from "./piece-preview";
 
 function element<K extends keyof HTMLElementTagNameMap>(
   document: Document,
@@ -50,6 +54,11 @@ export interface HudElements {
   meterFill: HTMLElement;
   statuses: HTMLElement;
   blackout: HTMLElement;
+  setPiecePreviews(
+    hold: PieceDescriptor | null,
+    next: readonly PieceDescriptor[],
+    options: PiecePreviewOptions,
+  ): void;
 }
 
 function createHud(document: Document, side: "left" | "right"): HudElements {
@@ -70,8 +79,31 @@ function createHud(document: Document, side: "left" | "right"): HudElements {
   level.setAttribute("aria-label", STRINGS["hud.level"]);
   const lines = element(document, "span", "hud-stat", "0");
   lines.setAttribute("aria-label", STRINGS["hud.lines"]);
-  const hold = element(document, "span", "hud-detail", `${STRINGS["hud.hold"]}: —`);
-  const preview = element(document, "span", "hud-detail", `${STRINGS["hud.next"]}: —`);
+  const hold = element(document, "section", "piece-preview-group hold-preview");
+  hold.setAttribute("aria-label", STRINGS["hud.hold"]);
+  const holdLabel = element(document, "span", "piece-preview-label", STRINGS["hud.hold"]);
+  const holdSlot = element(document, "div", "piece-preview-slot is-hold");
+  hold.append(holdLabel, holdSlot);
+  const preview = element(document, "section", "piece-preview-group next-preview");
+  preview.setAttribute("aria-label", STRINGS["hud.next"]);
+  const previewLabel = element(
+    document,
+    "span",
+    "piece-preview-label",
+    STRINGS["hud.next"],
+  );
+  const previewSlots = element(document, "div", "piece-preview-slots");
+  const nextSlots = Array.from({ length: 5 }, (_, index) => {
+    const slot = element(
+      document,
+      "div",
+      `piece-preview-slot ${index === 0 ? "is-primary" : "is-queued"}`,
+    );
+    slot.dataset.position = String(index + 1);
+    previewSlots.append(slot);
+    return slot;
+  });
+  preview.append(previewLabel, previewSlots);
   const upcomingPower = element(
     document,
     "span",
@@ -102,6 +134,23 @@ function createHud(document: Document, side: "left" | "right"): HudElements {
   );
   blackout.hidden = true;
   pane.append(boardTarget, blackout, hud, statuses);
+  const setPiecePreviews = (
+    held: PieceDescriptor | null,
+    next: readonly PieceDescriptor[],
+    options: PiecePreviewOptions,
+  ): void => {
+    renderPiecePreviewSlot(holdSlot, held, options);
+    for (let index = 0; index < nextSlots.length; index += 1) {
+      renderPiecePreviewSlot(nextSlots[index]!, next[index] ?? null, options);
+    }
+  };
+  const initialPreviewOptions: PiecePreviewOptions = {
+    colorPalette: "standard",
+    reducedMotion: false,
+    reducedFlashes: false,
+    elapsedMs: 0,
+  };
+  setPiecePreviews(null, [], initialPreviewOptions);
   return {
     pane,
     boardTarget,
@@ -117,6 +166,7 @@ function createHud(document: Document, side: "left" | "right"): HudElements {
     meterFill,
     statuses,
     blackout,
+    setPiecePreviews,
   };
 }
 
@@ -176,7 +226,11 @@ export interface AppShell {
   arena: HTMLElement;
   left: HudElements;
   right: HudElements;
+  readinessPanel: HTMLElement;
   readyButton: HTMLButtonElement;
+  cancelReadyButton: HTMLButtonElement;
+  localReadyStatus: HTMLElement;
+  opponentReadyStatus: HTMLElement;
   leaveMatchButton: HTMLButtonElement;
   pausePracticeButton: HTMLButtonElement;
   overlay: HTMLElement;
@@ -190,6 +244,8 @@ export interface AppShell {
   resultsLeaveButton: HTMLButtonElement;
   show(screen: "lobby" | "help" | "settings" | "match" | "results"): void;
   setPreferences(preferences: Preferences): void;
+  setReadiness(localReady: boolean, opponentReady: boolean): void;
+  setOverlayMessage(message: string): void;
   setScrambled(active: boolean): void;
 }
 
@@ -352,16 +408,60 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
   right.pane.classList.add("is-remote");
   arena.append(left.pane, right.pane);
   const matchActions = element(document, "div", "match-actions");
-  const readyButton = button(document, STRINGS["match.ready"], "primary");
   const pausePracticeButton = button(document, STRINGS["controls.pauseShort"]);
   pausePracticeButton.setAttribute("aria-label", STRINGS["controls.pausePractice"]);
   const leaveMatchButton = button(document, STRINGS["results.leaveShort"]);
   leaveMatchButton.setAttribute("aria-label", STRINGS["results.leave"]);
-  matchActions.append(readyButton, pausePracticeButton, leaveMatchButton);
+  matchActions.append(pausePracticeButton, leaveMatchButton);
   const overlay = element(document, "div", "center-overlay");
   const overlayCard = element(document, "div", "center-overlay-card");
+  const readinessPanel = element(document, "section", "ready-panel");
+  readinessPanel.setAttribute("aria-labelledby", "ready-heading");
+  const readyHeading = element(
+    document,
+    "h2",
+    "ready-heading",
+    STRINGS["match.readyHeading"],
+  );
+  readyHeading.id = "ready-heading";
+  const readinessStatuses = element(document, "div", "readiness-statuses");
+  readinessStatuses.setAttribute("aria-live", "polite");
+  const localReadyStatus = element(
+    document,
+    "p",
+    "readiness-status",
+    `${STRINGS["match.you"]} · ${STRINGS["match.notReady"]}`,
+  );
+  localReadyStatus.dataset.player = "local";
+  localReadyStatus.dataset.ready = "false";
+  const opponentReadyStatus = element(
+    document,
+    "p",
+    "readiness-status",
+    `${STRINGS["match.opponent"]} · ${STRINGS["match.notReady"]}`,
+  );
+  opponentReadyStatus.dataset.player = "opponent";
+  opponentReadyStatus.dataset.ready = "false";
+  readinessStatuses.append(localReadyStatus, opponentReadyStatus);
+  const readyButton = button(document, STRINGS["match.readyUp"], "ready-button primary");
+  readyButton.setAttribute("aria-pressed", "false");
+  const readyHint = element(document, "p", "ready-hint", STRINGS["match.readyHint"]);
+  const cancelReadyButton = button(
+    document,
+    STRINGS["match.cancelReady"],
+    "cancel-ready-button",
+  );
+  cancelReadyButton.hidden = true;
+  readinessPanel.append(
+    readyHeading,
+    readinessStatuses,
+    readyButton,
+    readyHint,
+    cancelReadyButton,
+  );
   const overlayText = element(document, "p", undefined, STRINGS["match.waitingForReady"]);
-  overlayCard.append(overlayText);
+  overlayText.hidden = true;
+  overlayCard.append(readinessPanel, overlayText);
   overlay.append(overlayCard);
   overlay.hidden = true;
   const touchButtons = element(document, "div", "touch-buttons");
@@ -416,6 +516,7 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     match,
     results: resultsParts.screen,
   } as const;
+  let readinessSignature: string | null = null;
 
   const shell: AppShell = {
     container,
@@ -457,7 +558,11 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     arena,
     left,
     right,
+    readinessPanel,
     readyButton,
+    cancelReadyButton,
+    localReadyStatus,
+    opponentReadyStatus,
     leaveMatchButton,
     pausePracticeButton,
     overlay,
@@ -485,6 +590,48 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
       reducedEffects.checked = preferences.reducedEffects;
       screenShake.checked = preferences.screenShake;
       gameplayTips.checked = preferences.gameplayTips;
+    },
+    setReadiness(localReady, opponentReady): void {
+      const signature = `${localReady}:${opponentReady}`;
+      if (
+        readinessSignature === signature &&
+        !readinessPanel.hidden &&
+        overlayText.hidden
+      ) {
+        return;
+      }
+      readinessSignature = signature;
+      const updateStatus = (
+        node: HTMLElement,
+        label: string,
+        ready: boolean,
+      ): void => {
+        node.dataset.ready = String(ready);
+        node.textContent = `${label} · ${
+          ready ? STRINGS["match.ready"] : STRINGS["match.notReady"]
+        }`;
+      };
+      readinessPanel.hidden = false;
+      overlayText.hidden = true;
+      updateStatus(localReadyStatus, STRINGS["match.you"], localReady);
+      updateStatus(opponentReadyStatus, STRINGS["match.opponent"], opponentReady);
+      readyButton.textContent = localReady
+        ? STRINGS["match.youAreReady"]
+        : STRINGS["match.readyUp"];
+      readyButton.setAttribute("aria-pressed", String(localReady));
+      readyButton.classList.toggle("is-ready", localReady);
+      readyButton.disabled = localReady;
+      cancelReadyButton.hidden = !localReady;
+      readyHint.textContent = localReady
+        ? opponentReady
+          ? STRINGS["match.bothPlayersReady"]
+          : STRINGS["match.waitingForOpponentReady"]
+        : STRINGS["match.readyHint"];
+    },
+    setOverlayMessage(message): void {
+      readinessPanel.hidden = true;
+      overlayText.hidden = false;
+      overlayText.textContent = message;
     },
     setScrambled(active): void {
       arena.dataset.scrambled = String(active);
@@ -568,6 +715,16 @@ export function showHelp(shell: AppShell, kind: "how" | "powers" | "controls"): 
         name: "special.glitchCore",
         description: "special.glitchCoreDescription",
       },
+      {
+        special: "blackout",
+        name: "power.blackout",
+        description: "special.blackoutDescription",
+      },
+      {
+        special: "barrier",
+        name: "power.barrier",
+        description: "special.barrierDescription",
+      },
     ];
     for (const entry of specialEntries) {
       const card = element(document, "article", "special-guide-card");
@@ -577,7 +734,13 @@ export function showHelp(shell: AppShell, kind: "how" | "powers" | "controls"): 
         element(document, "p", undefined, STRINGS[entry.description]),
       );
       card.append(
-        createSpecialIcon(document, entry.special, STRINGS[entry.name]),
+        createMarkedCellSample(
+          document,
+          entry.special,
+          shell.container.dataset.palette === "colorblind"
+            ? "colorblind"
+            : "standard",
+        ),
         copy,
       );
       specials.append(card);
@@ -585,35 +748,105 @@ export function showHelp(shell: AppShell, kind: "how" | "powers" | "controls"): 
     shell.helpBody.append(specials);
   } else if (kind === "powers") {
     shell.helpHeading.textContent = STRINGS["lobby.powerGlossary"];
-    const list = element(document, "dl", "glossary-list");
-    const entries: Array<[StringKey, string]> = [
-      ["power.blackout", STRINGS["power.blackoutDescription"]],
-      ["power.scramble", STRINGS["power.scrambleDescription"]],
-      ["power.nuke", STRINGS["power.nukeDescription"]],
-      ["power.barrier", STRINGS["power.barrierDescription"]],
-      ["power.collapse", STRINGS["power.collapseDescription"]],
-      ["power.monominoRush", STRINGS["power.monominoRushDescription"]],
-      ["power.acidRain", STRINGS["power.acidRainDescription"]],
-    ];
-    for (const [key, description] of entries) {
-      list.append(
-        element(document, "dt", undefined, STRINGS[key]),
-        element(document, "dd", undefined, description),
-      );
-    }
-    shell.helpBody.append(list);
+    const appendGroup = (
+      group: "meter" | "marked" | "pieces",
+      heading: StringKey,
+      entries: ReadonlyArray<readonly [StringKey, StringKey]>,
+    ): void => {
+      const section = element(document, "section", "glossary-group");
+      section.dataset.glossaryGroup = group;
+      const list = element(document, "dl", "glossary-list");
+      for (const [name, description] of entries) {
+        list.append(
+          element(document, "dt", undefined, STRINGS[name]),
+          element(document, "dd", undefined, STRINGS[description]),
+        );
+      }
+      section.append(element(document, "h3", undefined, STRINGS[heading]), list);
+      shell.helpBody.append(section);
+    };
+    appendGroup("meter", "help.meterPowersHeading", [
+      ["power.scramble", "power.scrambleDescription"],
+      ["power.nuke", "power.nukeDescription"],
+      ["power.collapse", "power.collapseDescription"],
+      ["power.monominoRush", "power.monominoRushDescription"],
+      ["power.acidRain", "power.acidRainDescription"],
+      ["power.oversize", "power.oversizeDescription"],
+      ["power.ghostJam", "power.ghostJamDescription"],
+    ]);
+    appendGroup("marked", "help.markedPowersHeading", [
+      ["special.columnBomb", "special.columnBombDescription"],
+      ["special.garbageCore", "special.garbageCoreDescription"],
+      ["special.glitchCore", "special.glitchCoreDescription"],
+      ["power.blackout", "special.blackoutDescription"],
+      ["power.barrier", "special.barrierDescription"],
+    ]);
+    appendGroup("pieces", "help.specialPiecesHeading", [
+      ["help.hollowCross", "help.hollowCrossDescription"],
+      ["help.glitchPiece", "help.glitchPieceDescription"],
+      ["help.oversizeShapes", "help.oversizeShapesDescription"],
+    ]);
   } else {
     shell.helpHeading.textContent = STRINGS["lobby.practiceControls"];
-    const list = element(document, "ul");
+    const touchSection = element(document, "section", "control-help-section");
+    touchSection.dataset.controlScheme = "touch";
+    const touchList = element(document, "ul");
     for (const description of [
       STRINGS["help.touchRotate"],
       STRINGS["help.touchMove"],
       STRINGS["help.touchDrop"],
-      STRINGS["help.keyboard"],
     ]) {
-      list.append(element(document, "li", undefined, description));
+      touchList.append(element(document, "li", undefined, description));
     }
-    shell.helpBody.append(list);
+    touchSection.append(
+      element(document, "h3", undefined, STRINGS["help.touchControlsHeading"]),
+      touchList,
+    );
+
+    const keyboardSection = element(document, "section", "control-help-section");
+    keyboardSection.dataset.controlScheme = "keyboard";
+    const table = element(document, "table", "keyboard-controls-table");
+    const head = element(document, "thead");
+    const headRow = element(document, "tr");
+    headRow.append(
+      element(document, "th", undefined, STRINGS["help.actionHeading"]),
+      element(document, "th", undefined, STRINGS["help.keysHeading"]),
+    );
+    head.append(headRow);
+    const body = element(document, "tbody");
+    const rows: ReadonlyArray<
+      readonly [StringKey, ReadonlyArray<readonly string[]>]
+    > = [
+      ["help.moveLeftRight", [["←", "→"], ["A", "D"]]],
+      ["controls.softDrop", [["↓"], ["S"]]],
+      ["controls.hardDrop", [["Space"]]],
+      ["controls.rotateClockwise", [["↑"], ["X"], ["E"]]],
+      ["controls.rotateCounterclockwise", [["Z"], ["Q"]]],
+      ["help.holdAction", [["C"], ["Shift"]]],
+      ["help.pausePracticeAction", [["P"], ["Esc"]]],
+    ];
+    for (const [action, keyGroups] of rows) {
+      const row = element(document, "tr");
+      const actionCell = element(document, "th", undefined, STRINGS[action]);
+      actionCell.scope = "row";
+      const keysCell = element(document, "td", "keyboard-keys");
+      keyGroups.forEach((keys, groupIndex) => {
+        if (groupIndex > 0) {
+          keysCell.append(element(document, "span", "keyboard-or", "or"));
+        }
+        const group = element(document, "span", "keyboard-key-group");
+        for (const key of keys) group.append(element(document, "kbd", undefined, key));
+        keysCell.append(group);
+      });
+      row.append(actionCell, keysCell);
+      body.append(row);
+    }
+    table.append(head, body);
+    keyboardSection.append(
+      element(document, "h3", undefined, STRINGS["help.keyboardControlsHeading"]),
+      table,
+    );
+    shell.helpBody.append(touchSection, keyboardSection);
   }
   shell.show("help");
 }

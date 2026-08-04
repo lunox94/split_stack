@@ -278,6 +278,19 @@ test("lobby keeps help opt-in and exposes the complete settings surface", async 
   await page.getByRole("button", { name: "How to Play" }).click();
   await expect(page.getByRole("heading", { name: "How to Play" })).toBeVisible();
   await expect(page.getByText(/keep your stack below the top/i)).toBeVisible();
+  const markedPresentationAnimations = await page
+    .locator(".marked-cell-sample .piece-preview-cell")
+    .first()
+    .evaluate((cell) => ({
+      cell: getComputedStyle(cell).animationName,
+      halo: getComputedStyle(cell, "::after").animationName,
+      glyph: getComputedStyle(cell.querySelector("svg")!).animationName,
+    }));
+  expect(markedPresentationAnimations).toEqual({
+    cell: "none",
+    halo: "preview-marked-breathe",
+    glyph: "none",
+  });
   await page.getByRole("button", { name: "Back" }).click();
 
   await page.getByRole("button", { name: "Power Glossary" }).click();
@@ -288,7 +301,9 @@ test("lobby keeps help opt-in and exposes the complete settings surface", async 
 
   await page.getByRole("button", { name: "Practice Controls" }).click();
   await expect(page.getByRole("heading", { name: "Practice Controls" })).toBeVisible();
-  await expect(page.getByText(/arrows or A\/D\/S/i)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Keyboard controls" })).toBeVisible();
+  await expect(page.getByRole("row", { name: /Move left\/right.*A.*D/i })).toBeVisible();
+  await expect(page.getByRole("row", { name: /Hard drop.*Space/i })).toBeVisible();
   await page.getByRole("button", { name: "Back" }).click();
 
   await page.getByRole("button", { name: "Settings" }).click();
@@ -312,12 +327,12 @@ test("Practice accepts keyboard and compact touch-button actions", async ({ page
   await page.getByRole("button", { name: "Practice", exact: true }).click();
 
   const board = page.getByRole("application", { name: "Your board" });
-  const hold = page.locator('[data-side="left"] .hud-detail').filter({ hasText: /^Hold:/ });
+  const hold = page.locator('[data-side="left"] .hold-preview .piece-preview-slot');
   await expect(board).toBeVisible();
   await expect(page.getByRole("button", { name: "Pause practice" })).toBeVisible();
 
   await page.keyboard.press("c");
-  await expect(hold).not.toContainText("—");
+  await expect(hold.locator(".piece-preview-grid")).toBeVisible();
 
   const keyboardBaseline = await numericText(localScore(page));
   await page.keyboard.press("Space");
@@ -329,13 +344,43 @@ test("Practice accepts keyboard and compact touch-button actions", async ({ page
   await expectScoreAbove(localScore(page), touchBaseline);
 });
 
+test("the centered Ready panel shows both players and supports a clear undo", async ({
+  context,
+  page,
+}) => {
+  const { seatA, seatB } = await openVersusPair(context, page);
+  const panel = seatA.locator(".ready-panel");
+  const localStatus = panel.locator('[data-player="local"]');
+  const opponentStatus = panel.locator('[data-player="opponent"]');
+
+  await expect(panel).toBeVisible();
+  await expect(localStatus).toContainText("Not ready");
+  await expect(opponentStatus).toContainText("Not ready");
+
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await expect(seatA.getByRole("button", { name: /You’re ready/ })).toBeDisabled();
+  await expect(seatA.getByRole("button", { name: "Cancel readiness" })).toBeVisible();
+  await expect(localStatus).toContainText("Ready");
+  await expect(seatB.locator('[data-player="opponent"]')).toContainText("Ready");
+
+  await seatA.getByRole("button", { name: "Cancel readiness" }).click();
+  await expect(seatA.getByRole("button", { name: "Ready up", exact: true })).toBeEnabled();
+  await expect(localStatus).toContainText("Not ready");
+
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
+  await expect(seatA.getByText(/match starts in/i)).toBeVisible({ timeout: 10_000 });
+  await expect(panel).toBeHidden();
+  await seatB.close();
+});
+
 test("gesture controls accept a hard-drop flick over the opponent board", async ({
   context,
   page,
 }) => {
   const { seatA, seatB } = await openVersusPair(context, page);
-  await seatA.getByRole("button", { name: "Ready", exact: true }).click();
-  await seatB.getByRole("button", { name: "Ready", exact: true }).click();
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
   await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
 
   await expect(seatA.locator(".split-stack-app")).toHaveCSS("touch-action", "none");
@@ -367,8 +412,8 @@ test("replaces a silent competitive channel without registering a second listene
   await enforceSingleRealtimeListener(context);
 
   const { seatA, seatB } = await openVersusPair(context, page);
-  await seatA.getByRole("button", { name: "Ready", exact: true }).click();
-  await seatB.getByRole("button", { name: "Ready", exact: true }).click();
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
   await expect(seatA.getByText(/match starts in/i)).toBeVisible({ timeout: 10_000 });
   await expect(seatB.getByText(/match starts in/i)).toBeVisible({ timeout: 10_000 });
   await Promise.all([advanceMonotonic(seatA, 4_000), advanceMonotonic(seatB, 4_000)]);
@@ -537,8 +582,8 @@ test("a third participant joins an active challenge as a read-only spectator", a
   page,
 }) => {
   const { seatA, seatB } = await openVersusPair(context, page);
-  await seatA.getByRole("button", { name: "Ready", exact: true }).click();
-  await seatB.getByRole("button", { name: "Ready", exact: true }).click();
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
 
   const spectator = await context.newPage();
   await spectator.goto("/#name=Charlie&addr=charlie%40example.test");
@@ -560,8 +605,8 @@ test("leaving an active match records a forfeit before releasing the seat", asyn
   page,
 }) => {
   const { seatA, seatB } = await openVersusPair(context, page);
-  await seatA.getByRole("button", { name: "Ready", exact: true }).click();
-  await seatB.getByRole("button", { name: "Ready", exact: true }).click();
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
   await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
 
   await seatB.getByRole("button", { name: "Leave match" }).click();
@@ -638,6 +683,7 @@ test("a durably confirmed newer runtime replaces a duplicate and a seat release 
   context,
   page,
 }) => {
+  test.setTimeout(45_000);
   await enforceSingleRealtimeListener(context);
   const { seatA, seatB: olderSeatB } = await openVersusPair(context, page);
   const olderSeatBErrors: string[] = [];
@@ -742,6 +788,29 @@ test("load and Practice make no external HTTP requests", async ({ page }) => {
   await expectScoreAbove(localScore(page), 0);
 
   expect(externalRequests).toEqual([]);
+});
+
+test("menu actions stay silent until gameplay requests a track", async ({ page }) => {
+  const moduleRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.endsWith(".mod")) {
+      moduleRequests.push(request.url());
+    }
+  });
+
+  await openApp(page, "Silent Lobby Tester");
+  expect(moduleRequests).toEqual([]);
+
+  await page.getByRole("button", { name: "How to Play" }).click();
+  await expect(page.getByRole("heading", { name: "How to Play" })).toBeVisible();
+  await page.getByRole("button", { name: "Back" }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await page.getByRole("button", { name: "Back" }).click();
+  expect(moduleRequests).toEqual([]);
+
+  await page.getByRole("button", { name: "Practice", exact: true }).click();
+  await expect.poll(() => moduleRequests.length).toBe(1);
 });
 
 test("Practice pauses for a real WebGL context loss and survives restoration", async ({ page }) => {

@@ -65,7 +65,9 @@ export function mergePiece(grid: Grid, piece: ActivePiece): Grid {
     ? piece.descriptor.shape
     : piece.descriptor.shape;
   for (const cell of getAbsoluteCells(piece)) {
-    const isMarked = cell.index === piece.descriptor.specialCellIndex;
+    const isMarked =
+      piece.descriptor.source === "base" &&
+      cell.index === piece.descriptor.specialCellIndex;
     merged[cell.y]![cell.x] = isMarked && piece.descriptor.specialKind !== undefined
       ? { kind, special: piece.descriptor.specialKind }
       : { kind };

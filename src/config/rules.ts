@@ -1,4 +1,8 @@
-import type { PowerKind, SpecialKind } from "../domain/types";
+import type {
+  OversizeShape,
+  PowerKind,
+  SpecialKind,
+} from "../domain/types";
 
 export const STANDARD_SHAPES = ["I", "J", "L", "O", "S", "T", "Z"] as const;
 
@@ -73,15 +77,25 @@ export const RULES = {
   power: {
     threshold: 7,
     deck: [
-      "blackout",
       "scramble",
       "nuke",
-      "barrier",
+      "collapse",
+      "monomino-rush",
+      "acid-rain",
+      "oversize",
+      "ghost-jam",
+    ] as readonly PowerKind[],
+    practiceDeck: [
+      "nuke",
       "collapse",
       "monomino-rush",
       "acid-rain",
     ] as readonly PowerKind[],
+    oversizeShapes: ["I", "J", "L", "S", "T", "Z"] as readonly OversizeShape[],
+    oversizeQueueCap: 1,
+    oversizeOverflowGarbageRows: 2,
     blackoutTicks: 900,
+    ghostJamTicks: 900,
     scrambleTicks: 600,
     nukeRadius: 2,
     monominoRushTicks: 480,
@@ -89,8 +103,14 @@ export const RULES = {
     replacementQueueCap: 2,
   },
   special: {
-    frequency: 10,
-    typeBag: ["column-bomb", "garbage-core", "glitch-core"] as readonly SpecialKind[],
+    frequency: 6,
+    typeBag: [
+      "column-bomb",
+      "garbage-core",
+      "glitch-core",
+      "blackout",
+      "barrier",
+    ] as readonly SpecialKind[],
     glitchQueueCap: 2,
     glitchCycleMs: 150,
   },

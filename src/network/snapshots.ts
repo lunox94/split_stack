@@ -38,6 +38,7 @@ export interface PlayerSnapshotV1 {
   backToBack: boolean;
   powerCharge: number;
   powerDeckCursor: number;
+  oversizePieceCursor: number;
   upcomingPower: PowerKind;
   statuses: StatusState[];
   incomingGarbage: GarbagePacket[];
@@ -79,6 +80,8 @@ const SPECIAL_KINDS: readonly SpecialKind[] = [
   "column-bomb",
   "garbage-core",
   "glitch-core",
+  "blackout",
+  "barrier",
 ];
 
 function cellCode(cell: Cell | null): number {
@@ -93,7 +96,8 @@ function cellCode(cell: Cell | null): number {
 }
 
 function decodeCell(code: number): Cell | null {
-  if (!Number.isSafeInteger(code) || code < 0 || code > 63) {
+  const maximumCode = CELL_KINDS.length + SPECIAL_KINDS.length * 16;
+  if (!Number.isSafeInteger(code) || code < 0 || code > maximumCode) {
     throw new RangeError("Invalid snapshot cell code");
   }
   if (code === 0) return null;
@@ -164,6 +168,7 @@ export function createPlayerSnapshot(input: CreatePlayerSnapshotInput): PlayerSn
     backToBack: player.backToBack,
     powerCharge: player.powerCharge,
     powerDeckCursor: player.powerDeckCursor,
+    oversizePieceCursor: player.oversizePieceCursor,
     upcomingPower: player.upcomingPower,
     statuses: player.statuses.map((status) => ({ ...status })),
     incomingGarbage: player.incomingGarbage.map((packet) => ({ ...packet })),
@@ -230,6 +235,8 @@ function isPieceDescriptor(value: unknown): value is PieceDescriptor {
   const standard = ["I", "J", "L", "O", "S", "T", "Z"].includes(String(shape));
   const compatible =
     ((source === "base" || source === "glitch") && standard) ||
+    (source === "oversize" &&
+      RULES.power.oversizeShapes.some((candidate) => candidate === shape)) ||
     (source === "cross" && shape === "cross") ||
     (source === "monomino" && shape === "monomino") ||
     (source === "acid" && shape === "acid");
@@ -284,7 +291,11 @@ function isActivePiece(value: unknown): value is ActivePiece {
 
 function isStatus(value: unknown): boolean {
   if (!isRecord(value) || !isCounter(value.remainingTicks as number)) return false;
-  if (value.kind === "blackout" || value.kind === "scramble") return true;
+  if (
+    value.kind === "blackout" ||
+    value.kind === "scramble" ||
+    value.kind === "ghost-jam"
+  ) return true;
   return (
     value.kind === "barrier" &&
     Number.isSafeInteger(value.capacity) &&
@@ -394,6 +405,7 @@ export function isPlayerSnapshot(value: unknown): value is PlayerSnapshotV1 {
     typeof candidate.backToBack !== "boolean" ||
     !isCounter(candidate.powerCharge ?? -1) ||
     !isCounter(candidate.powerDeckCursor ?? -1) ||
+    !isCounter(candidate.oversizePieceCursor ?? -1) ||
     !Number.isSafeInteger(candidate.stateHash) ||
     (candidate.stateHash ?? -1) < 0 ||
     candidate.stateHash! > 0xffff_ffff ||

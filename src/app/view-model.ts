@@ -20,6 +20,26 @@ function descriptorKind(descriptor: PieceDescriptor): RenderCellKind {
   return descriptor.shape;
 }
 
+function activePieceKey(
+  playerId: PlayerId,
+  active: ActivePiece | null,
+  basePieceCursor: number,
+  holdUsed: boolean,
+): string | undefined {
+  if (active === null) return undefined;
+  const descriptor = active.descriptor;
+  return [
+    playerId,
+    basePieceCursor,
+    holdUsed ? 1 : 0,
+    descriptor.eventId ?? "base",
+    descriptor.source,
+    descriptor.shape,
+    descriptor.specialKind ?? "ordinary",
+    descriptor.specialCellIndex ?? -1,
+  ].join(":");
+}
+
 function gridCells(grid: Grid): RenderCellModel[] {
   const cells: RenderCellModel[] = [];
   grid.forEach((row, rowIndex) => {
@@ -72,13 +92,18 @@ function boardModel(
   statuses: readonly StatusState[],
   incomingGarbage: readonly GarbagePacket[],
   replacementMode: ReplacementMode | null,
+  pieceKey: string | undefined,
 ): BoardRenderModel {
   const barrier = statuses.find(
     (status): status is Extract<StatusState, { kind: "barrier" }> =>
       status.kind === "barrier",
   );
+  const visibleGhostY = statuses.some((status) => status.kind === "ghost-jam")
+    ? null
+    : ghostY;
   return {
     playerId,
+    ...(pieceKey === undefined ? {} : { activePieceKey: pieceKey }),
     focused,
     concealed,
     incomingGarbage: incomingGarbage.reduce((rows, packet) => rows + packet.rows, 0),
@@ -89,7 +114,7 @@ function boardModel(
       ? []
       : [
           ...gridCells(grid),
-          ...fallingCells(active, ghostY, "ghost"),
+          ...fallingCells(active, visibleGhostY, "ghost"),
           ...fallingCells(active, active?.y ?? null, "active"),
         ],
   };
@@ -110,6 +135,12 @@ export function boardModelFromSimulation(
     snapshot.player.statuses,
     snapshot.player.incomingGarbage,
     snapshot.player.replacementMode,
+    activePieceKey(
+      snapshot.player.playerId,
+      snapshot.player.active,
+      snapshot.player.basePieceCursor,
+      snapshot.player.holdUsed,
+    ),
   );
 }
 
@@ -128,5 +159,11 @@ export function boardModelFromRemoteSnapshot(
     snapshot.statuses,
     snapshot.incomingGarbage,
     snapshot.replacementMode,
+    activePieceKey(
+      snapshot.playerId,
+      snapshot.active,
+      snapshot.basePieceCursor,
+      snapshot.holdUsed,
+    ),
   );
 }

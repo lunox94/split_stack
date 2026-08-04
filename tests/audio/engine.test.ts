@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { AudioEngine } from "../../src/audio/engine";
+import { CUE_DEFINITIONS, GLITCH_PREVIEW_STEP_MS } from "../../src/audio/cues";
 
 const trackerModule = (): ArrayBuffer => {
   const bytes = readFileSync(resolve("public/music/radix-mountain_king.mod"));
@@ -160,5 +161,154 @@ describe("audio engine lifecycle", () => {
     engine.setEffectsMuted(false);
     engine.play("move");
     expect(context.createOscillator).toHaveBeenCalled();
+  });
+
+  it("makes larger clears audibly denser while retaining one shared clear signature", () => {
+    const clears = [
+      CUE_DEFINITIONS.single,
+      CUE_DEFINITIONS.double,
+      CUE_DEFINITIONS.triple,
+      CUE_DEFINITIONS["four-line"],
+    ];
+
+    expect(clears.map((definition) => definition.length)).toEqual([2, 3, 4, 5]);
+    expect(clears.map((definition) => definition[0]?.frequency)).toEqual([
+      510,
+      510,
+      510,
+      510,
+    ]);
+    expect(clears.map((definition) =>
+      definition.reduce((energy, tone) => energy + tone.gain * tone.durationMs, 0)
+    )).toEqual([...clears].map((definition) =>
+      definition.reduce((energy, tone) => energy + tone.gain * tone.durationMs, 0)
+    ).sort((left, right) => left - right));
+    expect(
+      CUE_DEFINITIONS["four-line"][CUE_DEFINITIONS["four-line"].length - 1]
+        ?.frequency,
+    ).toBeGreaterThan(1_000);
+  });
+
+  it("gives Oversize, Ghost Jam, and Glitch their own readable sound identities", () => {
+    const oversize = CUE_DEFINITIONS["power-oversize"];
+    const ghostJam = CUE_DEFINITIONS["power-ghost-jam"];
+    const glitchLow = CUE_DEFINITIONS["glitch-preview-low"][0]!;
+    const glitchHigh = CUE_DEFINITIONS["glitch-preview-high"][0]!;
+
+    expect(oversize.some((cue) => cue.frequency < 100)).toBe(true);
+    expect(oversize.some((cue) =>
+      cue.endFrequency !== undefined && cue.endFrequency > cue.frequency
+    )).toBe(true);
+    expect(ghostJam.every((cue) =>
+      cue.endFrequency !== undefined && cue.endFrequency < cue.frequency
+    )).toBe(true);
+    expect([glitchLow.frequency, glitchHigh.frequency]).toEqual([620, 880]);
+    expect(Math.max(glitchLow.gain, glitchHigh.gain)).toBeLessThan(0.03);
+    expect(Math.max(glitchLow.durationMs, glitchHigh.durationMs))
+      .toBeLessThan(GLITCH_PREVIEW_STEP_MS);
+  });
+
+  it("plays one garbage lift-and-slam whose weight and duration scale with its batch", async () => {
+    const context = fakeAudioContext();
+    const engine = new AudioEngine({ contextFactory: () => context });
+    expect(await engine.unlock()).toBe(true);
+
+    engine.playGarbageRise(1, { pan: -0.5 });
+    const oneRowOscillators = vi.mocked(context.createOscillator).mock.results
+      .map((result) => result.value);
+    const oneRowStops = oneRowOscillators.map((oscillator) =>
+      vi.mocked(oscillator.stop).mock.calls[0]?.[0] as number
+    );
+    expect(oneRowOscillators).toHaveLength(2);
+    expect(vi.mocked(context.createStereoPanner).mock.results.map((result) =>
+      vi.mocked(result.value.pan.setValueAtTime).mock.calls[0]?.[0]
+    )).toEqual([-0.5, -0.5]);
+
+    vi.mocked(context.createOscillator).mockClear();
+    vi.mocked(context.createStereoPanner).mockClear();
+    engine.playGarbageRise(4, { pan: 0.5 });
+    const fourRowOscillators = vi.mocked(context.createOscillator).mock.results
+      .map((result) => result.value);
+    const fourRowStops = fourRowOscillators.map((oscillator) =>
+      vi.mocked(oscillator.stop).mock.calls[0]?.[0] as number
+    );
+
+    // A batch remains one layered event instead of repeating once per row.
+    expect(fourRowOscillators).toHaveLength(2);
+    expect(vi.mocked(context.createStereoPanner).mock.results.map((result) =>
+      vi.mocked(result.value.pan.setValueAtTime).mock.calls[0]?.[0]
+    )).toEqual([0.5, 0.5]);
+    expect(Math.max(...fourRowStops)).toBeGreaterThan(Math.max(...oneRowStops));
+    expect(
+      vi.mocked(fourRowOscillators[1]!.frequency.exponentialRampToValueAtTime)
+        .mock.calls[0]?.[0],
+    ).toBeLessThan(
+      vi.mocked(oneRowOscillators[1]!.frequency.exponentialRampToValueAtTime)
+        .mock.calls[0]?.[0] as number,
+    );
+  });
+
+  it("owns one quiet alternating Glitch preview loop and stops it on mute", async () => {
+    vi.useFakeTimers();
+    try {
+      const context = fakeAudioContext();
+      const engine = new AudioEngine({ contextFactory: () => context });
+      expect(await engine.unlock()).toBe(true);
+
+      expect(engine.startGlitchPreviewLoop({ pan: 0.4 })).toBe(true);
+      expect(vi.mocked(context.createOscillator)).toHaveBeenCalledTimes(1);
+      const first = vi.mocked(context.createOscillator).mock.results[0]?.value;
+      expect(vi.mocked(first?.frequency.setValueAtTime).mock.calls[0]?.[0]).toBe(620);
+
+      await vi.advanceTimersByTimeAsync(GLITCH_PREVIEW_STEP_MS);
+      const second = vi.mocked(context.createOscillator).mock.results[1]?.value;
+      expect(vi.mocked(second?.frequency.setValueAtTime).mock.calls[0]?.[0]).toBe(880);
+
+      // Render loops may report the same primary preview repeatedly. Starting
+      // again is idempotent rather than creating or restarting another owner.
+      const beforeDuplicateStart = vi.mocked(context.createOscillator).mock.calls.length;
+      expect(engine.startGlitchPreviewLoop()).toBe(true);
+      expect(vi.mocked(context.createOscillator)).toHaveBeenCalledTimes(
+        beforeDuplicateStart,
+      );
+      await vi.advanceTimersByTimeAsync(GLITCH_PREVIEW_STEP_MS);
+      expect(vi.mocked(context.createOscillator)).toHaveBeenCalledTimes(
+        beforeDuplicateStart + 1,
+      );
+
+      engine.setEffectsMuted(true);
+      await vi.advanceTimersByTimeAsync(GLITCH_PREVIEW_STEP_MS * 2);
+      expect(vi.mocked(context.createOscillator)).toHaveBeenCalledTimes(
+        beforeDuplicateStart + 1,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("joins an already-cycling Glitch preview on its next visual boundary", async () => {
+    vi.useFakeTimers();
+    try {
+      const context = fakeAudioContext();
+      const engine = new AudioEngine({ contextFactory: () => context });
+      expect(await engine.unlock()).toBe(true);
+
+      // 375 ms is halfway through visual step 2. Do not emit a late tone for
+      // that shape; wait 75 ms and sound step 3 exactly when the shape changes.
+      expect(engine.startGlitchPreviewLoop({ elapsedMs: 375 })).toBe(true);
+      expect(vi.mocked(context.createOscillator)).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(74);
+      expect(vi.mocked(context.createOscillator)).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      const joined = vi.mocked(context.createOscillator).mock.results[0]?.value;
+      expect(vi.mocked(joined?.frequency.setValueAtTime).mock.calls[0]?.[0]).toBe(880);
+
+      await vi.advanceTimersByTimeAsync(GLITCH_PREVIEW_STEP_MS);
+      const following = vi.mocked(context.createOscillator).mock.results[1]?.value;
+      expect(vi.mocked(following?.frequency.setValueAtTime).mock.calls[0]?.[0]).toBe(620);
+      engine.stopGlitchPreviewLoop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

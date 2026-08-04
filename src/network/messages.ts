@@ -56,7 +56,9 @@ export const MESSAGE_KINDS = [
   "GARBAGE_ATTACK",
   "HOLLOW_CROSS",
   "GLITCH_PIECE",
+  "OVERSIZE_PIECE",
   "SCRAMBLE_START",
+  "GHOST_JAM_START",
   "BLACKOUT_START",
   "TOP_OUT",
   "FORFEIT",
@@ -73,7 +75,9 @@ export const CRITICAL_KINDS = [
   "GARBAGE_ATTACK",
   "HOLLOW_CROSS",
   "GLITCH_PIECE",
+  "OVERSIZE_PIECE",
   "SCRAMBLE_START",
+  "GHOST_JAM_START",
   "BLACKOUT_START",
   "TOP_OUT",
   "FORFEIT",
@@ -137,7 +141,9 @@ export interface RealtimePayloadMap {
   };
   HOLLOW_CROSS: CriticalPayload & { targetPlayerId: PlayerId };
   GLITCH_PIECE: CriticalPayload & { targetPlayerId: PlayerId };
+  OVERSIZE_PIECE: CriticalPayload & { targetPlayerId: PlayerId };
   SCRAMBLE_START: CriticalPayload & { targetPlayerId: PlayerId };
+  GHOST_JAM_START: CriticalPayload & { targetPlayerId: PlayerId };
   BLACKOUT_START: CriticalPayload & { ownerPlayerId: PlayerId };
   TOP_OUT: CriticalPayload & {
     playerId: PlayerId;

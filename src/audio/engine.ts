@@ -1,4 +1,11 @@
-import { CUE_DEFINITIONS, type AudioCue, type CueTone } from "./cues";
+import {
+  CUE_DEFINITIONS,
+  GLITCH_PREVIEW_STEP_MS,
+  garbageRiseCueForRows,
+  type AudioCue,
+  type CueDefinition,
+  type CueTone,
+} from "./cues";
 import { ModReplay } from "./mod-replay";
 import {
   selectTrackForMatch,
@@ -16,6 +23,11 @@ export interface AudioEngineOptions {
 export interface PlayCueOptions {
   readonly pan?: number;
   readonly gain?: number;
+}
+
+export interface GlitchPreviewLoopOptions extends PlayCueOptions {
+  /** Elapsed visual-cycle time, used to join an already-running preview in phase. */
+  readonly elapsedMs?: number;
 }
 
 const DEFAULT_MUSIC_SAMPLE_RATE = 44_100;
@@ -52,6 +64,7 @@ export class AudioEngine {
   #musicPaused = false;
   #musicResumeRequested = false;
   readonly #musicSources = new Set<AudioBufferSourceNode>();
+  #glitchPreviewTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: AudioEngineOptions = {}) {
     this.#contextFactory =
@@ -102,6 +115,7 @@ export class AudioEngine {
   }
 
   setEffectsMuted(muted: boolean): void {
+    if (muted) this.stopGlitchPreviewLoop();
     this.#effectsMuted = muted;
     this.#applyEffectsVolume();
   }
@@ -125,21 +139,56 @@ export class AudioEngine {
   }
 
   play(cue: AudioCue, options: PlayCueOptions = {}): void {
-    const context = this.#context;
-    const effectsBus = this.#effectsBus;
+    this.#playDefinition(CUE_DEFINITIONS[cue], options);
+  }
+
+  playGarbageRise(rowCount: number, options: PlayCueOptions = {}): void {
+    this.#playDefinition(garbageRiseCueForRows(rowCount), options);
+  }
+
+  playGlitchPreviewStep(step: number, options: PlayCueOptions = {}): void {
+    const gain = Math.max(0, Math.min(2, options.gain ?? 1)) * 0.68;
+    this.play(step % 2 === 0 ? "glitch-preview-low" : "glitch-preview-high", {
+      ...options,
+      gain,
+    });
+  }
+
+  startGlitchPreviewLoop(options: GlitchPreviewLoopOptions = {}): boolean {
+    if (this.#glitchPreviewTimer !== null) return true;
     if (
       this.#effectsMuted ||
-      context === null ||
-      effectsBus === null ||
-      context.state !== "running"
+      this.#context === null ||
+      this.#effectsBus === null ||
+      this.#context.state !== "running"
     ) {
-      return;
+      return false;
     }
-    const pan = Math.max(-1, Math.min(1, options.pan ?? 0));
-    const cueGain = Math.max(0, Math.min(2, options.gain ?? 1));
-    for (const tone of CUE_DEFINITIONS[cue]) {
-      this.#scheduleTone(context, effectsBus, tone, pan, cueGain);
-    }
+    const elapsedMs = Number.isFinite(options.elapsedMs)
+      ? Math.max(0, options.elapsedMs ?? 0)
+      : 0;
+    const playOptions: PlayCueOptions = options;
+    let step = Math.floor(elapsedMs / GLITCH_PREVIEW_STEP_MS);
+    const phaseMs = elapsedMs % GLITCH_PREVIEW_STEP_MS;
+    if (phaseMs === 0) this.playGlitchPreviewStep(step, playOptions);
+    const untilNextStepMs = phaseMs === 0
+      ? GLITCH_PREVIEW_STEP_MS
+      : GLITCH_PREVIEW_STEP_MS - phaseMs;
+    this.#glitchPreviewTimer = setTimeout(() => {
+      step += 1;
+      this.playGlitchPreviewStep(step, playOptions);
+      this.#glitchPreviewTimer = setInterval(() => {
+        step += 1;
+        this.playGlitchPreviewStep(step, playOptions);
+      }, GLITCH_PREVIEW_STEP_MS);
+    }, untilNextStepMs);
+    return true;
+  }
+
+  stopGlitchPreviewLoop(): void {
+    if (this.#glitchPreviewTimer === null) return;
+    clearTimeout(this.#glitchPreviewTimer);
+    this.#glitchPreviewTimer = null;
   }
 
   startMusic(matchSeed: string, rematchIndex = 0): ModuleTrack {
@@ -239,6 +288,7 @@ export class AudioEngine {
 
   async dispose(): Promise<void> {
     const context = this.#context;
+    this.stopGlitchPreviewLoop();
     this.stopMusic();
     this.#context = null;
     this.#effectsBus = null;
@@ -332,6 +382,27 @@ export class AudioEngine {
     this.#stopMusicSources();
     this.#musicScheduledUntilSeconds = 0;
     this.#musicAnchorTimeSeconds = null;
+  }
+
+  #playDefinition(
+    definition: CueDefinition,
+    options: PlayCueOptions,
+  ): void {
+    const context = this.#context;
+    const effectsBus = this.#effectsBus;
+    if (
+      this.#effectsMuted ||
+      context === null ||
+      effectsBus === null ||
+      context.state !== "running"
+    ) {
+      return;
+    }
+    const pan = Math.max(-1, Math.min(1, options.pan ?? 0));
+    const cueGain = Math.max(0, Math.min(2, options.gain ?? 1));
+    for (const cueTone of definition) {
+      this.#scheduleTone(context, effectsBus, cueTone, pan, cueGain);
+    }
   }
 
   #scheduleTone(

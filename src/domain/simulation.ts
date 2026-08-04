@@ -26,6 +26,7 @@ import {
   captureSpecialTriggers,
   enqueueGlitch,
   enqueueHollowCross,
+  enqueueOversize,
   resolveSpecialTriggers,
   type CapturedSpecial,
 } from "./specials";
@@ -81,8 +82,12 @@ export interface SimulationEffect {
     | "special-trigger"
     | "hollow-cross"
     | "glitch-piece"
+    | "oversize-piece"
+    | "oversize-overflow"
     | "blackout-start"
+    | "barrier-start"
     | "scramble-start"
+    | "ghost-jam-start"
     | "power-activated"
     | "power-impact"
     | "nuke"
@@ -236,7 +241,13 @@ export interface Simulation {
   ): void;
   receiveHollowCross(eventId: string): void;
   receiveGlitch(eventId: string): void;
+  receiveOversize(
+    eventId: string,
+    senderId?: string,
+    sourceTick?: number,
+  ): SimulationEffect[];
   receiveScramble(): void;
+  receiveGhostJam(): void;
   activatePower(power: PowerKind): SimulationEffect[];
 }
 
@@ -371,9 +382,14 @@ class LocalSimulation implements Simulation {
   constructor(options: SimulationOptions) {
     this.#seed = options.seed;
     this.#practice = options.practice;
-    this.#factory = createPieceFactory(options.seed);
+    const powerDeckMode = options.practice ? "practice" : "competitive";
+    this.#factory = createPieceFactory(options.seed, powerDeckMode);
     this.#player = clonePlayer(
-      options.initialPlayer ?? createPlayerState(options.playerId, options.seed),
+      options.initialPlayer ?? createPlayerState(
+        options.playerId,
+        options.seed,
+        powerDeckMode,
+      ),
     );
     if (this.#player.active === null && this.#player.topOut === null) this.#spawnNext([]);
   }
@@ -636,10 +652,7 @@ class LocalSimulation implements Simulation {
     effects: SimulationEffect[],
   ): void {
     effects.push({ kind: "power-impact", power, phase: "impact", eventId });
-    if (power === "blackout") {
-      this.#player.statuses = activateTimedStatus(this.#player.statuses, "blackout");
-      effects.push({ kind: "blackout-start", eventId });
-    } else if (power === "scramble") {
+    if (power === "scramble") {
       effects.push({ kind: "scramble-start", eventId });
     } else if (power === "nuke") {
       const result = applyNuke(this.#player.grid);
@@ -652,15 +665,17 @@ class LocalSimulation implements Simulation {
         cells: result.cells.map((cell) => ({ ...cell })),
         ...(result.target === null ? {} : { target: { ...result.target } }),
       });
-    } else if (power === "barrier") {
-      this.#player.statuses = activateBarrier(this.#player.statuses);
     } else if (power === "collapse") {
       // Collapse's board mutation is staged by the resolution timeline.
-    } else {
+    } else if (power === "monomino-rush" || power === "acid-rain") {
       this.#player.pendingReplacementModes = queueReplacementPower(
         this.#player.pendingReplacementModes,
         power,
       );
+    } else if (power === "oversize") {
+      effects.push({ kind: "oversize-piece", eventId });
+    } else {
+      effects.push({ kind: "ghost-jam-start", eventId });
     }
   }
 
@@ -731,6 +746,7 @@ class LocalSimulation implements Simulation {
     this.#lastTrace.push("score-combo-b2b-attack-charge");
     const progress = resolveClearProgress({
       clearKind,
+      clearedLineCount: completed.length,
       level: lockLevel,
       previousComboIndex: this.#player.comboIndex,
       backToBack: this.#player.backToBack,
@@ -770,6 +786,14 @@ class LocalSimulation implements Simulation {
         order: event.order,
         cells: event.affectedCells.map((cell) => ({ ...cell })),
       });
+    });
+    specials.blackoutEvents.forEach((eventId) => {
+      this.#player.statuses = activateTimedStatus(this.#player.statuses, "blackout");
+      effects.push({ kind: "blackout-start", eventId });
+    });
+    specials.barrierEvents.forEach((eventId) => {
+      this.#player.statuses = activateBarrier(this.#player.statuses);
+      effects.push({ kind: "barrier-start", eventId });
     });
 
     this.#lastTrace.push("cancel-incoming");
@@ -1028,8 +1052,9 @@ class LocalSimulation implements Simulation {
 
   readSnapshot(): SimulationSnapshot {
     const player = clonePlayer(this.#player);
+    const ghostJammed = player.statuses.some((status) => status.kind === "ghost-jam");
     const ghostY =
-      player.active === null || collides(player.grid, player.active)
+      ghostJammed || player.active === null || collides(player.grid, player.active)
         ? null
         : getGhostY(player.grid, player.active);
     const previewState = clonePlayer(player);
@@ -1103,8 +1128,37 @@ class LocalSimulation implements Simulation {
     }
   }
 
+  receiveOversize(
+    eventId: string,
+    senderId?: string,
+    sourceTick?: number,
+  ): SimulationEffect[] {
+    const shape = this.#factory.oversizeAt(this.#player.oversizePieceCursor);
+    this.#player.oversizePieceCursor += 1;
+    const queued = enqueueOversize(this.#player.forcedQueue, shape, eventId);
+    this.#player.forcedQueue = queued.queue;
+    if (queued.overflowGarbageRows > 0) {
+      this.receiveGarbage(
+        queued.overflowGarbageRows,
+        `${eventId}:overflow`,
+        senderId,
+        sourceTick,
+      );
+      return [{
+        kind: "oversize-overflow",
+        eventId,
+        rows: queued.overflowGarbageRows,
+      }];
+    }
+    return [{ kind: "oversize-piece", eventId }];
+  }
+
   receiveScramble(): void {
     this.#player.statuses = activateTimedStatus(this.#player.statuses, "scramble");
+  }
+
+  receiveGhostJam(): void {
+    this.#player.statuses = activateTimedStatus(this.#player.statuses, "ghost-jam");
   }
 }
 

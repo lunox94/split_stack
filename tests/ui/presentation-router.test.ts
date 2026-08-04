@@ -123,11 +123,23 @@ describe("PresentationRouter", () => {
 
   it("routes authenticated incoming attacks toward the correct visible board", () => {
     const scheduler = new RecordingScheduler();
-    const router = new PresentationRouter(scheduler);
+    const ghostCells = [
+      { column: 3, row: 19 },
+      { column: 4, row: 19 },
+      { column: 5, row: 19 },
+      { column: 4, row: 18 },
+    ];
+    const router = new PresentationRouter(
+      scheduler,
+      () => 0,
+      (board) => board === "left" ? ghostCells : [],
+    );
 
     router.consumeIncomingAttack("garbage", "incoming-garbage", 4);
     router.consumeIncomingAttack("scramble", "incoming-scramble");
     router.consumeIncomingAttack("blackout", "incoming-blackout");
+    router.consumeIncomingAttack("oversize", "incoming-oversize");
+    router.consumeIncomingAttack("ghost-jam", "incoming-ghost-jam");
 
     expect(scheduler.cues).toEqual([
       {
@@ -146,6 +158,88 @@ describe("PresentationRouter", () => {
         id: "incoming-blackout",
         kind: "blackout",
         board: "right",
+      },
+      {
+        id: "incoming-oversize",
+        kind: "offensive-transfer",
+        attack: "oversize",
+        source: "right",
+        target: "left",
+      },
+      {
+        id: "incoming-ghost-jam",
+        kind: "ghost-jam",
+        board: "left",
+        ghostCells,
+      },
+    ]);
+  });
+
+  it("routes the new meter powers and embedded status triggers", () => {
+    const scheduler = new RecordingScheduler();
+    const remoteGhostCells = [
+      { column: 6, row: 20 },
+      { column: 7, row: 20 },
+      { column: 8, row: 20 },
+      { column: 7, row: 19 },
+    ];
+    const router = new PresentationRouter(
+      scheduler,
+      () => 0,
+      (board) => board === "right" ? remoteGhostCells : [],
+    );
+
+    router.consumeSimulationEffects([
+      {
+        kind: "power-activated",
+        power: "oversize",
+        phase: "anticipation",
+        eventId: "oversize-power",
+      },
+      {
+        kind: "power-activated",
+        power: "ghost-jam",
+        phase: "anticipation",
+        eventId: "ghost-jam-power",
+      },
+      { kind: "ghost-jam-start", eventId: "ghost-jam-power" },
+      { kind: "blackout-start", eventId: "blackout-special" },
+      { kind: "barrier-start", eventId: "barrier-special" },
+    ], "left");
+
+    expect(scheduler.cues).toEqual([
+      {
+        id: "oversize-power",
+        kind: "offensive-transfer",
+        attack: "oversize",
+        source: "left",
+        target: "right",
+      },
+      {
+        id: "ghost-jam-power",
+        kind: "offensive-transfer",
+        attack: "ghost-jam",
+        source: "left",
+        target: "right",
+      },
+      {
+        id: "ghost-jam-power:ghost-jam",
+        kind: "ghost-jam",
+        board: "right",
+        ghostCells: remoteGhostCells,
+      },
+      {
+        id: "blackout-special",
+        kind: "offensive-transfer",
+        attack: "blackout",
+        source: "left",
+        target: "right",
+      },
+      {
+        id: "barrier-special",
+        kind: "barrier",
+        board: "left",
+        capacity: 4,
       },
     ]);
   });

@@ -271,7 +271,9 @@ function isValidPayload(kind: MessageKind, payload: unknown): boolean {
       );
     case "HOLLOW_CROSS":
     case "GLITCH_PIECE":
+    case "OVERSIZE_PIECE":
     case "SCRAMBLE_START":
+    case "GHOST_JAM_START":
       return isTargetEvent(payload);
     case "BLACKOUT_START":
       return hasEventId(payload) && isBoundedId(payload.ownerPlayerId);

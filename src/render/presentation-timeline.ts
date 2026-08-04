@@ -17,6 +17,8 @@ export type PresentationMoment =
   | "rail"
   | "veil"
   | "glitch"
+  | "ghost-flicker"
+  | "ghost-dissolve"
   | "fracture"
   | "special-burst"
   | "impact"
@@ -34,7 +36,9 @@ export type OffensiveAttack =
   | "blackout"
   | "scramble"
   | "hollow-cross"
-  | "glitch";
+  | "glitch"
+  | "oversize"
+  | "ghost-jam";
 
 export interface OffensiveTransferCue {
   readonly id: string;
@@ -88,8 +92,19 @@ export interface BarrierCue {
 
 export interface StatusPowerCue {
   readonly id: string;
-  readonly kind: "blackout" | "scramble" | "monomino-rush" | "acid-rain";
+  readonly kind:
+    | "blackout"
+    | "scramble"
+    | "monomino-rush"
+    | "acid-rain";
   readonly board: PresentationBoard;
+}
+
+export interface GhostJamCue {
+  readonly id: string;
+  readonly kind: "ghost-jam";
+  readonly board: PresentationBoard;
+  readonly ghostCells: readonly GridPoint[];
 }
 
 export interface SpecialTriggerPoint {
@@ -114,6 +129,7 @@ export type PresentationCue =
   | CollapseCue
   | BarrierCue
   | StatusPowerCue
+  | GhostJamCue
   | SpecialChainCue;
 
 export interface PresentationTiming {
@@ -149,6 +165,7 @@ export interface PresentationEffect {
   readonly completedRows?: readonly number[];
   readonly movements?: readonly CollapseMovement[];
   readonly capacity?: number;
+  readonly ghostCells?: readonly GridPoint[];
   readonly visualStyle: "motion" | "fade";
   readonly particleCount: number;
   readonly flash: boolean;
@@ -236,7 +253,8 @@ const timingFor = (cue: PresentationCue): PresentationTiming => {
     cue.kind === "blackout" ||
     cue.kind === "scramble" ||
     cue.kind === "monomino-rush" ||
-    cue.kind === "acid-rain"
+    cue.kind === "acid-rain" ||
+    cue.kind === "ghost-jam"
   ) {
     return STATUS_POWER_TIMING;
   }
@@ -362,6 +380,10 @@ export class PresentationTimeline {
             ? stage === "follow-through" ? "particles" : "veil"
           : scheduled.cue.kind === "scramble"
             ? stage === "follow-through" ? "particles" : "glitch"
+          : scheduled.cue.kind === "ghost-jam"
+            ? stage === "anticipation"
+              ? "ghost-flicker"
+              : stage === "action" ? "ghost-dissolve" : "particles"
           : scheduled.cue.kind === "monomino-rush"
             ? stage === "follow-through" ? "particles" : "fracture"
           : scheduled.cue.kind === "acid-rain"
@@ -454,6 +476,8 @@ export class PresentationTimeline {
                       }
                     : scheduled.cue.kind === "barrier"
                       ? { capacity: scheduled.cue.capacity }
+                      : scheduled.cue.kind === "ghost-jam"
+                        ? { ghostCells: scheduled.cue.ghostCells }
                       : scheduled.cue.kind === "special-chain"
                         ? {
                             resolvedSpecials: orderedSpecials(scheduled.cue).slice(

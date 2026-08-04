@@ -3,6 +3,7 @@ import type { SimulationEffect } from "../domain/simulation";
 import type { CompetitiveIncomingAttackKind } from "../match/competitive-session";
 import type {
   OffensiveAttack,
+  GridPoint,
   PresentationBoard,
   PresentationCue,
 } from "../render/presentation-timeline";
@@ -10,6 +11,10 @@ import type {
 export interface PresentationScheduler {
   schedule(cue: PresentationCue, startedAtMs: number): unknown;
 }
+
+export type GhostCellsProvider = (
+  board: PresentationBoard,
+) => readonly GridPoint[];
 
 const otherBoard = (board: PresentationBoard): PresentationBoard =>
   board === "left" ? "right" : "left";
@@ -26,14 +31,17 @@ const outgoingAttackFor = (
 export class PresentationRouter {
   readonly #scheduler: PresentationScheduler;
   readonly #now: () => number;
+  readonly #ghostCellsFor: GhostCellsProvider;
   #ordinal = 0;
 
   constructor(
     scheduler: PresentationScheduler,
     now: () => number = () => performance.now(),
+    ghostCellsFor: GhostCellsProvider = () => [],
   ) {
     this.#scheduler = scheduler;
     this.#now = now;
+    this.#ghostCellsFor = ghostCellsFor;
   }
 
   consumeSimulationEffects(
@@ -78,14 +86,11 @@ export class PresentationRouter {
             board,
             center: { column: effect.target.x, row: effect.target.y },
           });
-        } else if (effect.power === "barrier") {
-          this.#schedule({
-            id,
-            kind: "barrier",
-            board,
-            capacity: RULES.garbage.barrierCapacity,
-          });
-        } else if (effect.power === "blackout" || effect.power === "scramble") {
+        } else if (
+          effect.power === "scramble" ||
+          effect.power === "oversize" ||
+          effect.power === "ghost-jam"
+        ) {
           this.#schedule({
             id,
             kind: "offensive-transfer",
@@ -106,6 +111,35 @@ export class PresentationRouter {
             movements: [],
           });
         }
+        continue;
+      }
+      if (effect.kind === "blackout-start") {
+        this.#schedule({
+          id,
+          kind: "offensive-transfer",
+          attack: "blackout",
+          source: board,
+          target: otherBoard(board),
+        });
+        continue;
+      }
+      if (effect.kind === "ghost-jam-start") {
+        const target = otherBoard(board);
+        this.#schedule({
+          id: `${id}:ghost-jam`,
+          kind: "ghost-jam",
+          board: target,
+          ghostCells: this.#ghostCellsFor(target).map((cell) => ({ ...cell })),
+        });
+        continue;
+      }
+      if (effect.kind === "barrier-start") {
+        this.#schedule({
+          id,
+          kind: "barrier",
+          board,
+          capacity: RULES.garbage.barrierCapacity,
+        });
         continue;
       }
       if (effect.kind === "acid-lock" && effect.column !== undefined) {
@@ -161,6 +195,15 @@ export class PresentationRouter {
     }
     if (kind === "blackout") {
       this.#schedule({ id: eventId, kind: "blackout", board: "right" });
+      return;
+    }
+    if (kind === "ghost-jam") {
+      this.#schedule({
+        id: eventId,
+        kind: "ghost-jam",
+        board: "left",
+        ghostCells: this.#ghostCellsFor("left").map((cell) => ({ ...cell })),
+      });
       return;
     }
     this.#schedule({

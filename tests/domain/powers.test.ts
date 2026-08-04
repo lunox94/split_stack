@@ -11,16 +11,18 @@ import {
 import type { StatusState } from "../../src/domain/types";
 
 describe("automatic powers", () => {
-  it("resets Blackout and Scramble durations instead of stacking", () => {
+  it("resets Blackout, Scramble, and Ghost Jam durations instead of stacking", () => {
     let statuses: StatusState[] = [];
     statuses = activateTimedStatus(statuses, "blackout");
     statuses = tickStatuses(statuses, 400);
     statuses = activateTimedStatus(statuses, "blackout");
     statuses = activateTimedStatus(statuses, "scramble");
+    statuses = activateTimedStatus(statuses, "ghost-jam");
 
     expect(statuses).toContainEqual({ kind: "blackout", remainingTicks: 900 });
     expect(statuses).toContainEqual({ kind: "scramble", remainingTicks: 600 });
-    expect(statuses).toHaveLength(2);
+    expect(statuses).toContainEqual({ kind: "ghost-jam", remainingTicks: 900 });
+    expect(statuses).toHaveLength(3);
   });
 
   it("resets Barrier to 1,200 ticks and four rows", () => {
@@ -100,7 +102,7 @@ describe("automatic powers", () => {
       "acid-rain",
       "monomino-rush",
     ]);
-    expect(queueReplacementPower([], "blackout")).toEqual([]);
+    expect(queueReplacementPower([], "nuke")).toEqual([]);
   });
 
   it("bounds the replacement-mode FIFO at two pending powers", () => {

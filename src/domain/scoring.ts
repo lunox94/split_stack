@@ -8,6 +8,7 @@ export interface ClearProgressInput {
   backToBack: boolean;
   powerCreated?: boolean;
   allowCharge?: boolean;
+  clearedLineCount?: number;
 }
 
 export interface ClearProgress {
@@ -111,6 +112,7 @@ export function clearKindFor(lineCount: number, tSpin: boolean): ClearKind {
 export function resolveClearProgress(input: ClearProgressInput): ClearProgress {
   const values = VALUES[input.clearKind];
   const level = Math.max(1, Math.floor(input.level));
+  const lineCount = input.clearedLineCount ?? values.lines;
 
   if (input.powerCreated === true) {
     return {
@@ -121,11 +123,11 @@ export function resolveClearProgress(input: ClearProgressInput): ClearProgress {
       backToBack: input.backToBack,
       difficult: false,
       hollowCross: false,
-      lineCount: values.lines,
+      lineCount,
     };
   }
 
-  const lineClear = values.lines > 0;
+  const lineClear = lineCount > 0;
   const comboIndex = lineClear ? input.previousComboIndex + 1 : -1;
   const receivesBackToBackBonus = values.difficult && input.backToBack;
   const baseScore = receivesBackToBackBonus
@@ -157,6 +159,6 @@ export function resolveClearProgress(input: ClearProgressInput): ClearProgress {
     backToBack: nextBackToBack,
     difficult: values.difficult,
     hollowCross: input.clearKind === "tetris",
-    lineCount: values.lines,
+    lineCount,
   };
 }

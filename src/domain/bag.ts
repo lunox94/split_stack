@@ -1,5 +1,10 @@
 import { RULES, STANDARD_SHAPES } from "../config/rules";
-import type { PowerKind, SpecialKind, StandardShape } from "./types";
+import type {
+  OversizeShape,
+  PowerKind,
+  SpecialKind,
+  StandardShape,
+} from "./types";
 import { createNamedRng, type Xoshiro128StarStar } from "./rng";
 
 export interface DeterministicSequence<T> {
@@ -44,8 +49,23 @@ export function createBasePieceSequence(seed: string): DeterministicSequence<Sta
   return new BagSequence(STANDARD_SHAPES, createNamedRng(seed, "base-pieces"));
 }
 
-export function createPowerDeckSequence(seed: string): DeterministicSequence<PowerKind> {
-  return new BagSequence(RULES.power.deck, createNamedRng(seed, "power-decks"));
+export type PowerDeckMode = "competitive" | "practice";
+
+export function createPowerDeckSequence(
+  seed: string,
+  mode: PowerDeckMode = "competitive",
+): DeterministicSequence<PowerKind> {
+  const cards = mode === "practice" ? RULES.power.practiceDeck : RULES.power.deck;
+  return new BagSequence(cards, createNamedRng(seed, `power-decks:${mode}`));
+}
+
+export function createOversizePieceSequence(
+  seed: string,
+): DeterministicSequence<OversizeShape> {
+  return new BagSequence(
+    RULES.power.oversizeShapes,
+    createNamedRng(seed, "oversize-pieces"),
+  );
 }
 
 export interface SpecialMarker {

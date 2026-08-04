@@ -3,7 +3,10 @@ import { clearKindFor } from "./scoring";
 import type { ActivePiece, ClearKind, Grid } from "./types";
 
 export function isTSpin(grid: Grid, active: ActivePiece): boolean {
-  if (active.descriptor.shape !== "T") return false;
+  if (
+    active.descriptor.shape !== "T" ||
+    active.descriptor.source === "oversize"
+  ) return false;
   if (
     active.lastSuccessfulAction !== "rotate-cw" &&
     active.lastSuccessfulAction !== "rotate-ccw"

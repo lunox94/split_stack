@@ -5,6 +5,7 @@ import {
   createGlitchDescriptor,
   enqueueGlitch,
   enqueueHollowCross,
+  enqueueOversize,
   resolveSpecialTriggers,
 } from "../../src/domain/specials";
 
@@ -38,6 +39,22 @@ describe("Hollow Cross and embedded special cells", () => {
     expect(overflow.queue).toEqual(second.queue);
     expect(overflow.overflowGarbageRows).toBe(1);
     expect(createGlitchDescriptor(SEED, "glitch:1")).toEqual(first.queue[0]);
+  });
+
+  it("appends one pending Oversize descriptor FIFO and converts overflow to two rows", () => {
+    const cross = { source: "cross", shape: "cross", eventId: "cross" } as const;
+    const first = enqueueOversize([cross], "J", "oversize:1");
+    const overflow = enqueueOversize(first.queue, "T", "oversize:2");
+
+    expect(first).toEqual({
+      queue: [
+        cross,
+        { source: "oversize", shape: "J", eventId: "oversize:1" },
+      ],
+      overflowGarbageRows: 0,
+    });
+    expect(overflow.queue).toEqual(first.queue);
+    expect(overflow.overflowGarbageRows).toBe(2);
   });
 
   it("captures marked cells bottom-first then left-to-right", () => {
@@ -101,6 +118,40 @@ describe("Hollow Cross and embedded special cells", () => {
         row: 18,
         column: 5,
         eventId: "lock:9:glitch-core:1",
+        affectedCells: [],
+      },
+    ]);
+  });
+
+  it("emits deterministic embedded Blackout and Barrier events", () => {
+    const result = resolveSpecialTriggers(
+      createBoard(),
+      [
+        { kind: "blackout", row: 20, column: 8 },
+        { kind: "barrier", row: 19, column: 1 },
+      ],
+      SEED,
+      "lock:10",
+    );
+
+    expect(result.blackoutEvents).toEqual(["lock:10:blackout:1"]);
+    expect(result.barrierEvents).toEqual(["lock:10:barrier:1"]);
+    expect(result.glitchEvents).toEqual([]);
+    expect(result.events).toEqual([
+      {
+        order: 0,
+        kind: "blackout",
+        row: 20,
+        column: 8,
+        eventId: "lock:10:blackout:1",
+        affectedCells: [],
+      },
+      {
+        order: 1,
+        kind: "barrier",
+        row: 19,
+        column: 1,
+        eventId: "lock:10:barrier:1",
         affectedCells: [],
       },
     ]);

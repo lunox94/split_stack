@@ -31,7 +31,8 @@ function snapshot(sequence: number, tick: number): PlayerSnapshotV1 {
     backToBack: false,
     powerCharge: 0,
     powerDeckCursor: 0,
-    upcomingPower: "blackout",
+    oversizePieceCursor: 0,
+    upcomingPower: "nuke",
     statuses: [],
     incomingGarbage: [],
     holdUsed: false,
@@ -187,6 +188,8 @@ describe("compact snapshot grids", () => {
     );
     grid[21]![0] = { kind: "garbage" };
     grid[20]![4] = { kind: "T", special: "glitch-core" };
+    grid[19]![3] = { kind: "J", special: "blackout" } as never;
+    grid[18]![2] = { kind: "L", special: "barrier" } as never;
 
     const encoded = encodeGrid(grid);
 
@@ -196,6 +199,28 @@ describe("compact snapshot grids", () => {
       special: "glitch-core",
     });
     expect(decodeGrid(encoded)[21]![0]).toEqual({ kind: "garbage" });
+    expect(decodeGrid(encoded)[19]![3]).toEqual({ kind: "J", special: "blackout" });
+    expect(decodeGrid(encoded)[18]![2]).toEqual({ kind: "L", special: "barrier" });
+  });
+
+  it("accepts canonical Oversize descriptors and Ghost Jam status", () => {
+    const store = new RemoteSnapshotStore();
+    store.bind("player-a", "session-a");
+    const value = envelope(1, 6);
+    value.payload.nextFive = [
+      { source: "oversize", shape: "T", eventId: "oversize-1" } as never,
+    ];
+    value.payload.statuses = [
+      { kind: "ghost-jam", remainingTicks: 900 } as never,
+    ];
+
+    expect(store.accept(value)).toBe(true);
+
+    const excludedO = envelope(2, 12);
+    excludedO.payload.nextFive = [
+      { source: "oversize", shape: "O", eventId: "oversize-o" } as never,
+    ];
+    expect(store.accept(excludedO)).toBe(false);
   });
 
   it("builds an immutable wire snapshot from authoritative player state", () => {
@@ -219,7 +244,8 @@ describe("compact snapshot grids", () => {
       backToBack: false,
       powerCharge: 1,
       powerDeckCursor: 0,
-      upcomingPower: "blackout",
+      oversizePieceCursor: 3,
+      upcomingPower: "nuke",
       statuses: [],
       incomingGarbage: [],
       lastGarbageHole: null,
@@ -251,6 +277,7 @@ describe("compact snapshot grids", () => {
     expect(built).toMatchObject({
       playerId: "player-a",
       basePieceCursor: 4,
+      oversizePieceCursor: 3,
       snapshotSeq: 10,
       stateTick: 60,
     });

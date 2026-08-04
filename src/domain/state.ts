@@ -1,13 +1,16 @@
 import { RULES } from "../config/rules";
 import {
   createBasePieceSequence,
+  createOversizePieceSequence,
   createPowerDeckSequence,
   createSpecialSchedule,
   type DeterministicSequence,
+  type PowerDeckMode,
   type SpecialSchedule,
 } from "./bag";
 import type {
   Cell,
+  OversizeShape,
   PieceDescriptor,
   PlayerGameState,
   PowerKind,
@@ -17,16 +20,19 @@ import type {
 export interface PieceFactory {
   baseAt(index: number): PieceDescriptor;
   powerAt(index: number): PowerKind;
+  oversizeAt(index: number): OversizeShape;
 }
 
 class SeededPieceFactory implements PieceFactory {
   readonly #base: DeterministicSequence<StandardShape>;
   readonly #powers: DeterministicSequence<PowerKind>;
+  readonly #oversize: DeterministicSequence<OversizeShape>;
   readonly #specials: SpecialSchedule;
 
-  constructor(seed: string) {
+  constructor(seed: string, mode: PowerDeckMode) {
     this.#base = createBasePieceSequence(seed);
-    this.#powers = createPowerDeckSequence(seed);
+    this.#powers = createPowerDeckSequence(seed, mode);
+    this.#oversize = createOversizePieceSequence(seed);
     this.#specials = createSpecialSchedule(seed);
   }
 
@@ -43,14 +49,25 @@ class SeededPieceFactory implements PieceFactory {
   powerAt(index: number): PowerKind {
     return this.#powers.at(index);
   }
+
+  oversizeAt(index: number): OversizeShape {
+    return this.#oversize.at(index);
+  }
 }
 
-export function createPieceFactory(seed: string): PieceFactory {
-  return new SeededPieceFactory(seed);
+export function createPieceFactory(
+  seed: string,
+  mode: PowerDeckMode = "competitive",
+): PieceFactory {
+  return new SeededPieceFactory(seed, mode);
 }
 
-export function createPlayerState(playerId: string, seed: string): PlayerGameState {
-  const factory = createPieceFactory(seed);
+export function createPlayerState(
+  playerId: string,
+  seed: string,
+  mode: PowerDeckMode = "competitive",
+): PlayerGameState {
+  const factory = createPieceFactory(seed, mode);
   return {
     playerId,
     grid: Array.from({ length: RULES.board.height }, () =>
@@ -70,6 +87,7 @@ export function createPlayerState(playerId: string, seed: string): PlayerGameSta
     powerCharge: 0,
     powerDeckCursor: 0,
     upcomingPower: factory.powerAt(0),
+    oversizePieceCursor: 0,
     statuses: [],
     incomingGarbage: [],
     lastGarbageHole: null,
