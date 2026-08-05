@@ -7,6 +7,7 @@ import {
   parseNetworkDiagnostics,
 } from "../../src/network/diagnostics";
 import { ManualClock } from "../../src/network/in-memory";
+import { NetworkTelemetry } from "../../src/network/telemetry";
 
 class MemoryStorage {
   private readonly values = new Map<string, string>();
@@ -156,5 +157,82 @@ describe("NetworkDiagnostics", () => {
     });
 
     expect(parseNetworkDiagnostics(malformed).incidents).toEqual([]);
+  });
+
+  it("round-trips one compact telemetry summary without exposing mutable diagnostic state", () => {
+    const clock = new ManualClock(4_000);
+    const storage = new MemoryStorage();
+    const telemetry = new NetworkTelemetry({ clock });
+    telemetry.noteChannelAttached();
+    clock.advance(20);
+    telemetry.noteRawReceived(80);
+    telemetry.noteDecodedReceived(80);
+    telemetry.noteAuthenticatedReceived(80);
+    clock.advance(3_000);
+    telemetry.noteSent(160, "KEEPALIVE");
+    const summary = telemetry.snapshot();
+    const diagnostics = new NetworkDiagnostics({ clock, storage });
+
+    diagnostics.begin({
+      kind: "connection-unstable",
+      silenceMs: 3_000,
+      pauseTick: 300,
+      telemetry: summary,
+    });
+
+    const copy = diagnostics.snapshot();
+    expect(copy.incidents[0]?.events[0]?.telemetry).toEqual(summary);
+    copy.incidents[0]!.events[0]!.telemetry!.channel.generation = 99;
+    expect(
+      diagnostics
+        .snapshot()
+        .incidents[0]?.events[0]?.telemetry?.channel.generation,
+    ).toBe(1);
+    expect(
+      new NetworkDiagnostics({ clock, storage })
+        .snapshot()
+        .incidents[0]?.events[0]?.telemetry,
+    ).toEqual(summary);
+  });
+
+  it("keeps a valid incident event while discarding an inconsistent optional telemetry summary", () => {
+    const telemetry = new NetworkTelemetry({ clock: new ManualClock(5_000) })
+      .snapshot();
+    telemetry.sinceAuthenticated.sentFrames = 1;
+
+    const parsed = parseNetworkDiagnostics(JSON.stringify({
+      schema: "split-stack/network-diagnostics/v1",
+      incidents: [{
+        incidentId: 1,
+        startedAtMs: 5_000,
+        events: [{
+          kind: "connection-unstable",
+          atMs: 5_000,
+          silenceMs: 3_000,
+          telemetry,
+        }],
+      }],
+    }));
+
+    expect(parsed.incidents[0]?.events[0]).toEqual({
+      kind: "connection-unstable",
+      atMs: 5_000,
+      silenceMs: 3_000,
+    });
+  });
+
+  it("does not consume an incident or ID when telemetry validation rejects its first event", () => {
+    const diagnostics = new NetworkDiagnostics({
+      clock: new ManualClock(6_000),
+    });
+    const telemetry = new NetworkTelemetry().snapshot();
+    telemetry.sinceAuthenticated.sentFrames = 1;
+
+    expect(() => diagnostics.begin({
+      kind: "connection-unstable",
+      telemetry,
+    })).toThrow(TypeError);
+    expect(diagnostics.snapshot().incidents).toEqual([]);
+    expect(diagnostics.begin({ kind: "connection-unstable" })).toBe(1);
   });
 });

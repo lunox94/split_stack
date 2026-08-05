@@ -263,6 +263,16 @@ function isValidPayload(kind: MessageKind, payload: unknown): boolean {
         isSafeCounter(payload.startTick) &&
         isBoundedId(payload.configHash)
       );
+    case "START_COMMIT":
+      return (
+        hasEventId(payload) &&
+        isBoundedId(payload.proposalEventId) &&
+        isSafeCounter(payload.epoch) &&
+        isFiniteNumber(payload.startAtCoordinatorMs) &&
+        payload.startAtCoordinatorMs >= 0 &&
+        isSafeCounter(payload.startTick) &&
+        isBoundedId(payload.configHash)
+      );
     case "GARBAGE_ATTACK":
       return (
         isTargetEvent(payload) &&

@@ -112,9 +112,10 @@ rules version 2 and must change together with the peer rules hash.
 - Each occupied seat also publishes a bounded durable runtime-session claim.
   The newest convergent claim must echo through the durable listener before it
   controls the seat; an older duplicate remains a read-only spectator. A
-  visibility, WebGL, liveness, role, or runtime-session transition retires the
-  current realtime channel before joining its replacement because Webxdc
-  rejects overlapping joins.
+  WebGL, liveness, role, or runtime-session transition can retire the current
+  realtime channel before joining its replacement because Webxdc rejects
+  overlapping joins. A visibility restore first probes the existing channel;
+  it rejoins only after an explicit send failure or sustained silence.
   Failed replacement callbacks are contained and recorded, and the normal
   recovery cadence retries them while the session remains detached.
 - Critical ACKs name `(senderId, sessionId)` explicitly; bare sequence numbers
@@ -126,24 +127,38 @@ rules version 2 and must change together with the peer rules hash.
   are bounded by the central network limit so a remote peer cannot amplify an
   unbounded control frame.
 - Every authenticated peer frame proves liveness. Three seconds of silence
-  freezes simulation and shows an unstable-connection state; five seconds
-  requests a replacement channel, repeated every five seconds while silent.
-  The recovery window is one minute.
+  shows a nonblocking warning while play continues, five seconds freezes the
+  simulation, and eight seconds requests a replacement channel. The second seat
+  waits another 500 ms to reduce simultaneous replacement, and retries back off
+  through 3, 6, 12, then 15 seconds while the one-minute recovery window remains
+  open.
 - Network pause stops each authoritative local simulation immediately. Resume
   restores both owners to their newest common rolling checkpoint, bounded to
-  three seconds of rollback, reconciles ledgers, and performs a synchronized
-  three-second countdown. A checkpoint or hash mismatch ends neutrally as a
-  desynchronization rather than guessing which owner state to rewrite.
+  three seconds of rollback independently of the longer missing-peer timeout,
+  reconciles ledgers, and requires 500 ms of sustained bidirectional traffic.
+  A reliable `START` is only a prepared proposal: Seat B remains paused until
+  Seat A observes its delivery and emits one reliable `START_COMMIT` with a
+  fresh full lead. Seat A applies that same commit only after the transport
+  accepts a send. A zero-rollback connection recovery uses a synchronized
+  750 ms lead; rollback and visibility recovery use two seconds so players can
+  reorient. Recovery countdowns stay compact and silent. A checkpoint or hash
+  mismatch ends neutrally as a desynchronization rather than guessing which
+  owner state to rewrite.
 - Exhausting the recovery window produces the neutral `connection-lost`
   result. It is retained in recent history but excluded from win/loss tallies;
   an explicit Leave remains a forfeit.
 - Networking is pumped on a dedicated wall-clock interval rather than from the
   render loop. Privacy-safe diagnostics retain at most three incidents and 100
-  events in local storage and may be copied or cleared by the player.
+  events in local storage and may be copied or cleared by the player. Frame and
+  byte telemetry uses fixed-cardinality arithmetic on the hot path; compact
+  summaries are allocated and persisted only on existing incident transitions.
 - If the wall-clock pump catches up across several regular snapshot intervals,
   it publishes only the newest state. Forced terminal snapshots are never
   coalesced. This prevents a brief main-thread stall from creating a burst of
   obsolete full-state frames that prolongs the same stall.
+- Diagnostic builds can select 10, 5, 2, or 0 regular snapshots per second.
+  This transport-only A/B profile sits outside the deterministic rules hash;
+  forced initial, recovery, and terminal state still travels in every profile.
 - Incoming realtime ticks are bounded to three seconds of catch-up work. A
   rolling checkpoint window accepts earlier terminal events without replaying
   from match start; events outside either bound finish neutrally as a desync.

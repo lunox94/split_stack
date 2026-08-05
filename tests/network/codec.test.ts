@@ -57,6 +57,36 @@ describe("realtime envelope codec", () => {
     });
   });
 
+  it("requires a bounded proposal identity on start commits", () => {
+    const commit = {
+      ...keepalive,
+      kind: "START_COMMIT",
+      seq: 1,
+      payload: {
+        eventId: "start-commit-1",
+        proposalEventId: "start-1",
+        epoch: 1,
+        startAtCoordinatorMs: 4_000,
+        startTick: 120,
+        configHash: "config-1",
+      },
+    };
+
+    expect(
+      decodeEnvelope(new TextEncoder().encode(JSON.stringify(commit))),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeEnvelope(
+        new TextEncoder().encode(
+          JSON.stringify({
+            ...commit,
+            payload: { ...commit.payload, proposalEventId: "" },
+          }),
+        ),
+      ),
+    ).toMatchObject({ ok: false, error: "invalid-envelope" });
+  });
+
   it("validates payload field types and kind-specific queue bounds", () => {
     const invalidAttack = {
       ...keepalive,

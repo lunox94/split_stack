@@ -255,7 +255,7 @@ describe("peer liveness", () => {
     expect(liveness.isMissing()).toBe(false);
   });
 
-  it("pauses after three seconds without a keepalive from the bound opponent", () => {
+  it("distinguishes a three-second warning from a five-second missing peer", () => {
     const clock = new ManualClock();
     const liveness = new PeerLiveness({
       clock,
@@ -281,6 +281,9 @@ describe("peer liveness", () => {
     liveness.observe(spectatorKeepalive);
     expect(liveness.isMissing()).toBe(false);
     clock.advance(1);
+    expect(liveness.isUnstable()).toBe(true);
+    expect(liveness.isMissing()).toBe(false);
+    clock.advance(2_000);
     expect(liveness.isMissing()).toBe(true);
   });
 });

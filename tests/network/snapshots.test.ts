@@ -82,6 +82,13 @@ describe("snapshot scheduling", () => {
     expect(scheduler.claim(12, false)).toBe(false);
     expect(scheduler.claim(12, true)).toBe(true);
   });
+
+  it("supports a no-periodic-snapshots profile", () => {
+    const scheduler = new SnapshotScheduler(null);
+
+    expect(scheduler.claim(0, true)).toBe(false);
+    expect(scheduler.claim(60, true)).toBe(false);
+  });
 });
 
 describe("remote snapshot replacement", () => {

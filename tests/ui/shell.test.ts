@@ -193,6 +193,17 @@ describe("application shell", () => {
     expect(messageText).not.toHaveBeenCalled();
   });
 
+  it("marks recovery messages as compact nonmodal status UI", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+
+    shell.setOverlayMessage("Reconnecting…", "status");
+
+    expect(shell.overlay.dataset.presentation).toBe("status");
+    expect(shell.overlayText.textContent).toBe("Reconnecting…");
+    expect(shell.overlayText.getAttribute("role")).toBe("status");
+    expect(shell.overlayText.getAttribute("aria-live")).toBe("polite");
+  });
+
   it("shows all marked powers as the same in-context cells used during play", () => {
     const shell = createAppShell(document, document.createElement("div"));
     showHelp(shell, "how");

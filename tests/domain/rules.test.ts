@@ -26,10 +26,19 @@ describe("approved balance configuration", () => {
     expect(RULES.power.threshold).toBe(7);
     expect(RULES.power.nukeRadius).toBe(2);
     expect(RULES.network).toMatchObject({
-      missingPeerMs: 3_000,
-      reconnectingMs: 5_000,
+      recoveryProbeMs: 250,
+      recoveryStabilityMs: 500,
+      unstablePeerMs: 3_000,
+      missingPeerMs: 5_000,
+      maxRollbackMs: 3_000,
+      reconnectingMs: 8_000,
+      reconnectSeatStaggerMs: 500,
+      reconnectRetryBaseMs: 3_000,
+      reconnectRetryMaxMs: 15_000,
       reconnectGraceMs: 60_000,
       resultConsensusMs: 20_000,
+      fastResumeCountdownTicks: 45,
+      rollbackResumeCountdownTicks: 120,
     });
   });
 

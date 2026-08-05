@@ -49,6 +49,7 @@ export const STRINGS = {
   "match.waitingForReady": "Waiting for both players…",
   "match.countdown": "Match starts in {seconds}",
   "match.connectionUnstable": "Connection unstable…",
+  "match.connectionInterrupted": "Connection interrupted — game paused…",
   "match.reconnecting": "Reconnecting…",
   "match.resynchronizing": "Resynchronizing…",
   "match.resuming": "Connection restored. Resuming in {seconds}…",

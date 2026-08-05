@@ -53,6 +53,7 @@ export const MESSAGE_KINDS = [
   "SNAPSHOT",
   "MATCH_CONFIG",
   "START",
+  "START_COMMIT",
   "GARBAGE_ATTACK",
   "HOLLOW_CROSS",
   "GLITCH_PIECE",
@@ -72,6 +73,7 @@ export type MessageKind = (typeof MESSAGE_KINDS)[number];
 export const CRITICAL_KINDS = [
   "MATCH_CONFIG",
   "START",
+  "START_COMMIT",
   "GARBAGE_ATTACK",
   "HOLLOW_CROSS",
   "GLITCH_PIECE",
@@ -130,6 +132,13 @@ export interface RealtimePayloadMap {
   SNAPSHOT: PlayerSnapshotV1;
   MATCH_CONFIG: MatchConfigPayload;
   START: CriticalPayload & {
+    epoch: number;
+    startAtCoordinatorMs: number;
+    startTick: Tick;
+    configHash: string;
+  };
+  START_COMMIT: CriticalPayload & {
+    proposalEventId: string;
     epoch: number;
     startAtCoordinatorMs: number;
     startTick: Tick;

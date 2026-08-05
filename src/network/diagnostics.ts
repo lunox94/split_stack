@@ -1,4 +1,9 @@
 import type { MonotonicClock } from "./clock";
+import {
+  cloneNetworkTelemetrySummary,
+  parseNetworkTelemetrySummary,
+  type NetworkTelemetrySummary,
+} from "./telemetry";
 
 export const NETWORK_DIAGNOSTIC_INCIDENT_LIMIT = 3;
 export const NETWORK_DIAGNOSTIC_EVENT_LIMIT = 100;
@@ -60,6 +65,7 @@ export interface NetworkDiagnosticEventInput {
   lastSnapshotAgeMs?: number;
   peerLastSnapshotSeq?: number;
   lastSnapshotRejection?: SnapshotRejectionReason;
+  telemetry?: NetworkTelemetrySummary;
 }
 
 export interface NetworkDiagnosticEvent extends NetworkDiagnosticEventInput {
@@ -145,6 +151,9 @@ function readEvent(value: unknown): NetworkDiagnosticEvent | undefined {
   )
     ? value.lastSnapshotRejection as SnapshotRejectionReason
     : undefined;
+  const telemetry = value.telemetry === undefined
+    ? undefined
+    : parseNetworkTelemetrySummary(value.telemetry);
   if (
     value.kind === "desynchronized" &&
     (
@@ -176,6 +185,7 @@ function readEvent(value: unknown): NetworkDiagnosticEvent | undefined {
     ...(lastSnapshotAgeMs === undefined ? {} : { lastSnapshotAgeMs }),
     ...(peerLastSnapshotSeq === undefined ? {} : { peerLastSnapshotSeq }),
     ...(lastSnapshotRejection === undefined ? {} : { lastSnapshotRejection }),
+    ...(telemetry === undefined ? {} : { telemetry }),
   };
 }
 
@@ -247,7 +257,12 @@ function nonNegativeInteger(value: number | undefined): number | undefined {
 }
 
 function cloneEvent(event: NetworkDiagnosticEvent): NetworkDiagnosticEvent {
-  return { ...event };
+  return {
+    ...event,
+    ...(event.telemetry === undefined
+      ? {}
+      : { telemetry: cloneNetworkTelemetrySummary(event.telemetry) }),
+  };
 }
 
 function cloneIncident(incident: NetworkDiagnosticIncident): NetworkDiagnosticIncident {
@@ -286,15 +301,15 @@ export class NetworkDiagnostics {
 
   public begin(event: NetworkDiagnosticEventInput): number {
     const incidentId = this.nextIncidentId;
-    this.nextIncidentId += 1;
     const startedAtMs = this.now();
     const incident: NetworkDiagnosticIncident = {
       incidentId,
       startedAtMs,
       events: [],
     };
-    this.incidents.push(incident);
     this.append(incident, event, startedAtMs);
+    this.nextIncidentId += 1;
+    this.incidents.push(incident);
     enforceDiagnosticBounds(this.incidents);
     this.persist();
     return incidentId;
@@ -359,6 +374,12 @@ export class NetworkDiagnostics {
     const lastSnapshotTick = nonNegativeInteger(input.lastSnapshotTick);
     const lastSnapshotAgeMs = nonNegativeInteger(input.lastSnapshotAgeMs);
     const peerLastSnapshotSeq = nonNegativeInteger(input.peerLastSnapshotSeq);
+    const telemetry = input.telemetry === undefined
+      ? undefined
+      : parseNetworkTelemetrySummary(input.telemetry);
+    if (input.telemetry !== undefined && telemetry === undefined) {
+      throw new TypeError("Invalid network telemetry summary");
+    }
     if (
       input.kind === "desynchronized" &&
       (
@@ -393,6 +414,7 @@ export class NetworkDiagnostics {
       ...(input.lastSnapshotRejection === undefined
         ? {}
         : { lastSnapshotRejection: input.lastSnapshotRejection }),
+      ...(telemetry === undefined ? {} : { telemetry }),
     });
     while (incident.events.length > NETWORK_DIAGNOSTIC_EVENT_LIMIT) {
       incident.events.shift();

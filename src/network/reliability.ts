@@ -40,6 +40,7 @@ export interface CriticalReliabilityOptions {
 export interface PeerLivenessOptions {
   clock: MonotonicClock;
   peer: StreamRef;
+  unstablePeerMs?: number;
   missingPeerMs?: number;
 }
 
@@ -54,12 +55,18 @@ function criticalEventId(envelope: RealtimeEnvelope<CriticalKind>): string {
 export class PeerLiveness {
   private peer: StreamRef;
   private lastTrafficMs: number;
+  private readonly unstablePeerMs: number;
   private readonly missingPeerMs: number;
 
   public constructor(private readonly options: PeerLivenessOptions) {
     this.peer = options.peer;
     this.lastTrafficMs = options.clock.now();
+    this.unstablePeerMs =
+      options.unstablePeerMs ?? RULES.network.unstablePeerMs;
     this.missingPeerMs = options.missingPeerMs ?? RULES.network.missingPeerMs;
+    if (this.unstablePeerMs >= this.missingPeerMs) {
+      throw new RangeError("Peer instability threshold must precede missing threshold");
+    }
   }
 
   public bindPeer(peer: StreamRef): void {
@@ -81,6 +88,10 @@ export class PeerLiveness {
 
   public isMissing(): boolean {
     return this.options.clock.now() - this.lastTrafficMs >= this.missingPeerMs;
+  }
+
+  public isUnstable(): boolean {
+    return this.options.clock.now() - this.lastTrafficMs >= this.unstablePeerMs;
   }
 
   public remainingMs(): number {

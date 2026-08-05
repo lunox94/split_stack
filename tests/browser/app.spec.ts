@@ -470,6 +470,8 @@ async function enforceSingleRealtimeListener(context: BrowserContext): Promise<v
     (window as unknown as { __splitStackRealtimeLifecycle: typeof lifecycle })
       .__splitStackRealtimeLifecycle = lifecycle;
     let failNextJoin = false;
+    let sendBlocked = false;
+    let sendCount = 0;
     (
       window as unknown as {
         __splitStackFailNextRealtimeJoin: () => void;
@@ -477,6 +479,18 @@ async function enforceSingleRealtimeListener(context: BrowserContext): Promise<v
     ).__splitStackFailNextRealtimeJoin = () => {
       failNextJoin = true;
     };
+    (
+      window as unknown as {
+        __splitStackSetRealtimeSendBlocked: (blocked: boolean) => void;
+      }
+    ).__splitStackSetRealtimeSendBlocked = (blocked) => {
+      sendBlocked = blocked;
+    };
+    (
+      window as unknown as {
+        __splitStackRealtimeSendCount: () => number;
+      }
+    ).__splitStackRealtimeSendCount = () => sendCount;
     let installedHost: WebxdcHost | undefined;
     Object.defineProperty(window, "webxdc", {
       configurable: true,
@@ -509,6 +523,8 @@ async function enforceSingleRealtimeListener(context: BrowserContext): Promise<v
               },
               send: (data) => {
                 if (!facadeActive) throw new Error("realtime listener has left");
+                sendCount += 1;
+                if (sendBlocked) return;
                 channel.send(data);
               },
               leave: () => {
@@ -564,6 +580,42 @@ async function advanceMonotonic(page: Page, milliseconds: number): Promise<void>
   }, milliseconds);
 }
 
+async function advancePairMonotonic(
+  seatA: Page,
+  seatB: Page,
+  milliseconds: number,
+  stepMs = 250,
+): Promise<void> {
+  let remainingMs = milliseconds;
+  while (remainingMs > 0) {
+    const incrementMs = Math.min(stepMs, remainingMs);
+    await Promise.all([
+      advanceMonotonic(seatA, incrementMs),
+      advanceMonotonic(seatB, incrementMs),
+    ]);
+    remainingMs -= incrementMs;
+    // Yield one pump interval so traffic remains continuous while the
+    // controllable clock advances; wall time is not used for the assertion.
+    await seatA.waitForTimeout(60);
+  }
+}
+
+async function advanceMonotonicUntilVisible(
+  page: Page,
+  locator: Locator,
+  maxAdvanceMs: number,
+  stepMs = 100,
+): Promise<number> {
+  let advancedMs = 0;
+  while (advancedMs < maxAdvanceMs && !(await locator.isVisible())) {
+    const incrementMs = Math.min(stepMs, maxAdvanceMs - advancedMs);
+    await advanceMonotonic(page, incrementMs);
+    advancedMs += incrementMs;
+    await page.waitForTimeout(60);
+  }
+  return advancedMs;
+}
+
 async function freezeMonotonic(page: Page): Promise<void> {
   await page.evaluate(() => {
     (
@@ -585,6 +637,26 @@ async function setVisibilityState(
     });
     document.dispatchEvent(new Event("visibilitychange"));
   }, visibilityState);
+}
+
+async function setRealtimeSendBlocked(page: Page, blocked: boolean): Promise<void> {
+  await page.evaluate((nextBlocked) => {
+    (
+      window as unknown as {
+        __splitStackSetRealtimeSendBlocked: (blocked: boolean) => void;
+      }
+    ).__splitStackSetRealtimeSendBlocked(nextBlocked);
+  }, blocked);
+}
+
+async function realtimeSendCount(page: Page): Promise<number> {
+  return page.evaluate(() =>
+    (
+      window as unknown as {
+        __splitStackRealtimeSendCount: () => number;
+      }
+    ).__splitStackRealtimeSendCount()
+  );
 }
 
 test("lobby keeps help opt-in and exposes the complete settings surface", async ({ page }) => {
@@ -800,19 +872,46 @@ test("replaces a silent competitive channel without registering a second listene
   await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
   await expect(seatA.getByText(/match starts in/i)).toBeVisible({ timeout: 10_000 });
   await expect(seatB.getByText(/match starts in/i)).toBeVisible({ timeout: 10_000 });
-  await Promise.all([advanceMonotonic(seatA, 4_000), advanceMonotonic(seatB, 4_000)]);
+  await advancePairMonotonic(seatA, seatB, 4_000, 250);
   await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
 
   // Keep setup realistic, then make the short-lived outage states deterministic.
   await freezeMonotonic(seatA);
-  await seatB.close();
-  await advanceMonotonic(seatA, RULES.network.missingPeerMs + 1);
-  await expect(seatA.getByText(/connection unstable/i)).toBeVisible({ timeout: 5_000 });
-  await advanceMonotonic(
+  await advanceMonotonic(seatB, RULES.network.keepaliveMs + 1);
+  await seatA.waitForTimeout(60);
+  await setRealtimeSendBlocked(seatB, true);
+  const recoveryOverlay = seatA.locator(".center-overlay");
+  const localPane = seatA.locator('.player-pane[data-side="left"]');
+  const warning = seatA.getByText("Connection unstable…", { exact: true });
+  await advanceMonotonicUntilVisible(
     seatA,
-    RULES.network.reconnectingMs - RULES.network.missingPeerMs,
+    warning,
+    RULES.network.missingPeerMs,
   );
-  await expect(seatA.getByText(/reconnecting/i)).toBeVisible({ timeout: 5_000 });
+  await expect(warning).toBeVisible();
+  await expect(recoveryOverlay).toHaveAttribute("data-presentation", "banner");
+  await expect(localPane).toHaveAttribute("aria-disabled", "false");
+
+  const hardPause = seatA.getByText(
+    "Connection interrupted — game paused…",
+    { exact: true },
+  );
+  await advanceMonotonicUntilVisible(
+    seatA,
+    hardPause,
+    RULES.network.missingPeerMs,
+  );
+  await expect(hardPause).toBeVisible();
+  await expect(recoveryOverlay).toHaveAttribute("data-presentation", "status");
+  await expect(localPane).toHaveAttribute("aria-disabled", "true");
+
+  const reconnecting = seatA.getByText("Reconnecting…", { exact: true });
+  await advanceMonotonicUntilVisible(
+    seatA,
+    reconnecting,
+    RULES.network.reconnectingMs,
+  );
+  await expect(reconnecting).toBeVisible();
 
   await expect
     .poll(
@@ -844,35 +943,101 @@ test("replaces a silent competitive channel without registering a second listene
         ).__splitStackRealtimeLifecycle,
     ),
   ).toEqual({ joins: 2, leaves: 1, listeners: 2, active: 1, maxActive: 1 });
+  expect(pageErrors).toEqual([]);
+  const diagnosticEvents = await seatA.evaluate((storageKey) => {
+    const serialized = window.localStorage.getItem(storageKey);
+    if (serialized === null) return [];
+    const snapshot = JSON.parse(serialized) as {
+      incidents: Array<{
+        events: Array<{ kind: string; telemetry?: unknown }>;
+      }>;
+    };
+    const latest = snapshot.incidents[snapshot.incidents.length - 1];
+    return latest?.events ?? [];
+  }, NETWORK_DIAGNOSTICS_STORAGE_KEY);
+  expect(diagnosticEvents.map((event) => event.kind)).toEqual(
+    expect.arrayContaining([
+      "connection-unstable",
+      "channel-replacement-requested",
+      "channel-detached",
+      "channel-attached",
+    ]),
+  );
+  expect(
+    diagnosticEvents
+      .filter((event) => event.telemetry !== undefined)
+      .map((event) => event.kind),
+  ).toEqual(["connection-unstable", "channel-replacement-requested"]);
+  await seatB.close();
+});
 
-  await seatA.evaluate(() => {
-    (
-      window as unknown as {
-        __splitStackFailNextRealtimeJoin: () => void;
-      }
-    ).__splitStackFailNextRealtimeJoin();
-  });
+test("keeps a healthy realtime channel across a visibility restore", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(45_000);
+  await installControllableMonotonicClock(context);
+  await enforceSingleRealtimeListener(context);
+  const { seatA, seatB } = await openVersusPair(context, page);
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
+  await expect(seatA.getByText(/match starts in/i)).toBeVisible({ timeout: 10_000 });
+  await expect(seatB.getByText(/match starts in/i)).toBeVisible({ timeout: 10_000 });
+  await advancePairMonotonic(seatA, seatB, 4_000, 500);
+  await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
+  await expect(seatB.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
+  await expect(seatA.locator('.player-pane[data-side="left"]')).toHaveAttribute(
+    "aria-disabled",
+    "false",
+  );
+  await expect(seatB.locator('.player-pane[data-side="left"]')).toHaveAttribute(
+    "aria-disabled",
+    "false",
+  );
+
   await setVisibilityState(seatA, "hidden");
   await setVisibilityState(seatA, "visible");
-  await advanceMonotonic(seatA, RULES.network.reconnectingMs);
+  await expect(seatA.getByText("Resynchronizing…", { exact: true })).toBeVisible({
+    timeout: 5_000,
+  });
+  await expect(seatA.locator(".center-overlay")).toHaveAttribute(
+    "data-presentation",
+    "status",
+  );
+  await expect(seatA.locator(".center-overlay")).not.toContainText(/\d/);
 
-  await expect
-    .poll(
-      () =>
-        seatA.evaluate(
-          () =>
-            (
-              window as unknown as {
-                __splitStackRealtimeLifecycle: { joins: number };
-              }
-            ).__splitStackRealtimeLifecycle.joins,
-        ),
-      { timeout: 5_000 },
-    )
-    .toBe(4);
-  expect(pageErrors).toEqual([]);
-  expect(
-    await seatA.evaluate(
+  const recoveryLeadMs =
+    (RULES.network.rollbackResumeCountdownTicks * 1_000) /
+    RULES.timing.ticksPerSecond;
+  await advancePairMonotonic(
+    seatA,
+    seatB,
+    RULES.network.recoveryStabilityMs + recoveryLeadMs + 500,
+  );
+  await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
+  await expect(seatB.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
+  await expect(seatA.locator('.player-pane[data-side="left"]')).toHaveAttribute(
+    "aria-disabled",
+    "false",
+  );
+  await expect(seatB.locator('.player-pane[data-side="left"]')).toHaveAttribute(
+    "aria-disabled",
+    "false",
+  );
+
+  // Stay well past the replacement threshold while regular keepalives and
+  // snapshots continue. A healthy handle must remain the sole subscription.
+  await advancePairMonotonic(
+    seatA,
+    seatB,
+    RULES.network.reconnectingMs + 500,
+    500,
+  );
+  await expect(seatA.locator(".center-overlay")).toBeHidden();
+  await expect(seatB.locator(".center-overlay")).toBeHidden();
+
+  const [seatALifecycle, seatBLifecycle] = await Promise.all([
+    seatA.evaluate(
       () =>
         (
           window as unknown as {
@@ -886,18 +1051,78 @@ test("replaces a silent competitive channel without registering a second listene
           }
         ).__splitStackRealtimeLifecycle,
     ),
-  ).toEqual({ joins: 4, leaves: 2, listeners: 3, active: 1, maxActive: 1 });
-  expect(
-    await seatA.evaluate((storageKey) => {
-      const serialized = window.localStorage.getItem(storageKey);
-      if (serialized === null) return [];
-      const snapshot = JSON.parse(serialized) as {
-        incidents: Array<{ events: Array<{ kind: string }> }>;
-      };
-      const latest = snapshot.incidents[snapshot.incidents.length - 1];
-      return latest?.events.map((event) => event.kind) ?? [];
-    }, NETWORK_DIAGNOSTICS_STORAGE_KEY),
-  ).toContain("channel-replacement-failed");
+    seatB.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __splitStackRealtimeLifecycle: {
+              joins: number;
+              leaves: number;
+              listeners: number;
+              active: number;
+              maxActive: number;
+            };
+          }
+        ).__splitStackRealtimeLifecycle,
+    ),
+  ]);
+  expect(seatALifecycle).toEqual({
+    joins: 1,
+    leaves: 0,
+    listeners: 1,
+    active: 1,
+    maxActive: 1,
+  });
+  expect(seatBLifecycle).toEqual({
+    joins: 1,
+    leaves: 0,
+    listeners: 1,
+    active: 1,
+    maxActive: 1,
+  });
+  await seatB.close();
+});
+
+test("keeps competitive recovery paused when WebGL restores in a hidden document", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(45_000);
+  await installControllableMonotonicClock(context);
+  await enforceSingleRealtimeListener(context);
+  const { seatA, seatB } = await openVersusPair(context, page);
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
+  await expect(seatA.getByText(/match starts in/i)).toBeVisible({ timeout: 10_000 });
+  await advancePairMonotonic(seatA, seatB, 4_000, 500);
+  await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
+
+  await freezeMonotonic(seatA);
+  await setVisibilityState(seatA, "hidden");
+  const pausedMessage = seatA.getByText(
+    "Connection interrupted — game paused…",
+    { exact: true },
+  );
+  await expect(pausedMessage).toBeVisible({ timeout: 5_000 });
+  await seatA.waitForTimeout(100);
+  const sendsBeforeContextRestore = await realtimeSendCount(seatA);
+
+  await seatA.locator("canvas.game-canvas").dispatchEvent("webglcontextrestored");
+  await seatA.waitForTimeout(100);
+
+  expect(await realtimeSendCount(seatA)).toBe(sendsBeforeContextRestore);
+  await expect(pausedMessage).toBeVisible();
+  await expect(seatA.getByText("Resynchronizing…", { exact: true })).toBeHidden();
+
+  await setVisibilityState(seatA, "visible");
+  await expect.poll(() => realtimeSendCount(seatA)).toBeGreaterThan(
+    sendsBeforeContextRestore,
+  );
+  await expect(seatA.getByText("Resynchronizing…", { exact: true })).toBeVisible({
+    timeout: 5_000,
+  });
+
+  await seatB.close();
 });
 
 test("versus boards stay visible, side by side, and equal at 360 by 640", async ({

@@ -24,14 +24,14 @@ import { transformScrambledAction } from "../input/scramble-transform";
 import { TouchButtonInput } from "../input/touch-buttons";
 import {
   CompetitiveSession,
-  type CompetitiveConnectionStatus,
-  type CompetitivePhase,
   type CompetitiveRealtimeTransport,
+  type CompetitiveSessionView,
   type CompetitiveTerminalState,
 } from "../match/competitive-session";
 import { decodeEnvelope } from "../network/codec";
 import { NetworkDiagnostics } from "../network/diagnostics";
 import { RemoteSnapshotStore, type PlayerSnapshotV1 } from "../network/snapshots";
+import { parseSnapshotProfile } from "../network/snapshot-profile";
 import {
   DurableLamportClock,
   MAX_DURABLE_LOGICAL_CLOCK,
@@ -57,7 +57,6 @@ import {
 } from "../render/renderer";
 import {
   createAppShell,
-  countdownText,
   meterProgress,
   setElementHidden,
   setPowerMeterAccessibility,
@@ -101,6 +100,7 @@ import {
   NETWORKED_PRESENTATION_FPS,
   RuntimePresentationCadence,
 } from "./presentation-cadence";
+import { recoveryPresentationFor } from "./recovery-presentation";
 
 const PRACTICE_HIGH_SCORE_KEY = "split-stack/practice-high-score/v1";
 const FIXED_TICK_MS = 1_000 / RULES.timing.ticksPerSecond;
@@ -109,6 +109,9 @@ const MAX_REMATCH_EVENTS = 2_048;
 const MAX_ANNOUNCEMENTS = 1_024;
 const MAX_SESSION_CLAIMS = 2_048;
 const MAX_PENDING_RESULTS = 512;
+const SNAPSHOT_PROFILE = parseSnapshotProfile(
+  import.meta.env.VITE_SPLIT_STACK_SNAPSHOT_HZ,
+);
 
 type DurablePayload =
   | LobbyEventV1
@@ -386,6 +389,7 @@ export async function bootstrap(): Promise<void> {
   let resultShownFor: string | null = null;
   let leaveInProgress = false;
   let lastCountdownSecond = 0;
+  let lastCompetitiveInputsEnabled: boolean | null = null;
   let lastLocalLevel = 1;
   let warnedUpcomingPower: PowerKind | null = null;
   let currentMusicMatchId: string | null = null;
@@ -549,7 +553,19 @@ export async function bootstrap(): Promise<void> {
 
   const resumeCompetitiveTransportAfterHostRestore = (): void => {
     const session = competitive;
-    if (!resumeCompetitiveTransport() && session !== null) {
+    if (session === null) return;
+    if (document.visibilityState === "hidden") return;
+    try {
+      // A visibility transition does not prove that Webxdc invalidated the
+      // existing subscription. Probe it first and let normal liveness policy
+      // replace only a channel that remains silent or rejects the send.
+      session.setHidden(false);
+      return;
+    } catch {
+      // Some hosts invalidate realtime handles while their webview is
+      // suspended. Only that explicit boundary failure justifies rejoining.
+    }
+    if (!resumeCompetitiveTransport()) {
       session.noteTransportRecoveryFailure();
     }
   };
@@ -611,8 +627,13 @@ export async function bootstrap(): Promise<void> {
         )) {
           audio.resumeMusic();
         }
-        if (mode === "competitive") resumeCompetitiveTransportAfterHostRestore();
-        if (mode !== "practice") shell.overlay.hidden = true;
+        if (mode === "competitive") {
+          // setHidden(false) drives the centralized recovery presentation.
+          // Do not hide its pause/resynchronization status out from under it.
+          resumeCompetitiveTransportAfterHostRestore();
+        } else if (mode !== "practice") {
+          shell.overlay.hidden = true;
+        }
       },
       onUnsupported: () => {
         shell.unsupported.hidden = false;
@@ -1003,30 +1024,26 @@ export async function bootstrap(): Promise<void> {
     return { channel, snapshots, matchId: match.matchId };
   };
 
-  const phaseText = (
-    phase: CompetitivePhase,
-    countdownTicks: number,
-    connectionStatus: CompetitiveConnectionStatus = "connected",
-    resuming = false,
-  ): string => {
-    if (phase === "countdown") {
-      const seconds = Math.max(
-        1,
-        Math.ceil(countdownTicks / RULES.timing.ticksPerSecond),
-      );
-      return resuming
-        ? formatString("match.resuming", { seconds })
-        : countdownText(seconds);
+  const applyCompetitivePresentation = (
+    view: CompetitiveSessionView,
+  ): ReturnType<typeof recoveryPresentationFor> => {
+    const presentation = recoveryPresentationFor(view);
+    setElementHidden(shell.overlay, presentation.surface === "hidden");
+    if (presentation.surface === "readiness") {
+      shell.setReadiness(view.localReady, view.peerReady);
+    } else if (
+      presentation.message !== null &&
+      (presentation.surface === "modal" ||
+        presentation.surface === "banner" ||
+        presentation.surface === "status")
+    ) {
+      shell.setOverlayMessage(presentation.message, presentation.surface);
     }
-    if (phase === "network-pause") {
-      return connectionStatus === "unstable"
-        ? STRINGS["match.connectionUnstable"]
-        : STRINGS["match.reconnecting"];
+    if (lastCompetitiveInputsEnabled !== presentation.inputsEnabled) {
+      lastCompetitiveInputsEnabled = presentation.inputsEnabled;
+      setInputsEnabled(presentation.inputsEnabled);
     }
-    if (phase === "version-mismatch") return STRINGS["match.versionMismatch"];
-    if (phase === "desynchronized") return STRINGS["match.desynchronization"];
-    if (phase === "synchronizing") return STRINGS["match.waitingForReady"];
-    return STRINGS["match.waitingForReady"];
+    return presentation;
   };
 
   const startActiveMatch = (match: ActiveMatch): void => {
@@ -1044,6 +1061,7 @@ export async function bootstrap(): Promise<void> {
     shell.setScrambled(false);
     announcedConfigHash = null;
     lastCountdownSecond = 0;
+    lastCompetitiveInputsEnabled = null;
     lastLocalLevel = 1;
     warnedUpcomingPower = null;
     competitiveRemoteCache = null;
@@ -1139,6 +1157,7 @@ export async function bootstrap(): Promise<void> {
           displayName: peer.displayName,
         },
         rulesHash: RULES_HASH,
+        snapshotIntervalTicks: SNAPSHOT_PROFILE.intervalTicks,
         clock: { now: () => performance.now() },
         transport: makeRealtimeTransport(channel),
         diagnostics: networkDiagnostics,
@@ -1154,22 +1173,7 @@ export async function bootstrap(): Promise<void> {
           } else if (phase === "network-pause") {
             audio.pauseMusic();
           }
-          shell.overlay.hidden = phase === "playing" || phase === "finished";
-          if (phase === "lobby") {
-            shell.overlay.hidden = false;
-            shell.setReadiness(
-              view?.localReady ?? false,
-              view?.peerReady ?? false,
-            );
-          } else {
-            shell.setOverlayMessage(phaseText(
-              phase,
-              view?.countdownTicks ?? 0,
-              view?.connectionStatus,
-              view?.resuming,
-            ));
-          }
-          setInputsEnabled(phase === "playing");
+          if (view !== undefined) applyCompetitivePresentation(view);
         },
         onRemoteBlackout: () => {
           audio.play("power-blackout", { pan: 0.45 });
@@ -1752,13 +1756,10 @@ export async function bootstrap(): Promise<void> {
         : null;
       musicIntensity = musicIntensityFor(view.local);
       processSnapshotAudio(view.local);
-      if (view.phase === "countdown") {
-        const second = Math.max(
-          1,
-          Math.ceil(view.countdownTicks / RULES.timing.ticksPerSecond),
-        );
-        if (second !== lastCountdownSecond) {
-          lastCountdownSecond = second;
+      const competitivePresentation = applyCompetitivePresentation(view);
+      if (competitivePresentation.countdownCueSecond !== null) {
+        if (competitivePresentation.countdownCueSecond !== lastCountdownSecond) {
+          lastCountdownSecond = competitivePresentation.countdownCueSecond;
           audio.play("countdown");
         }
       } else {
@@ -1781,21 +1782,6 @@ export async function bootstrap(): Promise<void> {
       updateHud(shell.right, peerName, remote?.snapshot, previewOptions(now));
       setElementHidden(shell.left.blackout, true);
       setElementHidden(shell.right.blackout, !remoteConcealed);
-      setElementHidden(
-        shell.overlay,
-        view.phase === "playing" || view.phase === "finished",
-      );
-      if (view.phase === "lobby") {
-        setElementHidden(shell.overlay, false);
-        shell.setReadiness(view.localReady, view.peerReady);
-      } else if (!shell.overlay.hidden) {
-        shell.setOverlayMessage(phaseText(
-          view.phase,
-          view.countdownTicks,
-          view.connectionStatus,
-          view.resuming,
-        ));
-      }
       const scrambled = view.local?.player.statuses.some((status) => status.kind === "scramble") ?? false;
       if (scrambled !== lastScrambleActive) {
         keyboard.releaseHorizontal();
@@ -1887,7 +1873,12 @@ export async function bootstrap(): Promise<void> {
       );
       setElementHidden(shell.left.blackout, !leftConcealed);
       setElementHidden(shell.right.blackout, !rightConcealed);
-      if (left !== undefined || right !== undefined) setElementHidden(shell.overlay, true);
+      if (
+        !activeMatch.duplicateRuntime &&
+        (left !== undefined || right !== undefined)
+      ) {
+        setElementHidden(shell.overlay, true);
+      }
       const spectatorIncoming = [
         ...(left?.snapshot.incomingGarbage ?? []),
         ...(right?.snapshot.incomingGarbage ?? []),

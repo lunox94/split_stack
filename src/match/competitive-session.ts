@@ -40,6 +40,7 @@ import {
   type StreamRef,
 } from "../network/messages";
 import { CriticalReliability, PeerLiveness } from "../network/reliability";
+import { NetworkTelemetry } from "../network/telemetry";
 import {
   createPlayerSnapshot,
   RemoteSnapshotStore,
@@ -91,6 +92,8 @@ export interface CompetitiveSessionOptions {
   identity: CompetitiveParticipant;
   peer: CompetitiveParticipant;
   rulesHash: string;
+  /** Experiment-only cadence; null disables periodic snapshots. */
+  snapshotIntervalTicks?: Tick | null;
   clock: MonotonicClock;
   transport: CompetitiveRealtimeTransport;
   createSeed?: () => string;
@@ -127,6 +130,7 @@ export type CompetitiveConnectionStatus =
   | "connected"
   | "unstable"
   | "reconnecting"
+  | "resynchronizing"
   | "lost";
 
 export interface CompetitiveSessionView {
@@ -167,6 +171,17 @@ interface FinalPlayerClaim {
 interface ResultConfirmation {
   hash: string;
   result: MatchResultV1;
+}
+
+interface PendingLocalStart {
+  proposal: RealtimePayloadMap["START"];
+  countdownTicks: number;
+  proposalSent: boolean;
+  commit: RealtimePayloadMap["START_COMMIT"] | null;
+}
+
+interface PendingRemoteStart {
+  proposal: RealtimePayloadMap["START"];
 }
 
 type GameplayCriticalKind =
@@ -230,7 +245,7 @@ function isSeed(value: string): boolean {
 }
 
 const MAX_REMOTE_TICK_ADVANCE = Math.ceil(
-  (RULES.network.missingPeerMs * RULES.timing.ticksPerSecond) / 1_000,
+  (RULES.network.maxRollbackMs * RULES.timing.ticksPerSecond) / 1_000,
 );
 const MAX_CHECKPOINT_HISTORY = MAX_REMOTE_TICK_ADVANCE + 1;
 
@@ -263,8 +278,9 @@ export class CompetitiveSession {
   private readonly tickClock = new MatchTickClock(RULES.timing.ticksPerSecond);
   private readonly reliability: CriticalReliability;
   private readonly liveness: PeerLiveness;
+  private readonly telemetry: NetworkTelemetry;
   private readonly remoteSnapshots = new RemoteSnapshotStore();
-  private readonly snapshotScheduler = new SnapshotScheduler();
+  private readonly snapshotScheduler: SnapshotScheduler;
   private snapshotSequence = 0;
   private remoteSnapshotsAccepted = 0;
   private remoteSnapshotsRejected = 0;
@@ -282,6 +298,7 @@ export class CompetitiveSession {
   private readonly pingSentAt = new Map<number, number>();
   private nextClockSampleId = 1;
   private syncPurpose: "initial" | "resume" | null = null;
+  private clockSyncStartedMs: number | null = null;
   private clockSyncLastAttemptMs: number | null = null;
   private clockSyncDeadlineMs: number | null = null;
   private pendingClockCommit: RealtimePayloadMap["CLOCK_COMMIT"] | null = null;
@@ -292,8 +309,11 @@ export class CompetitiveSession {
   private configAckLastSentMs: number | null = null;
   private configAckDeadlineMs: number | null = null;
   private startScheduled = false;
+  private pendingLocalStart: PendingLocalStart | null = null;
+  private pendingRemoteStart: PendingRemoteStart | null = null;
   private pauseEpoch = 0;
   private pauseTick: Tick = 0;
+  private pauseRequiresOrientation = false;
   private missingSinceMs: number | null = null;
   private localResumeSent = false;
   private remoteResumeReceived = false;
@@ -330,6 +350,8 @@ export class CompetitiveSession {
       throw new TypeError("Competitive participants must have distinct player IDs");
     }
     this.transport = options.transport;
+    this.snapshotScheduler = new SnapshotScheduler(options.snapshotIntervalTicks);
+    this.telemetry = new NetworkTelemetry({ clock: options.clock });
     this.allowedSenders = new Set([options.peer.senderId]);
     this.lastKeepaliveSentMs = options.clock.now();
     this.remoteSnapshots.bind(options.peer.senderId, options.peer.sessionId);
@@ -347,6 +369,7 @@ export class CompetitiveSession {
       apply: (envelope) => this.applyCritical(envelope),
     });
     this.installListener();
+    this.telemetry.noteChannelAttached();
   }
 
   public start(): void {
@@ -433,6 +456,7 @@ export class CompetitiveSession {
 
   public pump(): void {
     if (!this.started) return;
+    this.telemetry.notePump();
     // Capture the outage before sending anything. In-memory and Webxdc
     // transports can re-enter synchronously: a returning KEEPALIVE may provoke
     // an immediate peer response that refreshes liveness and would otherwise
@@ -447,6 +471,8 @@ export class CompetitiveSession {
     }
     this.sendKeepalive(false);
     this.reliability.pump();
+    this.telemetry.noteCriticalPending(this.reliability.pendingCount);
+    this.maybeCommitLocalStart();
     this.pumpClockSync();
     this.pumpClockCommit();
     this.pumpConfigAck();
@@ -472,7 +498,7 @@ export class CompetitiveSession {
       this.scheduledStartLocalMs = null;
       this.simulation?.setPaused(false);
       this.setPhase("playing");
-      this.publishSnapshotIfDue();
+      this.publishSnapshotIfDue(undefined, true);
       if (this.pauseEpoch > 0 && this.diagnosticIncidentId !== null) {
         this.recordDiagnostic({ kind: "resumed", pauseTick: this.currentTick() });
         this.diagnosticIncidentId = null;
@@ -485,10 +511,11 @@ export class CompetitiveSession {
 
     if (
       this.phase === "network-pause" &&
-      this.liveness.silentForMs() >= RULES.network.reconnectingMs &&
-      (this.lastTransportRecoveryRequestMs === null ||
-        this.options.clock.now() - this.lastTransportRecoveryRequestMs >=
-          RULES.network.reconnectingMs)
+      ((this.lastTransportRecoveryRequestMs === null &&
+        this.liveness.silentForMs() >= this.transportRecoveryThresholdMs()) ||
+        (this.lastTransportRecoveryRequestMs !== null &&
+          this.options.clock.now() - this.lastTransportRecoveryRequestMs >=
+            this.transportRecoveryRetryMs()))
     ) {
       this.requestTransportRecovery();
     }
@@ -507,6 +534,7 @@ export class CompetitiveSession {
     if (!this.channelConnected) return;
     this.channelConnected = false;
     this.reliability.setConnected(false);
+    this.telemetry.noteChannelDetached();
     this.recordDiagnostic({ kind: "channel-detached" });
     this.transport.leave();
   }
@@ -526,6 +554,7 @@ export class CompetitiveSession {
     }
     this.channelConnected = true;
     this.reliability.setConnected(true);
+    this.telemetry.noteChannelAttached();
     this.recordDiagnostic({ kind: "channel-attached" });
     this.sendHello();
     this.sendKeepalive(true);
@@ -577,15 +606,20 @@ export class CompetitiveSession {
     const recoveryRequired =
       this.phase === "network-pause" &&
       (this.transportRecoveryRequested ||
-        this.liveness.silentForMs() >= RULES.network.reconnectingMs);
+        this.liveness.silentForMs() >= this.transportRecoveryThresholdMs());
+    const peerUnstable = this.liveness.isUnstable();
     const connectionStatus: CompetitiveConnectionStatus =
       this.terminal?.reason === "connection-lost"
         ? "lost"
-        : this.phase !== "network-pause"
-          ? "connected"
-          : recoveryRequired
-            ? "reconnecting"
-            : "unstable";
+        : this.phase === "network-pause"
+          ? this.peerReturnNoted
+            ? "resynchronizing"
+            : recoveryRequired
+              ? "reconnecting"
+              : "unstable"
+          : peerUnstable
+            ? "unstable"
+            : "connected";
     const base = {
       phase: this.phase,
       localReady: this.localReady,
@@ -622,8 +656,16 @@ export class CompetitiveSession {
     this.options.onPhaseChange?.(phase);
   }
 
+  private clearPendingStartLifecycle(): void {
+    this.pendingLocalStart = null;
+    this.pendingRemoteStart = null;
+    this.startScheduled = false;
+    this.scheduledStartLocalMs = null;
+  }
+
   private desynchronize(reason: DesynchronizationReason): void {
     if (this.phase === "desynchronized") return;
+    this.clearPendingStartLifecycle();
     this.syncPurpose = null;
     this.simulation?.setPaused(true);
     this.localResultConfirmation = null;
@@ -690,7 +732,40 @@ export class CompetitiveSession {
 
   private sendEncoded(envelope: RealtimeEnvelope): void {
     if (!this.channelConnected) return;
-    this.transport.send(encodeEnvelope(envelope));
+    const encoded = encodeEnvelope(envelope);
+    // Stage before crossing the synchronous transport boundary: an in-memory
+    // or Webxdc host may deliver a peer response reentrantly and reset the
+    // since-authenticated telemetry window before send() returns.
+    this.telemetry.noteSent(encoded.byteLength, envelope.kind);
+    try {
+      this.transport.send(encoded);
+    } catch (error) {
+      this.telemetry.noteSendFailed(encoded.byteLength, envelope.kind);
+      throw error;
+    }
+    this.noteSuccessfulStartSend(envelope);
+    this.telemetry.noteCriticalPending(this.reliability.pendingCount);
+  }
+
+  private noteSuccessfulStartSend(envelope: RealtimeEnvelope): void {
+    const pending = this.pendingLocalStart;
+    if (pending === null) return;
+    if (
+      envelope.kind === "START" &&
+      envelope.payload.eventId === pending.proposal.eventId
+    ) {
+      pending.proposalSent = true;
+      return;
+    }
+    if (
+      envelope.kind === "START_COMMIT" &&
+      pending.commit !== null &&
+      envelope.payload.eventId === pending.commit.eventId
+    ) {
+      // Crossing the transport boundary without throwing is the coordinator's
+      // local commit point. The peer may have ACKed reentrantly already.
+      this.applyStart(pending.commit);
+    }
   }
 
   private sendEnvelope<K extends MessageKind>(
@@ -711,11 +786,13 @@ export class CompetitiveSession {
   }
 
   private receiveBytes(data: Uint8Array): void {
+    this.telemetry.noteRawReceived(data.byteLength);
     const decoded = decodeEnvelope(data, {
       expectedMatchId: this.options.matchId,
       allowedSenderIds: this.allowedSenders,
     });
     if (!decoded.ok) return;
+    this.telemetry.noteDecodedReceived(data.byteLength);
     if (decoded.value.sessionId !== this.options.peer.sessionId) {
       if (decoded.value.kind === "SNAPSHOT") {
         this.noteSnapshotRejected("session-mismatch");
@@ -725,6 +802,9 @@ export class CompetitiveSession {
     const envelope = decoded.value;
 
     const peerTrafficObserved = this.liveness.observe(envelope);
+    if (peerTrafficObserved) {
+      this.telemetry.noteAuthenticatedReceived(data.byteLength);
+    }
     if (peerTrafficObserved) this.peerPresent = true;
     if (envelope.kind === "KEEPALIVE" && peerTrafficObserved) {
       const keepalive = envelope as RealtimeEnvelope<"KEEPALIVE">;
@@ -806,6 +886,7 @@ export class CompetitiveSession {
       return false;
     }
     this.remoteSnapshotsAccepted += 1;
+    this.telemetry.noteSnapshotAccepted(envelope.payload.snapshotSeq);
     this.lastRemoteSnapshotSeq = envelope.payload.snapshotSeq;
     this.lastRemoteSnapshotTick = envelope.payload.stateTick;
     this.lastRemoteSnapshotReceivedMs = this.options.clock.now();
@@ -831,19 +912,26 @@ export class CompetitiveSession {
 
   private beginClockSync(purpose: "initial" | "resume"): void {
     if (this.options.seat !== "a" || this.syncPurpose !== null) return;
+    const now = this.options.clock.now();
     this.syncPurpose = purpose;
-    this.clockSyncDeadlineMs = this.options.clock.now() + RULES.network.missingPeerMs;
+    this.clockSyncStartedMs = now;
+    this.clockSyncDeadlineMs = now + RULES.network.missingPeerMs;
     this.clockSamples.clear();
     this.pingSentAt.clear();
     if (purpose === "initial") this.setPhase("synchronizing");
+    const pings: RealtimePayloadMap["CLOCK_PING"][] = [];
     for (let index = 0; index < 5; index += 1) {
       const sampleId = this.nextClockSampleId;
       this.nextClockSampleId += 1;
-      const coordinatorSentMs = this.options.clock.now();
+      const coordinatorSentMs = now;
       this.pingSentAt.set(sampleId, coordinatorSentMs);
-      this.sendEnvelope("CLOCK_PING", { sampleId, coordinatorSentMs });
+      pings.push({ sampleId, coordinatorSentMs });
     }
-    this.clockSyncLastAttemptMs = this.options.clock.now();
+    // Stage the complete retry set and timer before any transport call. If one
+    // send throws after peerReturnNoted was latched, pumpClockSync can still
+    // retry all unanswered samples instead of waiting forever.
+    this.clockSyncLastAttemptMs = now;
+    for (const ping of pings) this.sendEnvelope("CLOCK_PING", ping);
   }
 
   private pumpClockSync(): void {
@@ -862,6 +950,7 @@ export class CompetitiveSession {
       }
       return;
     }
+    if (this.maybeFinishClockSync()) return;
     if (
       this.options.seat !== "a" ||
       this.syncPurpose === null ||
@@ -915,7 +1004,25 @@ export class CompetitiveSession {
       return;
     }
     this.clockSamples.set(sample.sampleId, sample);
-    if (this.clockSamples.size === 5) this.finishClockSync();
+    this.maybeFinishClockSync();
+  }
+
+  private maybeFinishClockSync(): boolean {
+    if (this.clockSamples.size !== 5 || this.syncPurpose === null) return false;
+    if (this.syncPurpose === "resume") {
+      const startedAtMs = this.clockSyncStartedMs;
+      const now = this.options.clock.now();
+      if (
+        startedAtMs === null ||
+        now - startedAtMs < RULES.network.recoveryStabilityMs ||
+        now - this.liveness.silentForMs() <
+          startedAtMs + RULES.network.recoveryStabilityMs
+      ) {
+        return false;
+      }
+    }
+    this.finishClockSync();
+    return true;
   }
 
   private finishClockSync(): void {
@@ -925,6 +1032,7 @@ export class CompetitiveSession {
     this.clockOffsetMs = 0;
     this.selectedClockSampleIds = [...selected.selectedSampleIds];
     this.syncPurpose = null;
+    this.clockSyncStartedMs = null;
     this.clockSyncLastAttemptMs = null;
     this.clockSyncDeadlineMs = null;
     this.pendingClockCommit = {
@@ -1054,7 +1162,11 @@ export class CompetitiveSession {
     this.scheduleStart(0, 0);
   }
 
-  private scheduleStart(startTick: Tick, epoch: number): void {
+  private scheduleStart(
+    startTick: Tick,
+    epoch: number,
+    countdownTicks: Tick = RULES.network.initialStartCountdownTicks,
+  ): void {
     if (this.config === null || this.startScheduled) return;
     this.startScheduled = true;
     const payload: RealtimePayloadMap["START"] = {
@@ -1062,15 +1174,75 @@ export class CompetitiveSession {
       epoch,
       startAtCoordinatorMs:
         this.options.clock.now() +
-        (RULES.network.resumeCountdownTicks * 1_000) / RULES.timing.ticksPerSecond,
+        (countdownTicks * 1_000) / RULES.timing.ticksPerSecond,
       startTick,
       configHash: this.config.configHash,
     };
+    // Install the proposal before the transport can synchronously deliver it,
+    // re-enter through its ACK, or throw. Retries must reuse this semantic ID.
+    this.pendingLocalStart = {
+      proposal: payload,
+      countdownTicks,
+      proposalSent: false,
+      commit: null,
+    };
     this.reliability.sendCritical("START", payload, startTick);
-    this.applyStart(payload);
+    this.maybeCommitLocalStart();
   }
 
-  private applyStart(payload: RealtimePayloadMap["START"]): void {
+  private maybeCommitLocalStart(): void {
+    const pending = this.pendingLocalStart;
+    if (pending === null) return;
+    if (pending.commit !== null) {
+      // A send that failed before CriticalReliability could queue the commit is
+      // retried here with the same ID. A transport failure after queueing is
+      // retried by the reliable outbox instead.
+      if (!this.reliability.isEventPending(pending.commit.eventId)) {
+        this.reliability.sendCritical(
+          "START_COMMIT",
+          pending.commit,
+          pending.commit.startTick,
+        );
+      }
+      return;
+    }
+    if (!pending.proposalSent) {
+      if (!this.reliability.isEventPending(pending.proposal.eventId)) {
+        this.reliability.sendCritical(
+          "START",
+          pending.proposal,
+          pending.proposal.startTick,
+        );
+      }
+      return;
+    }
+    if (this.reliability.isEventPending(pending.proposal.eventId)) {
+      return;
+    }
+
+    const commit: RealtimePayloadMap["START_COMMIT"] = {
+      eventId: this.nextEventId(
+        pending.proposal.epoch === 0 ? "start-commit" : "resume-start-commit",
+      ),
+      proposalEventId: pending.proposal.eventId,
+      epoch: pending.proposal.epoch,
+      startAtCoordinatorMs:
+        this.options.clock.now() +
+        (pending.countdownTicks * 1_000) / RULES.timing.ticksPerSecond,
+      startTick: pending.proposal.startTick,
+      configHash: pending.proposal.configHash,
+    };
+    // As with the prepare, stage the commit before a reentrant or throwing
+    // transport call. The queued reliable envelope then owns all retries.
+    pending.commit = commit;
+    this.reliability.sendCritical("START_COMMIT", commit, commit.startTick);
+  }
+
+  private applyStart(
+    payload:
+      | RealtimePayloadMap["START"]
+      | RealtimePayloadMap["START_COMMIT"],
+  ): void {
     if (this.config === null || payload.configHash !== this.config.configHash) {
       this.setPhase("version-mismatch");
       return;
@@ -1085,11 +1257,14 @@ export class CompetitiveSession {
     this.missingSinceMs = null;
     this.connectionIncidentStartedMs = null;
     this.startScheduled = false;
+    this.pendingLocalStart = null;
+    this.pendingRemoteStart = null;
     this.localResumeSent = false;
     this.remoteResumeReceived = false;
     this.remoteResumeTick = null;
     this.peerReturnNoted = false;
     this.peerResumeAvailable = true;
+    this.pauseRequiresOrientation = false;
     this.transportRecoveryRequested = false;
     this.lastTransportRecoveryRequestMs = null;
     this.pendingClockCommit = null;
@@ -1412,6 +1587,11 @@ export class CompetitiveSession {
       case "START":
         this.applyRemoteStart(envelope as RealtimeEnvelope<"START">);
         return;
+      case "START_COMMIT":
+        this.applyRemoteStartCommit(
+          envelope as RealtimeEnvelope<"START_COMMIT">,
+        );
+        return;
       case "GARBAGE_ATTACK":
       case "HOLLOW_CROSS":
       case "GLITCH_PIECE":
@@ -1513,23 +1693,71 @@ export class CompetitiveSession {
 
   private applyRemoteStart(envelope: RealtimeEnvelope<"START">): void {
     if (this.options.seat !== "b") return;
-    const { epoch, startTick } = envelope.payload;
+    const { epoch, startTick, configHash } = envelope.payload;
     const expectedPhase = epoch === 0 ? "lobby" : "network-pause";
     if (
+      this.terminal !== null ||
+      this.config === null ||
+      configHash !== this.config.configHash ||
       this.phase !== expectedPhase ||
-      (epoch > 0 && epoch !== this.pauseEpoch) ||
+      (epoch > 0 && epoch !== this.pauseEpoch)
+    ) {
+      // A prepare from an older lifecycle is harmless. It must not revive or
+      // desynchronize a newer pause/countdown/terminal state.
+      return;
+    }
+    if (
       Math.abs(startTick - this.currentTick()) > MAX_REMOTE_TICK_ADVANCE
     ) {
       this.desynchronize("remote-start-out-of-range");
       return;
     }
-    if (epoch > 0) {
-      if (!this.advanceSimulationTo(startTick, true)) return;
-      this.flushPendingGameplayCriticals(startTick);
+    if (this.pendingRemoteStart !== null) {
+      // Keep the first bounded proposal for an epoch. A coordinator retry uses
+      // the same reliable event; distinct proposals cannot move the target.
+      return;
+    }
+    this.pendingRemoteStart = { proposal: { ...envelope.payload } };
+  }
+
+  private applyRemoteStartCommit(
+    envelope: RealtimeEnvelope<"START_COMMIT">,
+  ): void {
+    if (this.options.seat !== "b") return;
+    const pending = this.pendingRemoteStart;
+    const commit = envelope.payload;
+    if (
+      pending === null ||
+      this.terminal !== null ||
+      this.config === null ||
+      commit.proposalEventId !== pending.proposal.eventId ||
+      commit.epoch !== pending.proposal.epoch ||
+      commit.startTick !== pending.proposal.startTick ||
+      commit.configHash !== pending.proposal.configHash ||
+      commit.configHash !== this.config.configHash
+    ) {
+      return;
+    }
+    const expectedPhase = commit.epoch === 0 ? "lobby" : "network-pause";
+    if (
+      this.phase !== expectedPhase ||
+      (commit.epoch > 0 && commit.epoch !== this.pauseEpoch)
+    ) {
+      return;
+    }
+    if (
+      Math.abs(commit.startTick - this.currentTick()) > MAX_REMOTE_TICK_ADVANCE
+    ) {
+      this.desynchronize("remote-start-out-of-range");
+      return;
+    }
+    if (commit.epoch > 0) {
+      if (!this.advanceSimulationTo(commit.startTick, true)) return;
+      this.flushPendingGameplayCriticals(commit.startTick);
       this.snapshotScheduler.reset();
       this.publishSnapshotIfDue(this.simulation?.readSnapshot(), true);
     }
-    this.applyStart(envelope.payload);
+    this.applyStart(commit);
   }
 
   private sendConfigAck(): void {
@@ -1569,7 +1797,11 @@ export class CompetitiveSession {
   private sendKeepalive(force: boolean): void {
     if (!this.channelConnected) return;
     const now = this.options.clock.now();
-    if (!force && now - this.lastKeepaliveSentMs < RULES.network.keepaliveMs) return;
+    const intervalMs =
+      this.phase === "network-pause" && this.peerReturnNoted
+        ? RULES.network.recoveryProbeMs
+        : RULES.network.keepaliveMs;
+    if (!force && now - this.lastKeepaliveSentMs < intervalMs) return;
     this.lastKeepaliveSentMs = now;
     this.sendEnvelope("KEEPALIVE", {
       activeSessionId: this.options.identity.sessionId,
@@ -1599,7 +1831,15 @@ export class CompetitiveSession {
         issueStartedMs,
       );
     }
-    if (this.phase === "network-pause") return;
+    this.pauseRequiresOrientation ||= !connectionIssue;
+    if (this.phase === "network-pause") {
+      if (adoptedEpoch !== undefined && adoptedEpoch > this.pauseEpoch) {
+        this.pauseEpoch = adoptedEpoch;
+        this.clearPendingStartLifecycle();
+      }
+      return;
+    }
+    this.clearPendingStartLifecycle();
     const snapshot = this.simulation?.readSnapshot();
     this.pauseEpoch = adoptedEpoch ?? this.pauseEpoch + 1;
     this.pauseTick = snapshot?.tick ?? this.tickClock.pauseAt(this.options.clock.now());
@@ -1619,6 +1859,7 @@ export class CompetitiveSession {
         kind: "connection-unstable",
         silenceMs: Math.floor(this.liveness.silentForMs()),
         pauseTick: this.pauseTick,
+        telemetry: this.telemetry.snapshot(),
       }) ?? null;
     this.setPhase("network-pause");
     if (announce && this.channelConnected && this.config !== null) {
@@ -1741,6 +1982,7 @@ export class CompetitiveSession {
     this.connectionIncidentStartedMs ??= this.options.clock.now();
     this.recordDiagnostic({
       kind: "peer-traffic-restored",
+      telemetry: this.telemetry.snapshot(),
       ...(this.missingSinceMs === null
         ? {}
         : {
@@ -1753,8 +1995,8 @@ export class CompetitiveSession {
     this.missingSinceMs = null;
     this.transportRecoveryRequested = false;
     this.lastTransportRecoveryRequestMs = null;
-    this.sendKeepalive(true);
     if (this.options.seat === "a") this.beginClockSync("resume");
+    this.sendKeepalive(true);
   }
 
   private requestTransportRecovery(force = false): void {
@@ -1763,7 +2005,7 @@ export class CompetitiveSession {
     if (
       !force &&
       this.lastTransportRecoveryRequestMs !== null &&
-      now - this.lastTransportRecoveryRequestMs < RULES.network.reconnectingMs
+      now - this.lastTransportRecoveryRequestMs < this.transportRecoveryRetryMs()
     ) {
       return;
     }
@@ -1774,6 +2016,7 @@ export class CompetitiveSession {
       kind: "channel-replacement-requested",
       silenceMs: Math.floor(this.liveness.silentForMs()),
       attempt: this.recoveryAttempt,
+      telemetry: this.telemetry.snapshot(),
     });
     let failed = false;
     try {
@@ -1784,9 +2027,26 @@ export class CompetitiveSession {
     if (failed) this.noteTransportRecoveryFailure(this.recoveryAttempt);
   }
 
+  private transportRecoveryThresholdMs(): number {
+    return (
+      RULES.network.reconnectingMs +
+      (this.options.seat === "b" ? RULES.network.reconnectSeatStaggerMs : 0)
+    );
+  }
+
+  private transportRecoveryRetryMs(): number {
+    return Math.min(
+      RULES.network.reconnectRetryBaseMs *
+        2 ** Math.max(0, this.recoveryAttempt - 1),
+      RULES.network.reconnectRetryMaxMs,
+    );
+  }
+
   private restartResumeHandshake(): void {
     if (this.phase !== "network-pause") return;
+    this.clearPendingStartLifecycle();
     this.syncPurpose = null;
+    this.clockSyncStartedMs = null;
     this.clockSyncLastAttemptMs = null;
     this.clockSyncDeadlineMs = null;
     this.clockSamples.clear();
@@ -1864,6 +2124,9 @@ export class CompetitiveSession {
     const acceptance = this.remoteSnapshots.acceptDetailed(resumeSnapshotEnvelope);
     if (acceptance.accepted) {
       this.remoteSnapshotsAccepted += 1;
+      this.telemetry.noteSnapshotAccepted(
+        resumeSnapshotEnvelope.payload.snapshotSeq,
+      );
       this.lastRemoteSnapshotSeq = resumeSnapshotEnvelope.payload.snapshotSeq;
       this.lastRemoteSnapshotTick = resumeSnapshotEnvelope.payload.stateTick;
       this.lastRemoteSnapshotReceivedMs = this.options.clock.now();
@@ -1881,6 +2144,15 @@ export class CompetitiveSession {
     }
     for (const cursor of envelope.payload.inboundCritical) {
       this.reliability.acknowledgeCursor(cursor);
+    }
+    if (this.options.seat === "a") {
+      // Seat B only emits a resume state after accepting CLOCK_COMMIT. This
+      // reliable, epoch-bound progress is stronger evidence than the ephemeral
+      // CONFIG_ACK: losing that one control frame must not restart the same
+      // pause lifecycle while an acknowledged resume is already under way.
+      this.pendingClockCommit = null;
+      this.clockCommitLastSentMs = null;
+      this.clockCommitDeadlineMs = null;
     }
     this.remoteResumeReceived = true;
     this.remoteResumeTick = envelope.payload.snapshot.stateTick;
@@ -1913,7 +2185,12 @@ export class CompetitiveSession {
       pauseTick: commonTick,
       rollbackTicks: Math.max(localTick, this.remoteResumeTick) - commonTick,
     });
-    this.scheduleStart(commonTick, this.pauseEpoch);
+    const rollbackTicks = Math.max(localTick, this.remoteResumeTick) - commonTick;
+    const countdownTicks =
+      rollbackTicks > 0 || this.pauseRequiresOrientation
+        ? RULES.network.rollbackResumeCountdownTicks
+        : RULES.network.fastResumeCountdownTicks;
+    this.scheduleStart(commonTick, this.pauseEpoch, countdownTicks);
   }
 
   private captureLocalFinalClaim(): FinalPlayerClaim | null {
@@ -2132,6 +2409,7 @@ export class CompetitiveSession {
       kind: "connection-lost",
       silenceMs: RULES.network.reconnectGraceMs,
       pauseTick: this.pauseTick,
+      telemetry: this.telemetry.snapshot(),
     });
     this.diagnosticIncidentId = null;
     const result = this.buildConnectionLostResult();
@@ -2336,6 +2614,7 @@ export class CompetitiveSession {
   }
 
   private setTerminal(terminal: CompetitiveTerminalState): void {
+    this.clearPendingStartLifecycle();
     this.terminal = { ...terminal };
     this.options.onTerminal?.({ ...terminal });
   }

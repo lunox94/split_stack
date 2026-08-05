@@ -245,7 +245,10 @@ export interface AppShell {
   show(screen: "lobby" | "help" | "settings" | "match" | "results"): void;
   setPreferences(preferences: Preferences): void;
   setReadiness(localReady: boolean, opponentReady: boolean): void;
-  setOverlayMessage(message: string): void;
+  setOverlayMessage(
+    message: string,
+    presentation?: "modal" | "banner" | "status",
+  ): void;
   setScrambled(active: boolean): void;
 }
 
@@ -414,6 +417,7 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
   leaveMatchButton.setAttribute("aria-label", STRINGS["results.leave"]);
   matchActions.append(pausePracticeButton, leaveMatchButton);
   const overlay = element(document, "div", "center-overlay");
+  overlay.dataset.presentation = "modal";
   const overlayCard = element(document, "div", "center-overlay-card");
   const readinessPanel = element(document, "section", "ready-panel");
   readinessPanel.setAttribute("aria-labelledby", "ready-heading");
@@ -460,6 +464,8 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     cancelReadyButton,
   );
   const overlayText = element(document, "p", undefined, STRINGS["match.waitingForReady"]);
+  overlayText.setAttribute("role", "status");
+  overlayText.setAttribute("aria-live", "polite");
   overlayText.hidden = true;
   overlayCard.append(readinessPanel, overlayText);
   overlay.append(overlayCard);
@@ -601,6 +607,9 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
         return;
       }
       readinessSignature = signature;
+      if (overlay.dataset.presentation !== "modal") {
+        overlay.dataset.presentation = "modal";
+      }
       const updateStatus = (
         node: HTMLElement,
         label: string,
@@ -628,7 +637,10 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
           : STRINGS["match.waitingForOpponentReady"]
         : STRINGS["match.readyHint"];
     },
-    setOverlayMessage(message): void {
+    setOverlayMessage(message, presentation = "modal"): void {
+      if (overlay.dataset.presentation !== presentation) {
+        overlay.dataset.presentation = presentation;
+      }
       setElementHidden(readinessPanel, true);
       setElementHidden(overlayText, false);
       if (overlayText.textContent !== message) overlayText.textContent = message;
