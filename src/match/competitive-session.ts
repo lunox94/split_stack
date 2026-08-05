@@ -5,6 +5,7 @@ import {
   createSimulation,
   type Simulation,
   type SimulationCheckpoint,
+  type SimulationDispatchResult,
   type SimulationEffect,
   type SimulationSnapshot,
 } from "../domain/simulation";
@@ -24,8 +25,10 @@ import {
 } from "../network/clock";
 import { decodeEnvelope, encodeEnvelope } from "../network/codec";
 import type {
+  DesynchronizationReason,
   NetworkDiagnosticEventInput,
   NetworkDiagnostics,
+  SnapshotRejectionReason,
 } from "../network/diagnostics";
 import {
   type CriticalKind,
@@ -147,6 +150,10 @@ export interface CompetitiveSessionView {
   result?: MatchResultV1;
 }
 
+export interface CompetitiveSessionViewOptions {
+  afterRemoteSnapshotSeq?: number;
+}
+
 export type ForfeitDeliveryStatus =
   | "not-started"
   | "pending"
@@ -259,6 +266,13 @@ export class CompetitiveSession {
   private readonly remoteSnapshots = new RemoteSnapshotStore();
   private readonly snapshotScheduler = new SnapshotScheduler();
   private snapshotSequence = 0;
+  private remoteSnapshotsAccepted = 0;
+  private remoteSnapshotsRejected = 0;
+  private lastRemoteSnapshotSeq: number | null = null;
+  private lastRemoteSnapshotTick: Tick | null = null;
+  private lastRemoteSnapshotReceivedMs: number | null = null;
+  private lastPeerSnapshotSeq: number | null = null;
+  private lastSnapshotRejection: SnapshotRejectionReason | null = null;
   private lastKeepaliveSentMs: number;
   private scheduledStartLocalMs: number | null = null;
   private config: MatchConfigPayload | null = null;
@@ -350,11 +364,21 @@ export class CompetitiveSession {
   }
 
   public dispatch(action: LogicalAction): SimulationEffect[] {
-    if (this.phase !== "playing" || this.simulation === null) return [];
-    const effects = this.simulation.dispatch(action);
-    this.recordSimulationCheckpoint();
-    this.publishEffects(effects);
-    return effects;
+    return this.dispatchWithResult(action).effects;
+  }
+
+  public dispatchWithResult(action: LogicalAction): SimulationDispatchResult {
+    if (this.phase !== "playing" || this.simulation === null) {
+      return { accepted: false, effects: [] };
+    }
+    const result = this.simulation.dispatchWithResult(action);
+    if (result.accepted) this.recordSimulationCheckpoint();
+    this.publishEffects(result.effects);
+    return result;
+  }
+
+  public isLocalScrambled(): boolean {
+    return this.simulation?.hasStatus("scramble") ?? false;
   }
 
   public forfeit(): void {
@@ -533,7 +557,7 @@ export class CompetitiveSession {
     }
   }
 
-  public view(): CompetitiveSessionView {
+  public view(options: CompetitiveSessionViewOptions = {}): CompetitiveSessionView {
     const countdownTicks =
       this.phase === "countdown" && this.scheduledStartLocalMs !== null
         ? Math.max(
@@ -546,7 +570,10 @@ export class CompetitiveSession {
           )
         : 0;
     const local = this.simulation?.readSnapshot();
-    const remote = this.remoteSnapshots.latest(this.options.peer.senderId);
+    const remote = this.remoteSnapshots.latestAfter(
+      this.options.peer.senderId,
+      options.afterRemoteSnapshotSeq,
+    );
     const recoveryRequired =
       this.phase === "network-pause" &&
       (this.transportRecoveryRequested ||
@@ -595,7 +622,7 @@ export class CompetitiveSession {
     this.options.onPhaseChange?.(phase);
   }
 
-  private desynchronize(reason: string): void {
+  private desynchronize(reason: DesynchronizationReason): void {
     if (this.phase === "desynchronized") return;
     this.syncPurpose = null;
     this.simulation?.setPaused(true);
@@ -610,6 +637,7 @@ export class CompetitiveSession {
     });
     const result = this.buildDesynchronizationResult();
     if (result !== null) this.confirmedResult = cloneResult(result);
+    this.recordDesynchronization(reason);
     this.setPhase("desynchronized");
     this.options.onDesynchronization?.(reason);
     if (result !== null && !this.durableResultEmitted) {
@@ -643,7 +671,7 @@ export class CompetitiveSession {
   }
 
   private currentTick(): Tick {
-    return this.simulation?.readSnapshot().tick ?? 0;
+    return this.simulation?.currentTick() ?? 0;
   }
 
   private nextEventId(purpose: string): string {
@@ -687,7 +715,13 @@ export class CompetitiveSession {
       expectedMatchId: this.options.matchId,
       allowedSenderIds: this.allowedSenders,
     });
-    if (!decoded.ok || decoded.value.sessionId !== this.options.peer.sessionId) return;
+    if (!decoded.ok) return;
+    if (decoded.value.sessionId !== this.options.peer.sessionId) {
+      if (decoded.value.kind === "SNAPSHOT") {
+        this.noteSnapshotRejected("session-mismatch");
+      }
+      return;
+    }
     const envelope = decoded.value;
 
     const peerTrafficObserved = this.liveness.observe(envelope);
@@ -695,6 +729,10 @@ export class CompetitiveSession {
     if (envelope.kind === "KEEPALIVE" && peerTrafficObserved) {
       const keepalive = envelope as RealtimeEnvelope<"KEEPALIVE">;
       this.peerResumeAvailable = keepalive.payload.resumeAvailable;
+      this.lastPeerSnapshotSeq = Math.max(
+        this.lastPeerSnapshotSeq ?? 0,
+        keepalive.payload.lastSnapshotSeq,
+      );
       for (const cursor of keepalive.payload.inboundCritical) {
         this.reliability.acknowledgeCursor(cursor);
       }
@@ -732,7 +770,7 @@ export class CompetitiveSession {
         this.receiveConfigAck(envelope as RealtimeEnvelope<"CONFIG_ACK">);
         return;
       case "SNAPSHOT":
-        this.remoteSnapshots.accept(envelope as RealtimeEnvelope<"SNAPSHOT">);
+        this.acceptRemoteSnapshot(envelope as RealtimeEnvelope<"SNAPSHOT">);
         return;
       default:
         this.reliability.receive(envelope);
@@ -759,6 +797,24 @@ export class CompetitiveSession {
       return;
     }
     this.maybeBeginInitialSync();
+  }
+
+  private acceptRemoteSnapshot(envelope: RealtimeEnvelope<"SNAPSHOT">): boolean {
+    const result = this.remoteSnapshots.acceptDetailed(envelope);
+    if (!result.accepted) {
+      this.noteSnapshotRejected(result.reason);
+      return false;
+    }
+    this.remoteSnapshotsAccepted += 1;
+    this.lastRemoteSnapshotSeq = envelope.payload.snapshotSeq;
+    this.lastRemoteSnapshotTick = envelope.payload.stateTick;
+    this.lastRemoteSnapshotReceivedMs = this.options.clock.now();
+    return true;
+  }
+
+  private noteSnapshotRejected(reason: SnapshotRejectionReason): void {
+    this.remoteSnapshotsRejected += 1;
+    this.lastSnapshotRejection = reason;
   }
 
   private maybeBeginInitialSync(): void {
@@ -1050,28 +1106,42 @@ export class CompetitiveSession {
     const simulation = this.simulation;
     if (simulation === null) return;
     const targetTick = this.tickClock.tickAt(this.options.clock.now());
-    let snapshot = simulation.readSnapshot();
-    while (snapshot.tick < targetTick && this.phase === "playing") {
+    let snapshotDue = false;
+    while (simulation.currentTick() < targetTick && this.phase === "playing") {
       const effects = simulation.tick(1);
       this.recordSimulationCheckpoint();
       this.publishEffects(effects);
       this.flushPendingGameplayCriticals();
       if (effects.length > 0) this.options.onSimulationEffects?.(effects);
-      snapshot = simulation.readSnapshot();
-      this.publishSnapshotIfDue(snapshot);
+      if (
+        this.phase === "playing" &&
+        this.snapshotScheduler.claim(simulation.currentTick(), true)
+      ) {
+        snapshotDue = true;
+      }
+    }
+    if (snapshotDue && this.phase === "playing") {
+      this.publishSnapshot(simulation.readSnapshot());
     }
   }
 
   private publishSnapshotIfDue(
-    snapshot = this.simulation?.readSnapshot(),
+    snapshot?: SimulationSnapshot,
     force = false,
   ): void {
+    const simulation = this.simulation;
+    const tick = snapshot?.tick ?? simulation?.currentTick();
     if (
-      snapshot === undefined ||
-      (!force && !this.snapshotScheduler.claim(snapshot.tick, true))
+      tick === undefined ||
+      (!force && !this.snapshotScheduler.claim(tick, true))
     ) {
       return;
     }
+    const dueSnapshot = snapshot ?? simulation?.readSnapshot();
+    if (dueSnapshot !== undefined) this.publishSnapshot(dueSnapshot);
+  }
+
+  private publishSnapshot(snapshot: SimulationSnapshot): void {
     this.snapshotSequence += 1;
     const payload = createPlayerSnapshot({
       player: snapshot.player,
@@ -1087,6 +1157,7 @@ export class CompetitiveSession {
   }
 
   private publishEffects(effects: readonly SimulationEffect[]): void {
+    if (effects.length === 0) return;
     const tick = this.currentTick();
     for (const effect of effects) {
       const eventId = effect.eventId ?? this.nextEventId(effect.kind);
@@ -1570,12 +1641,12 @@ export class CompetitiveSession {
   ): boolean {
     const simulation = this.simulation;
     if (simulation === null) return false;
-    let snapshot = simulation.readSnapshot();
-    if (Math.abs(targetTick - snapshot.tick) > MAX_REMOTE_TICK_ADVANCE) {
+    const initialTick = simulation.currentTick();
+    if (Math.abs(targetTick - initialTick) > MAX_REMOTE_TICK_ADVANCE) {
       this.desynchronize("remote-tick-out-of-range");
       return false;
     }
-    if (targetTick < snapshot.tick) {
+    if (targetTick < initialTick) {
       const checkpoint = this.simulationCheckpoints.get(targetTick);
       if (checkpoint === undefined) {
         this.desynchronize("remote-tick-checkpoint-missing");
@@ -1601,29 +1672,36 @@ export class CompetitiveSession {
       }
       return true;
     }
-    if (targetTick === snapshot.tick) {
+    if (targetTick === initialTick) {
       if (!deferGameplayReplay && this.flushPendingGameplayCriticals()) {
         this.snapshotScheduler.reset();
-        this.publishSnapshotIfDue(simulation.readSnapshot(), true);
+        this.publishSnapshotIfDue(undefined, true);
       }
       return true;
     }
     if (this.phase !== "playing") {
       return this.phase === "finished" &&
         this.terminal?.reason === "top-out" &&
-        targetTick <= snapshot.tick;
+        targetTick <= initialTick;
     }
-    while (snapshot.tick < targetTick && this.phase === "playing") {
+    let snapshotDue = false;
+    while (simulation.currentTick() < targetTick && this.phase === "playing") {
       const effects = simulation.tick(1);
       this.recordSimulationCheckpoint();
       this.publishEffects(effects);
       if (!deferGameplayReplay) this.flushPendingGameplayCriticals();
-      snapshot = simulation.readSnapshot();
-      this.publishSnapshotIfDue(snapshot);
+      if (
+        this.phase === "playing" &&
+        this.snapshotScheduler.claim(simulation.currentTick(), true)
+      ) {
+        snapshotDue = true;
+      }
     }
     if (!deferGameplayReplay && this.flushPendingGameplayCriticals()) {
       this.snapshotScheduler.reset();
-      this.publishSnapshotIfDue(simulation.readSnapshot(), true);
+      this.publishSnapshotIfDue(undefined, true);
+    } else if (snapshotDue && this.phase === "playing") {
+      this.publishSnapshot(simulation.readSnapshot());
     }
     return true;
   }
@@ -1773,7 +1851,7 @@ export class CompetitiveSession {
     ) {
       return;
     }
-    const accepted = this.remoteSnapshots.accept({
+    const resumeSnapshotEnvelope: RealtimeEnvelope<"SNAPSHOT"> = {
       protocol: 1,
       matchId: envelope.matchId,
       senderId: envelope.senderId,
@@ -1782,8 +1860,14 @@ export class CompetitiveSession {
       matchTick: envelope.payload.snapshot.stateTick,
       sentAtMonotonicMs: envelope.sentAtMonotonicMs,
       payload: envelope.payload.snapshot,
-    });
-    if (!accepted) {
+    };
+    const acceptance = this.remoteSnapshots.acceptDetailed(resumeSnapshotEnvelope);
+    if (acceptance.accepted) {
+      this.remoteSnapshotsAccepted += 1;
+      this.lastRemoteSnapshotSeq = resumeSnapshotEnvelope.payload.snapshotSeq;
+      this.lastRemoteSnapshotTick = resumeSnapshotEnvelope.payload.stateTick;
+      this.lastRemoteSnapshotReceivedMs = this.options.clock.now();
+    } else {
       const current = this.remoteSnapshots.latest(envelope.senderId);
       if (
         current === undefined ||
@@ -1791,6 +1875,7 @@ export class CompetitiveSession {
         current.stateTick !== envelope.payload.snapshot.stateTick ||
         current.stateHash !== envelope.payload.snapshot.stateHash
       ) {
+        this.noteSnapshotRejected(acceptance.reason);
         return;
       }
     }
@@ -2061,6 +2146,43 @@ export class CompetitiveSession {
   private recordDiagnostic(event: NetworkDiagnosticEventInput): void {
     if (this.diagnosticIncidentId === null) return;
     this.options.diagnostics?.record(this.diagnosticIncidentId, event);
+  }
+
+  private recordDesynchronization(reason: DesynchronizationReason): void {
+    const diagnostics = this.options.diagnostics;
+    if (diagnostics === undefined) return;
+    const now = this.options.clock.now();
+    const event: NetworkDiagnosticEventInput = {
+      kind: "desynchronized",
+      reason,
+      snapshotsAccepted: this.remoteSnapshotsAccepted,
+      snapshotsRejected: this.remoteSnapshotsRejected,
+      ...(this.lastRemoteSnapshotSeq === null
+        ? {}
+        : { lastSnapshotSeq: this.lastRemoteSnapshotSeq }),
+      ...(this.lastRemoteSnapshotTick === null
+        ? {}
+        : { lastSnapshotTick: this.lastRemoteSnapshotTick }),
+      ...(this.lastRemoteSnapshotReceivedMs === null
+        ? {}
+        : {
+            lastSnapshotAgeMs: Math.floor(
+              Math.max(0, now - this.lastRemoteSnapshotReceivedMs),
+            ),
+          }),
+      ...(this.lastPeerSnapshotSeq === null
+        ? {}
+        : { peerLastSnapshotSeq: this.lastPeerSnapshotSeq }),
+      ...(this.lastSnapshotRejection === null
+        ? {}
+        : { lastSnapshotRejection: this.lastSnapshotRejection }),
+    };
+    if (this.diagnosticIncidentId === null) {
+      diagnostics.begin(event);
+    } else {
+      diagnostics.record(this.diagnosticIncidentId, event);
+    }
+    this.diagnosticIncidentId = null;
   }
 
   private emitForfeitResult(): void {

@@ -244,6 +244,47 @@ describe("CompetitiveSession", () => {
     expect(pair.a.view().remote?.snapshotSeq).toBe(7);
   });
 
+  it("omits an unchanged remote snapshot when the renderer supplies its sequence", () => {
+    const pair = createPair();
+    ready(pair);
+    advanceBoth(pair, 3_000);
+    const current = pair.a.view().remote!;
+
+    expect(
+      pair.a.view({ afterRemoteSnapshotSeq: current.snapshotSeq }).remote,
+    ).toBeUndefined();
+
+    advanceBoth(pair, 100, 100);
+    expect(
+      pair.a.view({ afterRemoteSnapshotSeq: current.snapshotSeq }).remote?.snapshotSeq,
+    ).toBeGreaterThan(current.snapshotSeq);
+  });
+
+  it("coalesces regular snapshots after a one-second pump stall", () => {
+    const pair = createPair();
+    ready(pair);
+    advanceBoth(pair, 3_000);
+
+    const sent: RealtimeEnvelope<"SNAPSHOT">[] = [];
+    const holdId = pair.bus.holdMatching("runtime-a", "runtime-b", (data) => {
+      const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+      if (!decoded.ok || decoded.value.kind !== "SNAPSHOT") return false;
+      sent.push(decoded.value);
+      return true;
+    });
+
+    pair.aClock.advance(1_000);
+    pair.a.pump();
+    pair.bus.discardHeld(holdId);
+
+    expect(pair.a.view().matchTick).toBe(60);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      matchTick: 60,
+      payload: { stateTick: 60 },
+    });
+  });
+
   it("retries a missing clock sample during the initial handshake", () => {
     const pair = createPair();
     pair.a.start();
@@ -457,6 +498,7 @@ describe("CompetitiveSession", () => {
       kind: "scramble",
       remainingTicks: RULES.power.scrambleTicks,
     });
+    expect(pair.a.isLocalScrambled()).toBe(true);
     expect(local?.player.statuses).toContainEqual({
       kind: "ghost-jam",
       remainingTicks: RULES.power.ghostJamTicks,
@@ -661,13 +703,46 @@ describe("CompetitiveSession", () => {
   it("stops neutrally when a top-out contradicts its terminal snapshot hash", () => {
     const onDesynchronization = vi.fn<(reason: string) => void>();
     const onResult = vi.fn<(result: MatchResultV1) => void>();
+    const diagnostics = new NetworkDiagnostics({ clock: new ManualClock(1_000) });
     const pair = createPair({
       onADesynchronization: onDesynchronization,
       onAResultConfirmed: onResult,
+      aDiagnostics: diagnostics,
     });
     ready(pair);
     advanceBoth(pair, 3_000);
     const remote = pair.a.view().remote!;
+
+    pair.bEndpoint.send(
+      encodeEnvelope({
+        protocol: 1,
+        matchId: "match-1",
+        senderId: "player-b",
+        sessionId: "observer-session-b",
+        kind: "SNAPSHOT",
+        matchTick: remote.stateTick,
+        sentAtMonotonicMs: pair.bClock.now(),
+        payload: remote,
+      }),
+    );
+    pair.bEndpoint.send(
+      encodeEnvelope({
+        protocol: 1,
+        matchId: "match-1",
+        senderId: "player-b",
+        sessionId: "session-b",
+        kind: "KEEPALIVE",
+        matchTick: remote.stateTick,
+        sentAtMonotonicMs: pair.bClock.now(),
+        payload: {
+          activeSessionId: "session-b",
+          resumeAvailable: true,
+          lastSnapshotSeq: remote.snapshotSeq + 4,
+          inboundCritical: [],
+        },
+      }),
+    );
+    pair.aClock.advance(250);
 
     pair.bEndpoint.send(
       encodeEnvelope({
@@ -708,6 +783,19 @@ describe("CompetitiveSession", () => {
     expect(onDesynchronization).toHaveBeenCalledWith(
       "top-out-state-hash-mismatch",
     );
+    expect(diagnostics.snapshot().incidents[0]?.events).toEqual([
+      expect.objectContaining({
+        kind: "desynchronized",
+        reason: "top-out-state-hash-mismatch",
+        snapshotsAccepted: 1,
+        snapshotsRejected: 1,
+        lastSnapshotSeq: remote.snapshotSeq,
+        lastSnapshotTick: remote.stateTick,
+        lastSnapshotAgeMs: 250,
+        peerLastSnapshotSeq: remote.snapshotSeq + 4,
+        lastSnapshotRejection: "session-mismatch",
+      }),
+    ]);
     expect(onResult).toHaveBeenCalledOnce();
   });
 

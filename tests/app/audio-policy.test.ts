@@ -1,11 +1,20 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  cueForAcceptedInput,
   cueForIncomingAttack,
   panForPowerCue,
 } from "../../src/app/audio-policy";
 
 describe("app audio policy", () => {
+  it("plays input cues only when the simulation accepted the action", () => {
+    expect(cueForAcceptedInput("move-left", true)).toBe("move");
+    expect(cueForAcceptedInput("rotate-cw", true)).toBe("rotate");
+    expect(cueForAcceptedInput("soft-drop", true)).toBe("soft-drop");
+    expect(cueForAcceptedInput("move-left", false)).toBeNull();
+    expect(cueForAcceptedInput("rotate-cw", false)).toBeNull();
+  });
+
   it("gives affected players the new incoming power cues without duplicating legacy callbacks", () => {
     expect(cueForIncomingAttack("oversize")).toBe("power-oversize");
     expect(cueForIncomingAttack("ghost-jam")).toBe("power-ghost-jam");

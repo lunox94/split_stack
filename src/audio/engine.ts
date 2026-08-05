@@ -49,6 +49,14 @@ function effectsLimiterCurve(): Float32Array<ArrayBuffer> {
   return curve;
 }
 
+function disconnectNode(node: AudioNode): void {
+  try {
+    node.disconnect();
+  } catch {
+    // Cleanup is best-effort when a host has already retired the audio graph.
+  }
+}
+
 const fetchModule: ModuleLoader = async (assetUrl) => {
   const response = await fetch(assetUrl);
   if (!response.ok) {
@@ -464,6 +472,11 @@ export class AudioEngine {
     );
     envelope.gain.exponentialRampToValueAtTime(0.0001, endsAt);
     oscillator.connect(envelope).connect(panner).connect(master);
+    oscillator.onended = () => {
+      disconnectNode(oscillator);
+      disconnectNode(envelope);
+      disconnectNode(panner);
+    };
     oscillator.start(startsAt);
     oscillator.stop(endsAt + 0.01);
   }
@@ -488,7 +501,10 @@ export class AudioEngine {
     source.buffer = buffer;
     source.connect(musicBus);
     this.#musicSources.add(source);
-    source.onended = () => this.#musicSources.delete(source);
+    source.onended = () => {
+      this.#musicSources.delete(source);
+      disconnectNode(source);
+    };
     source.start(startsAt);
   }
 
@@ -499,6 +515,7 @@ export class AudioEngine {
       } catch {
         // A source may already have ended between scheduling and cleanup.
       }
+      disconnectNode(source);
     }
     this.#musicSources.clear();
   }

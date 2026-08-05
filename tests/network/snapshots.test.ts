@@ -96,6 +96,22 @@ describe("remote snapshot replacement", () => {
     expect(store.latest("player-a")?.snapshotSeq).toBe(2);
   });
 
+  it("classifies wrong-session and stale snapshots without breaking boolean callers", () => {
+    const store = new RemoteSnapshotStore();
+    store.bind("player-a", "session-a");
+
+    expect(store.acceptDetailed(envelope(1, 6, "observer-session"))).toEqual({
+      accepted: false,
+      reason: "session-mismatch",
+    });
+    expect(store.accept(envelope(2, 12))).toBe(true);
+    expect(store.acceptDetailed(envelope(1, 6))).toEqual({
+      accepted: false,
+      reason: "stale-sequence",
+    });
+    expect(store.accept(envelope(1, 6))).toBe(false);
+  });
+
   it("does not expose mutable aliases to the accepted remote snapshot", () => {
     const store = new RemoteSnapshotStore();
     store.bind("player-a", "session-a");
@@ -106,6 +122,21 @@ describe("remote snapshot replacement", () => {
     const firstRead = store.latest("player-a")!;
     firstRead.grid[0] = 2;
 
+    expect(store.latest("player-a")?.grid[0]).toBe(0);
+  });
+
+  it("clones only when a newer snapshot exists after the caller's sequence", () => {
+    const store = new RemoteSnapshotStore();
+    store.bind("player-a", "session-a");
+    expect(store.accept(envelope(1, 6))).toBe(true);
+
+    expect(store.latestAfter("player-a", 1)).toBeUndefined();
+    const newer = envelope(2, 12);
+    expect(store.accept(newer)).toBe(true);
+    const read = store.latestAfter("player-a", 1)!;
+    read.grid[0] = 9;
+
+    expect(read.snapshotSeq).toBe(2);
     expect(store.latest("player-a")?.grid[0]).toBe(0);
   });
 

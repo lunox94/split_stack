@@ -21,6 +21,7 @@ import type {
 import { GestureInput, isGameplayGestureTarget } from "../input/gestures";
 import { KeyboardInput } from "../input/keyboard";
 import { transformScrambledAction } from "../input/scramble-transform";
+import { TouchButtonInput } from "../input/touch-buttons";
 import {
   CompetitiveSession,
   type CompetitiveConnectionStatus,
@@ -58,6 +59,7 @@ import {
   createAppShell,
   countdownText,
   meterProgress,
+  setElementHidden,
   setPowerMeterAccessibility,
   showHelp,
   type AppShell,
@@ -65,7 +67,11 @@ import {
 } from "../ui/shell";
 import type { PiecePreviewOptions } from "../ui/piece-preview";
 import { boardModelFromRemoteSnapshot, boardModelFromSimulation } from "./view-model";
-import { cueForIncomingAttack, panForPowerCue } from "./audio-policy";
+import {
+  cueForAcceptedInput,
+  cueForIncomingAttack,
+  panForPowerCue,
+} from "./audio-policy";
 import { PresentationRouter } from "./presentation-router";
 import {
   appendBoundedUnique,
@@ -91,6 +97,10 @@ import {
 } from "./runtime-election";
 import { STRINGS, formatString, type StringKey } from "./strings";
 import { PresentationTimeline } from "../render/presentation-timeline";
+import {
+  NETWORKED_PRESENTATION_FPS,
+  RuntimePresentationCadence,
+} from "./presentation-cadence";
 
 const PRACTICE_HIGH_SCORE_KEY = "split-stack/practice-high-score/v1";
 const FIXED_TICK_MS = 1_000 / RULES.timing.ticksPerSecond;
@@ -121,6 +131,13 @@ interface SpectatorRuntime {
   channel: WebxdcRealtimeChannel;
   snapshots: RemoteSnapshotStore;
   matchId: string;
+}
+
+interface RemoteRenderCache {
+  matchId: string;
+  snapshot: PlayerSnapshotV1;
+  board: BoardRenderModel;
+  concealed: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -232,23 +249,50 @@ function playerStateFrom(snapshot: SimulationSnapshot | PlayerSnapshotV1): Playe
   return "player" in snapshot ? snapshot.player : null;
 }
 
-function updateHud(
+const HUD_STATUS_SIGNATURES = new WeakMap<HTMLElement, string>();
+
+function setTextContentIfChanged(element: HTMLElement, text: string): void {
+  if (element.textContent !== text) element.textContent = text;
+}
+
+function setMeterProgressIfChanged(element: HTMLElement, progress: string): void {
+  if (element.style.getPropertyValue("--meter-progress") !== progress) {
+    element.style.setProperty("--meter-progress", progress);
+  }
+}
+
+function setStatusLabelsIfChanged(element: HTMLElement, labels: readonly string[]): void {
+  const signature = JSON.stringify(labels);
+  if (HUD_STATUS_SIGNATURES.get(element) === signature) return;
+  HUD_STATUS_SIGNATURES.set(element, signature);
+  const document = element.ownerDocument;
+  element.replaceChildren(
+    ...labels.map((label) => {
+      const pill = document.createElement("span");
+      pill.className = "status-pill";
+      pill.textContent = label;
+      return pill;
+    }),
+  );
+}
+
+export function updateHud(
   hud: HudElements,
   name: string,
   snapshot: SimulationSnapshot | PlayerSnapshotV1 | undefined,
   previewOptions: PiecePreviewOptions,
 ): void {
-  hud.name.textContent = name;
+  setTextContentIfChanged(hud.name, name);
   if (snapshot === undefined) {
-    hud.score.textContent = "0";
-    hud.level.textContent = "1";
-    hud.lines.textContent = "0";
+    setTextContentIfChanged(hud.score, "0");
+    setTextContentIfChanged(hud.level, "1");
+    setTextContentIfChanged(hud.lines, "0");
     hud.setPiecePreviews(null, [], previewOptions);
-    hud.upcomingPower.textContent = `${STRINGS["hud.upcomingPower"]}: —`;
-    hud.incoming.textContent = `${STRINGS["hud.incomingGarbage"]}: 0`;
-    hud.meterFill.style.setProperty("--meter-progress", "0%");
+    setTextContentIfChanged(hud.upcomingPower, `${STRINGS["hud.upcomingPower"]}: —`);
+    setTextContentIfChanged(hud.incoming, `${STRINGS["hud.incomingGarbage"]}: 0`);
+    setMeterProgressIfChanged(hud.meterFill, "0%");
     setPowerMeterAccessibility(hud.meter, 0);
-    hud.statuses.replaceChildren();
+    setStatusLabelsIfChanged(hud.statuses, []);
     return;
   }
   const player = playerStateFrom(snapshot);
@@ -261,17 +305,22 @@ function updateHud(
   const replacementMode = player?.replacementMode ??
     (snapshot as PlayerSnapshotV1).replacementMode;
   const incoming = player?.incomingGarbage ?? (snapshot as PlayerSnapshotV1).incomingGarbage;
-  hud.score.textContent = String(score);
-  hud.level.textContent = String(level);
-  hud.lines.textContent = String(lines);
+  setTextContentIfChanged(hud.score, String(score));
+  setTextContentIfChanged(hud.level, String(level));
+  setTextContentIfChanged(hud.lines, String(lines));
   const held = "player" in snapshot ? snapshot.player.hold : snapshot.hold;
   const next = "player" in snapshot ? snapshot.preview : snapshot.nextFive;
   hud.setPiecePreviews(held, next, previewOptions);
-  hud.upcomingPower.textContent = `${STRINGS["hud.upcomingPower"]}: ${powerLabel(upcomingPower)}`;
-  hud.incoming.textContent = `${STRINGS["hud.incomingGarbage"]}: ${incoming.reduce((sum, packet) => sum + packet.rows, 0)}`;
-  hud.meterFill.style.setProperty("--meter-progress", meterProgress(powerCharge));
+  setTextContentIfChanged(
+    hud.upcomingPower,
+    `${STRINGS["hud.upcomingPower"]}: ${powerLabel(upcomingPower)}`,
+  );
+  setTextContentIfChanged(
+    hud.incoming,
+    `${STRINGS["hud.incomingGarbage"]}: ${incoming.reduce((sum, packet) => sum + packet.rows, 0)}`,
+  );
+  setMeterProgressIfChanged(hud.meterFill, meterProgress(powerCharge));
   setPowerMeterAccessibility(hud.meter, powerCharge);
-  const document = hud.statuses.ownerDocument;
   const replacementLabel = replacementMode?.kind === "monomino-rush"
     ? formatString("hud.replacementSeconds", {
         power: powerLabel("monomino-rush"),
@@ -285,23 +334,10 @@ function updateHud(
           count: replacementMode.remainingPieces ?? 0,
         })
       : null;
-  hud.statuses.replaceChildren(
-    ...[...statuses.map(statusLabel), ...(replacementLabel === null ? [] : [replacementLabel])]
-      .map((label) => {
-      const pill = document.createElement("span");
-      pill.className = "status-pill";
-      pill.textContent = label;
-      return pill;
-      }),
+  setStatusLabelsIfChanged(
+    hud.statuses,
+    [...statuses.map(statusLabel), ...(replacementLabel === null ? [] : [replacementLabel])],
   );
-}
-
-function cueForInput(action: LogicalAction): AudioCue {
-  if (action === "move-left" || action === "move-right") return "move";
-  if (action === "rotate-cw" || action === "rotate-ccw") return "rotate";
-  if (action === "soft-drop") return "soft-drop";
-  if (action === "hard-drop") return "hard-drop";
-  return "hold";
 }
 
 function cueForPower(power: PowerKind): AudioCue {
@@ -321,6 +357,9 @@ export async function bootstrap(): Promise<void> {
   const audio = new AudioEngine();
   let latestLeftBoard: BoardRenderModel | null = null;
   let latestRightBoard: BoardRenderModel | null = null;
+  let competitiveRemoteCache: RemoteRenderCache | null = null;
+  let spectatorLeftCache: RemoteRenderCache | null = null;
+  let spectatorRightCache: RemoteRenderCache | null = null;
   const ghostCellsFor = (board: "left" | "right") =>
     (board === "left" ? latestLeftBoard : latestRightBoard)?.cells
       .filter((cell) => cell.role === "ghost")
@@ -354,6 +393,7 @@ export async function bootstrap(): Promise<void> {
   let primaryGlitchStartedAtMs = 0;
   let glitchPreviewLoopActive = false;
   let glitchPreviewArrivalPlayed = false;
+  const presentationCadence = new RuntimePresentationCadence();
 
   const stopGlitchPreview = (): void => {
     audio.stopGlitchPreviewLoop();
@@ -691,6 +731,9 @@ export async function bootstrap(): Promise<void> {
     practice = null;
     latestLeftBoard = null;
     latestRightBoard = null;
+    competitiveRemoteCache = null;
+    spectatorLeftCache = null;
+    spectatorRightCache = null;
     lastScrambleActive = false;
     shell.setScrambled(false);
     announcedConfigHash = null;
@@ -836,18 +879,23 @@ export async function bootstrap(): Promise<void> {
   };
 
   const scrambleActive = (): boolean => {
-    const snapshot = mode === "practice" ? practice?.readSnapshot() : competitive?.view().local;
-    return snapshot?.player.statuses.some((status) => status.kind === "scramble") ?? false;
+    return mode === "practice"
+      ? practice?.hasStatus("scramble") ?? false
+      : competitive?.isLocalScrambled() ?? false;
   };
 
   const dispatchInput = (rawAction: LogicalAction): void => {
     if (mode !== "practice" && mode !== "competitive") return;
     const scrambled = scrambleActive();
     const action = transformScrambledAction(rawAction, scrambled);
-    audio.play(cueForInput(action), { pan: -0.45 });
     if (preferences.vibration && (action === "hard-drop" || action === "hold")) navigator.vibrate?.(18);
-    const effects = mode === "practice" ? practice?.dispatch(action) ?? [] : competitive?.dispatch(action) ?? [];
-    processEffects(effects);
+    const result = mode === "practice"
+      ? practice?.dispatchWithResult(action)
+      : competitive?.dispatchWithResult(action);
+    if (result === undefined) return;
+    const cue = cueForAcceptedInput(action, result.accepted);
+    if (cue !== null) audio.play(cue, { pan: -0.45 });
+    processEffects(result.effects);
   };
 
   const keyboard = new KeyboardInput(window, ({ action }) => dispatchInput(action));
@@ -855,10 +903,15 @@ export async function bootstrap(): Promise<void> {
     getCellSize: () => latestLayout?.left.cellSize ?? 24,
     shouldStart: (event) => isGameplayGestureTarget(event.target),
   });
+  const touchButtons = new TouchButtonInput(
+    shell.touchButtons,
+    ({ action }) => dispatchInput(action),
+  );
 
   const setInputsEnabled = (enabled: boolean): void => {
     keyboard.setEnabled(enabled);
     const gesturesEnabled = enabled && preferences.touchControls === "gestures";
+    touchButtons.setEnabled(enabled && preferences.touchControls === "buttons");
     gameplayGestures.setEnabled(gesturesEnabled);
     shell.container.classList.toggle("gestures-active", gesturesEnabled);
     shell.left.pane.setAttribute("aria-disabled", String(!enabled));
@@ -891,6 +944,9 @@ export async function bootstrap(): Promise<void> {
     practiceAccumulator = 0;
     lastLocalLevel = 1;
     warnedUpcomingPower = null;
+    competitiveRemoteCache = null;
+    spectatorLeftCache = null;
+    spectatorRightCache = null;
     const practiceSeed = createRuntimeId();
     practice = createSimulation({
       seed: practiceSeed,
@@ -990,6 +1046,9 @@ export async function bootstrap(): Promise<void> {
     lastCountdownSecond = 0;
     lastLocalLevel = 1;
     warnedUpcomingPower = null;
+    competitiveRemoteCache = null;
+    spectatorLeftCache = null;
+    spectatorRightCache = null;
     // Role and runtime-session changes must obey the same one-channel Webxdc
     // lifecycle as liveness recovery: retire before joining the replacement.
     try {
@@ -1592,35 +1651,12 @@ export async function bootstrap(): Promise<void> {
     });
   });
 
-  for (const control of shell.touchButtons.querySelectorAll<HTMLButtonElement>("button[data-action]")) {
-    let repeatTimer: number | null = null;
-    let delayTimer: number | null = null;
-    const action = control.dataset.action as LogicalAction;
-    const stop = (): void => {
-      if (repeatTimer !== null) window.clearInterval(repeatTimer);
-      if (delayTimer !== null) window.clearTimeout(delayTimer);
-      repeatTimer = null;
-      delayTimer = null;
-    };
-    control.addEventListener("pointerdown", (event) => {
-      event.preventDefault();
-      dispatchInput(action);
-      if (action === "move-left" || action === "move-right" || action === "soft-drop") {
-        const delay = action === "soft-drop" ? RULES.timing.softDropRepeatMs : RULES.timing.dasMs;
-        delayTimer = window.setTimeout(() => {
-          repeatTimer = window.setInterval(() => dispatchInput(action), RULES.timing.arrMs);
-        }, delay);
-      }
-    });
-    control.addEventListener("click", (event) => event.preventDefault());
-    control.addEventListener("pointerup", stop);
-    control.addEventListener("pointercancel", stop);
-    control.addEventListener("pointerleave", stop);
-  }
-
   document.addEventListener("visibilitychange", () => {
     const hidden = document.visibilityState === "hidden";
-    if (hidden) audio.pauseMusic();
+    if (hidden) {
+      audio.pauseMusic();
+      renderer?.noteSuspension();
+    }
     if (mode === "practice" && practice !== null) {
       practicePaused = hidden || practicePaused;
       practice.setPaused(practicePaused);
@@ -1660,6 +1696,10 @@ export async function bootstrap(): Promise<void> {
   const renderFrame = (now: number): void => {
     const elapsed = Math.min(250, Math.max(0, now - lastFrameMs));
     lastFrameMs = now;
+    if (!presentationCadence.shouldPresent(mode, now)) {
+      window.requestAnimationFrame(renderFrame);
+      return;
+    }
     let leftBoard = null;
     let rightBoard = null;
     let renderMode: "practice" | "versus" = "versus";
@@ -1687,10 +1727,29 @@ export async function bootstrap(): Promise<void> {
         snapshot,
         previewOptions(glitchElapsedMs),
       );
-      shell.left.blackout.hidden = true;
+      setElementHidden(shell.left.blackout, true);
       renderMode = "practice";
     } else if (mode === "competitive" && competitive !== null && activeMatch !== null) {
-      const view = competitive.view();
+      const previousRemote = competitiveRemoteCache?.matchId === activeMatch.matchId
+        ? competitiveRemoteCache
+        : null;
+      const view = competitive.view({
+        ...(previousRemote === null
+          ? {}
+          : { afterRemoteSnapshotSeq: previousRemote.snapshot.snapshotSeq }),
+      });
+      if (view.remote !== undefined) {
+        const concealed = view.remote.statuses.some((status) => status.kind === "blackout");
+        competitiveRemoteCache = {
+          matchId: activeMatch.matchId,
+          snapshot: view.remote,
+          board: boardModelFromRemoteSnapshot(view.remote, false, concealed),
+          concealed,
+        };
+      }
+      const remote = competitiveRemoteCache?.matchId === activeMatch.matchId
+        ? competitiveRemoteCache
+        : null;
       musicIntensity = musicIntensityFor(view.local);
       processSnapshotAudio(view.local);
       if (view.phase === "countdown") {
@@ -1711,20 +1770,23 @@ export async function bootstrap(): Promise<void> {
         ? seatB?.displayName ?? STRINGS["common.playerFallback"]
         : activeMatch.challenge.seatA.displayName;
       if (view.local !== undefined) leftBoard = boardModelFromSimulation(view.local, true, false);
-      const remoteConcealed = view.remote?.statuses.some((status) => status.kind === "blackout") ?? false;
-      if (view.remote !== undefined) rightBoard = boardModelFromRemoteSnapshot(view.remote, false, remoteConcealed);
+      const remoteConcealed = remote?.concealed ?? false;
+      rightBoard = remote?.board ?? null;
       const glitchElapsedMs = syncPrimaryGlitchPreview(
         view.phase === "playing" ? view.local?.preview[0] : undefined,
         now,
         view.local?.player.forcedQueue[0]?.eventId,
       );
       updateHud(shell.left, localName, view.local, previewOptions(glitchElapsedMs));
-      updateHud(shell.right, peerName, view.remote, previewOptions(now));
-      shell.left.blackout.hidden = true;
-      shell.right.blackout.hidden = !remoteConcealed;
-      shell.overlay.hidden = view.phase === "playing" || view.phase === "finished";
+      updateHud(shell.right, peerName, remote?.snapshot, previewOptions(now));
+      setElementHidden(shell.left.blackout, true);
+      setElementHidden(shell.right.blackout, !remoteConcealed);
+      setElementHidden(
+        shell.overlay,
+        view.phase === "playing" || view.phase === "finished",
+      );
       if (view.phase === "lobby") {
-        shell.overlay.hidden = false;
+        setElementHidden(shell.overlay, false);
         shell.setReadiness(view.localReady, view.peerReady);
       } else if (!shell.overlay.hidden) {
         shell.setOverlayMessage(phaseText(
@@ -1767,30 +1829,74 @@ export async function bootstrap(): Promise<void> {
     } else if (mode === "spectator" && spectator !== null && activeMatch !== null) {
       stopGlitchPreview();
       const seatB = activeMatch.challenge.seatB;
-      const left = spectator.snapshots.latest(activeMatch.challenge.seatA.playerId);
-      const right = seatB === null ? undefined : spectator.snapshots.latest(seatB.playerId);
-      const leftConcealed = left?.statuses.some((status) => status.kind === "blackout") ?? false;
-      const rightConcealed = right?.statuses.some((status) => status.kind === "blackout") ?? false;
-      if (left !== undefined) leftBoard = boardModelFromRemoteSnapshot(left, false, leftConcealed);
-      if (right !== undefined) rightBoard = boardModelFromRemoteSnapshot(right, false, rightConcealed);
+      const previousLeft = spectatorLeftCache?.matchId === activeMatch.matchId
+        ? spectatorLeftCache
+        : null;
+      const nextLeft = spectator.snapshots.latestAfter(
+        activeMatch.challenge.seatA.playerId,
+        previousLeft?.snapshot.snapshotSeq,
+      );
+      if (nextLeft !== undefined) {
+        const concealed = nextLeft.statuses.some((status) => status.kind === "blackout");
+        spectatorLeftCache = {
+          matchId: activeMatch.matchId,
+          snapshot: nextLeft,
+          board: boardModelFromRemoteSnapshot(nextLeft, false, concealed),
+          concealed,
+        };
+      }
+      const previousRight = spectatorRightCache?.matchId === activeMatch.matchId
+        ? spectatorRightCache
+        : null;
+      const nextRight = seatB === null
+        ? undefined
+        : spectator.snapshots.latestAfter(
+            seatB.playerId,
+            previousRight?.snapshot.snapshotSeq,
+          );
+      if (nextRight !== undefined) {
+        const concealed = nextRight.statuses.some((status) => status.kind === "blackout");
+        spectatorRightCache = {
+          matchId: activeMatch.matchId,
+          snapshot: nextRight,
+          board: boardModelFromRemoteSnapshot(nextRight, false, concealed),
+          concealed,
+        };
+      }
+      const left = spectatorLeftCache?.matchId === activeMatch.matchId
+        ? spectatorLeftCache
+        : null;
+      const right = spectatorRightCache?.matchId === activeMatch.matchId
+        ? spectatorRightCache
+        : null;
+      const leftConcealed = left?.concealed ?? false;
+      const rightConcealed = right?.concealed ?? false;
+      leftBoard = left?.board ?? null;
+      rightBoard = right?.board ?? null;
       updateHud(
         shell.left,
         activeMatch.challenge.seatA.displayName,
-        left,
+        left?.snapshot,
         previewOptions(now),
       );
       updateHud(
         shell.right,
         seatB?.displayName ?? STRINGS["common.playerFallback"],
-        right,
+        right?.snapshot,
         previewOptions(now),
       );
-      shell.left.blackout.hidden = !leftConcealed;
-      shell.right.blackout.hidden = !rightConcealed;
-      if (left !== undefined || right !== undefined) shell.overlay.hidden = true;
-      const spectatorIncoming = [...(left?.incomingGarbage ?? []), ...(right?.incomingGarbage ?? [])]
+      setElementHidden(shell.left.blackout, !leftConcealed);
+      setElementHidden(shell.right.blackout, !rightConcealed);
+      if (left !== undefined || right !== undefined) setElementHidden(shell.overlay, true);
+      const spectatorIncoming = [
+        ...(left?.snapshot.incomingGarbage ?? []),
+        ...(right?.snapshot.incomingGarbage ?? []),
+      ]
         .reduce((total, packet) => total + packet.rows, 0);
-      const spectatorLevel = Math.max(left?.level ?? 1, right?.level ?? 1);
+      const spectatorLevel = Math.max(
+        left?.snapshot.level ?? 1,
+        right?.snapshot.level ?? 1,
+      );
       musicIntensity = spectatorIncoming >= 6
         ? "danger"
         : spectatorIncoming >= 3 || spectatorLevel >= 4
@@ -1809,6 +1915,9 @@ export async function bootstrap(): Promise<void> {
         presentation: presentationTimeline.frameAt(now),
       },
       now,
+      mode === "competitive" || mode === "spectator"
+        ? NETWORKED_PRESENTATION_FPS
+        : 60,
     );
     window.requestAnimationFrame(renderFrame);
   };

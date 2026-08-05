@@ -512,6 +512,10 @@ export class ThreeRenderer {
     this.setQuality(reduced ? "reduced" : "full");
   }
 
+  noteSuspension(): void {
+    this.#quality.noteSuspension();
+  }
+
   setStaticMarkedCells(staticPresentation: boolean): void {
     this.#staticMarkedCells = staticPresentation;
   }
@@ -528,10 +532,14 @@ export class ThreeRenderer {
     }
   }
 
-  render(frame: GameRenderFrame, timestampMs = performance.now()): void {
+  render(
+    frame: GameRenderFrame,
+    timestampMs = performance.now(),
+    observedTargetFps: 60 | 30 = this.#quality.profile.targetFps,
+  ): void {
     if (this.#disposed || this.#contextLost) return;
     const previousQuality = this.#quality.profile.effects;
-    this.#quality.observeFrame(timestampMs);
+    this.#quality.observeFrame(timestampMs, observedTargetFps);
     if (this.#quality.profile.effects !== previousQuality) {
       this.#pixelRatio = 0;
       this.#options.onQualityChanged?.(this.#quality.profile);
@@ -541,8 +549,14 @@ export class ThreeRenderer {
     this.#frameTimestampMs = timestampMs;
     const decoratedFrame = this.#markedCellPulses.decorateFrame(frame, timestampMs);
     this.#resize(decoratedFrame.mode);
-    for (const pool of this.#pools.values()) pool.mesh.count = 0;
-    for (const pool of this.#effectPools.values()) pool.mesh.count = 0;
+    for (const pool of this.#pools.values()) {
+      pool.mesh.count = 0;
+      pool.mesh.visible = false;
+    }
+    for (const pool of this.#effectPools.values()) {
+      pool.mesh.count = 0;
+      pool.mesh.visible = false;
+    }
     this.#effectInstanceCount = 0;
     this.#scene.position.set(0, 0, 0);
     this.#drawBoard(
@@ -559,11 +573,19 @@ export class ThreeRenderer {
     );
     this.#drawPresentation(decoratedFrame.presentation);
     for (const pool of this.#pools.values()) {
+      if (pool.mesh.count === 0) continue;
+      pool.mesh.instanceMatrix.clearUpdateRanges();
+      pool.mesh.instanceMatrix.addUpdateRange(0, pool.mesh.count * 16);
       pool.mesh.instanceMatrix.needsUpdate = true;
     }
     for (const pool of this.#effectPools.values()) {
+      if (pool.mesh.count === 0) continue;
+      pool.mesh.instanceMatrix.clearUpdateRanges();
+      pool.mesh.instanceMatrix.addUpdateRange(0, pool.mesh.count * 16);
       pool.mesh.instanceMatrix.needsUpdate = true;
       if (pool.mesh.instanceColor !== null) {
+        pool.mesh.instanceColor.clearUpdateRanges();
+        pool.mesh.instanceColor.addUpdateRange(0, pool.mesh.count * 3);
         pool.mesh.instanceColor.needsUpdate = true;
       }
     }
@@ -670,6 +692,7 @@ export class ThreeRenderer {
     }
     const pool = this.#poolFor(cell);
     if (pool.mesh.count >= MAX_INSTANCES_PER_POOL) return;
+    pool.mesh.visible = true;
 
     const visualRow = movementEffect?.kind === "collapse"
       ? collapseCellVisualRow(movementEffect, cell.column, cell.row)
@@ -1205,6 +1228,7 @@ export class ThreeRenderer {
       instanceLimit,
     );
     if (pool.mesh.count >= instanceLimit) return;
+    pool.mesh.visible = true;
     const intensity = options.instanceIntensity;
     pool.material.opacity = intensity === undefined
       ? Math.max(0, Math.min(1, opacity))
@@ -1243,6 +1267,7 @@ export class ThreeRenderer {
       texture,
     );
     if (pool.mesh.count >= MAX_INSTANCES_PER_POOL) return;
+    pool.mesh.visible = true;
     const intensity = options.instanceIntensity;
     pool.material.opacity = intensity === undefined
       ? Math.max(0, Math.min(1, opacity))

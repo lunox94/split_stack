@@ -9,6 +9,23 @@ import {
 } from "../../src/input/gestures";
 import { KeyboardInput, keyboardActionForKey } from "../../src/input/keyboard";
 import { transformScrambledAction } from "../../src/input/scramble-transform";
+import { TouchButtonInput } from "../../src/input/touch-buttons";
+
+function pointerEvent(
+  type: "pointerdown" | "pointerup",
+  pointerId: number,
+): PointerEvent {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    button: 0,
+    cancelable: true,
+  });
+  Object.defineProperties(event, {
+    pointerId: { value: pointerId },
+    pointerType: { value: "touch" },
+  });
+  return event as PointerEvent;
+}
 
 describe("Scramble input transformation", () => {
   it("swaps horizontal movement after an input has been recognized", () => {
@@ -160,6 +177,109 @@ describe("keyboardActionForKey", () => {
     expect(actions).toHaveLength(4);
 
     keyboard.dispose();
+    vi.useRealTimers();
+  });
+
+  it("leaves gameplay-key activation of an interactive control to the control", () => {
+    const actions: string[] = [];
+    const keyboard = new KeyboardInput(window, ({ action }) => actions.push(action));
+    const button = document.createElement("button");
+    const label = document.createElement("span");
+    button.append(label);
+    document.body.append(button);
+    const event = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: " ",
+    });
+
+    label.dispatchEvent(event);
+
+    expect(actions).toEqual([]);
+    expect(event.defaultPrevented).toBe(false);
+    keyboard.dispose();
+    button.remove();
+  });
+
+  it("keeps gameplay movement active after a touch button receives focus", () => {
+    const actions: string[] = [];
+    const keyboard = new KeyboardInput(window, ({ action }) => actions.push(action));
+    const button = document.createElement("button");
+    document.body.append(button);
+    button.focus();
+
+    button.dispatchEvent(new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: " ",
+    }));
+    button.dispatchEvent(new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "ArrowLeft",
+    }));
+
+    expect(actions).toEqual(["move-left"]);
+    keyboard.dispose();
+    button.remove();
+  });
+});
+
+describe("TouchButtonInput", () => {
+  it("emits pointer and native keyboard activations exactly once", () => {
+    const actions: string[] = [];
+    const root = document.createElement("div");
+    const button = document.createElement("button");
+    button.dataset.action = "hard-drop";
+    root.append(button);
+    const input = new TouchButtonInput(root, ({ action }) => actions.push(action));
+
+    button.dispatchEvent(pointerEvent("pointerdown", 1));
+    button.dispatchEvent(pointerEvent("pointerup", 1));
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    expect(actions).toEqual(["hard-drop"]);
+
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 0 }));
+    expect(actions).toEqual(["hard-drop", "hard-drop"]);
+
+    input.dispose();
+  });
+
+  it("owns one repeat pointer and stops repeats when disabled or hidden", () => {
+    vi.useFakeTimers();
+    const actions: string[] = [];
+    const root = document.createElement("div");
+    const button = document.createElement("button");
+    button.dataset.action = "move-left";
+    root.append(button);
+    const input = new TouchButtonInput(root, ({ action }) => actions.push(action));
+
+    button.dispatchEvent(pointerEvent("pointerdown", 1));
+    button.dispatchEvent(pointerEvent("pointerdown", 2));
+    button.dispatchEvent(pointerEvent("pointerup", 2));
+    expect(actions).toEqual(["move-left"]);
+    vi.advanceTimersByTime(140 + 35);
+    expect(actions).toEqual(["move-left", "move-left"]);
+
+    input.setEnabled(false);
+    expect(button.disabled).toBe(true);
+    vi.advanceTimersByTime(500);
+    button.dispatchEvent(pointerEvent("pointerdown", 3));
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 0 }));
+    expect(actions).toHaveLength(2);
+
+    input.setEnabled(true);
+    button.dispatchEvent(pointerEvent("pointerdown", 3));
+    expect(actions).toHaveLength(3);
+    const visibility = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("hidden");
+    document.dispatchEvent(new Event("visibilitychange"));
+    vi.advanceTimersByTime(500);
+    expect(actions).toHaveLength(3);
+
+    visibility.mockRestore();
+    input.dispose();
     vi.useRealTimers();
   });
 });

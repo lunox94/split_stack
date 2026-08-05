@@ -23,6 +23,24 @@ export function keyboardActionForKey(key: string): InputAction | null {
   return KEY_ACTIONS[key.toLowerCase()] ?? null;
 }
 
+function shouldLeaveKeyToControl(
+  target: EventTarget | null,
+  key: string,
+): boolean {
+  if (!(target instanceof Element)) return false;
+  if (
+    target.closest(
+      "input, select, textarea, [contenteditable='true']",
+    ) !== null
+  ) {
+    return true;
+  }
+  const activationKey = key === "Enter" || key === " " || key === "Spacebar";
+  return activationKey && target.closest(
+    "button, a[href], summary, [role='button'], [role='link']",
+  ) !== null;
+}
+
 export class KeyboardInput {
   readonly #target: Window;
   readonly #sink: InputSink;
@@ -124,7 +142,13 @@ export class KeyboardInput {
   }
 
   readonly #onKeyDown = (event: KeyboardEvent): void => {
-    if (!this.#enabled || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (
+      !this.#enabled ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      shouldLeaveKeyToControl(event.target, event.key)
+    ) return;
     const normalizedKey = event.key.toLowerCase();
     const action = keyboardActionForKey(event.key);
     if (action === null) return;

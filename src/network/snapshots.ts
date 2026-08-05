@@ -18,6 +18,7 @@ import type {
   Tick,
 } from "../domain/types";
 import type { RealtimeEnvelope, SessionId, StreamCursor } from "./messages";
+import type { SnapshotRejectionReason } from "./diagnostics";
 
 export interface PlayerSnapshotV1 {
   schema: "split-stack/snapshot/v1";
@@ -492,27 +493,47 @@ export class RemoteSnapshotStore {
     this.snapshots.delete(playerId);
   }
 
-  public accept(envelope: RealtimeEnvelope<"SNAPSHOT">): boolean {
+  public acceptDetailed(
+    envelope: RealtimeEnvelope<"SNAPSHOT">,
+  ): { accepted: true } | { accepted: false; reason: SnapshotRejectionReason } {
     const boundSession = this.boundSessions.get(envelope.senderId);
-    if (
-      boundSession === undefined ||
-      boundSession !== envelope.sessionId ||
-      !isPlayerSnapshot(envelope.payload) ||
-      envelope.payload.playerId !== envelope.senderId ||
-      envelope.payload.stateTick !== envelope.matchTick
-    ) {
-      return false;
+    if (boundSession === undefined) return { accepted: false, reason: "unbound-player" };
+    if (boundSession !== envelope.sessionId) {
+      return { accepted: false, reason: "session-mismatch" };
+    }
+    if (!isPlayerSnapshot(envelope.payload)) {
+      return { accepted: false, reason: "invalid-payload" };
+    }
+    if (envelope.payload.playerId !== envelope.senderId) {
+      return { accepted: false, reason: "player-mismatch" };
+    }
+    if (envelope.payload.stateTick !== envelope.matchTick) {
+      return { accepted: false, reason: "tick-mismatch" };
     }
     const current = this.snapshots.get(envelope.senderId);
     if (current !== undefined && envelope.payload.snapshotSeq <= current.snapshotSeq) {
-      return false;
+      return { accepted: false, reason: "stale-sequence" };
     }
     this.snapshots.set(envelope.senderId, cloneSnapshot(envelope.payload));
-    return true;
+    return { accepted: true };
+  }
+
+  public accept(envelope: RealtimeEnvelope<"SNAPSHOT">): boolean {
+    return this.acceptDetailed(envelope).accepted;
   }
 
   public latest(playerId: PlayerId): PlayerSnapshotV1 | undefined {
+    return this.latestAfter(playerId);
+  }
+
+  public latestAfter(
+    playerId: PlayerId,
+    snapshotSeq?: number,
+  ): PlayerSnapshotV1 | undefined {
     const snapshot = this.snapshots.get(playerId);
-    return snapshot === undefined ? undefined : cloneSnapshot(snapshot);
+    return snapshot === undefined ||
+      (snapshotSeq !== undefined && snapshot.snapshotSeq <= snapshotSeq)
+      ? undefined
+      : cloneSnapshot(snapshot);
   }
 }

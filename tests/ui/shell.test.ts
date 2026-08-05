@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_PREFERENCES } from "../../src/persistence/settings";
 import { SPECIAL_ICON_PATHS } from "../../src/render/special-icons";
 import {
   createAppShell,
+  setElementHidden,
   setPowerMeterAccessibility,
   showHelp,
 } from "../../src/ui/shell";
@@ -163,6 +164,33 @@ describe("application shell", () => {
     expect(shell.left.meter.getAttribute("aria-valuetext")).toBe(
       "Power ready; 1 charge retained",
     );
+  });
+
+  it("does not toggle an unchanged overlay or blackout visibility state", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+    setElementHidden(shell.overlay, true);
+    const hiddenSetter = vi.spyOn(shell.overlay, "hidden", "set");
+
+    setElementHidden(shell.overlay, true);
+    expect(hiddenSetter).not.toHaveBeenCalled();
+
+    setElementHidden(shell.overlay, false);
+    expect(hiddenSetter).toHaveBeenCalledOnce();
+    expect(shell.overlay.hidden).toBe(false);
+  });
+
+  it("does not rewrite an unchanged overlay message", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+    shell.setOverlayMessage("Match starts in 3");
+    const readinessHidden = vi.spyOn(shell.readinessPanel, "hidden", "set");
+    const messageHidden = vi.spyOn(shell.overlayText, "hidden", "set");
+    const messageText = vi.spyOn(shell.overlayText, "textContent", "set");
+
+    shell.setOverlayMessage("Match starts in 3");
+
+    expect(readinessHidden).not.toHaveBeenCalled();
+    expect(messageHidden).not.toHaveBeenCalled();
+    expect(messageText).not.toHaveBeenCalled();
   });
 
   it("shows all marked powers as the same in-context cells used during play", () => {

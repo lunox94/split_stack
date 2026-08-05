@@ -4,6 +4,7 @@ import {
   NETWORK_DIAGNOSTIC_EVENT_LIMIT,
   NETWORK_DIAGNOSTIC_INCIDENT_LIMIT,
   NetworkDiagnostics,
+  parseNetworkDiagnostics,
 } from "../../src/network/diagnostics";
 import { ManualClock } from "../../src/network/in-memory";
 
@@ -89,5 +90,71 @@ describe("NetworkDiagnostics", () => {
     restored.clear();
     expect(restored.snapshot().incidents).toEqual([]);
     expect(storage.getItem(storageKey)).toBeNull();
+  });
+
+  it("round-trips bounded snapshot context with the exact desynchronization reason", () => {
+    const clock = new ManualClock(3_000);
+    const storage = new MemoryStorage();
+    const diagnostics = new NetworkDiagnostics({ clock, storage });
+
+    diagnostics.begin({
+      kind: "desynchronized",
+      reason: "top-out-state-hash-mismatch",
+      snapshotsAccepted: 12,
+      snapshotsRejected: 2,
+      lastSnapshotSeq: 18,
+      lastSnapshotTick: 108,
+      lastSnapshotAgeMs: 250,
+      peerLastSnapshotSeq: 22,
+      lastSnapshotRejection: "session-mismatch",
+    });
+
+    expect(new NetworkDiagnostics({ clock, storage }).snapshot()).toEqual(
+      diagnostics.snapshot(),
+    );
+  });
+
+  it("drops malformed desynchronization diagnostics instead of guessing", () => {
+    const malformed = JSON.stringify({
+      schema: "split-stack/network-diagnostics/v1",
+      incidents: [{
+        incidentId: 1,
+        startedAtMs: 1_000,
+        events: [
+          {
+            kind: "desynchronized",
+            atMs: 1_000,
+            reason: "unknown-reason",
+            snapshotsAccepted: 1,
+            snapshotsRejected: 0,
+          },
+          {
+            kind: "desynchronized",
+            atMs: 1_001,
+            reason: "clock-sync-timeout",
+            snapshotsAccepted: -1,
+            snapshotsRejected: 0,
+          },
+          {
+            kind: "desynchronized",
+            atMs: 1_002,
+            reason: "clock-sync-timeout",
+            snapshotsAccepted: 1,
+            snapshotsRejected: 0,
+            lastSnapshotSeq: 2,
+          },
+          {
+            kind: "desynchronized",
+            atMs: 1_003,
+            reason: "clock-sync-timeout",
+            snapshotsAccepted: 1,
+            snapshotsRejected: 1,
+            lastSnapshotRejection: "unknown-rejection",
+          },
+        ],
+      }],
+    });
+
+    expect(parseNetworkDiagnostics(malformed).incidents).toEqual([]);
   });
 });

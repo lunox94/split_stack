@@ -629,9 +629,9 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
         : STRINGS["match.readyHint"];
     },
     setOverlayMessage(message): void {
-      readinessPanel.hidden = true;
-      overlayText.hidden = false;
-      overlayText.textContent = message;
+      setElementHidden(readinessPanel, true);
+      setElementHidden(overlayText, false);
+      if (overlayText.textContent !== message) overlayText.textContent = message;
     },
     setScrambled(active): void {
       arena.dataset.scrambled = String(active);
@@ -855,21 +855,28 @@ export function meterProgress(value: number): string {
   return `${Math.max(0, Math.min(100, (value / RULES.power.threshold) * 100))}%`;
 }
 
+export function setElementHidden(element: HTMLElement, hidden: boolean): void {
+  if (element.hidden !== hidden) element.hidden = hidden;
+}
+
 export function setPowerMeterAccessibility(meter: HTMLElement, value: number): void {
   const charge = Math.max(0, Math.floor(value));
   const threshold = RULES.power.threshold;
   const retained = Math.max(0, charge - threshold);
-  meter.setAttribute("aria-valuenow", String(Math.min(charge, threshold)));
-  meter.setAttribute(
-    "aria-valuetext",
-    charge >= threshold
-      ? retained > 0
-        ? retained === 1
-          ? STRINGS["hud.powerReadyRetainedOne"]
-          : formatString("hud.powerReadyRetainedMany", { count: retained })
-        : STRINGS["hud.powerReady"]
-      : formatString("hud.powerCharge", { charge, threshold }),
-  );
+  const valueNow = String(Math.min(charge, threshold));
+  const valueText = charge >= threshold
+    ? retained > 0
+      ? retained === 1
+        ? STRINGS["hud.powerReadyRetainedOne"]
+        : formatString("hud.powerReadyRetainedMany", { count: retained })
+      : STRINGS["hud.powerReady"]
+    : formatString("hud.powerCharge", { charge, threshold });
+  if (meter.getAttribute("aria-valuenow") !== valueNow) {
+    meter.setAttribute("aria-valuenow", valueNow);
+  }
+  if (meter.getAttribute("aria-valuetext") !== valueText) {
+    meter.setAttribute("aria-valuetext", valueText);
+  }
 }
 
 export function countdownText(seconds: number): string {

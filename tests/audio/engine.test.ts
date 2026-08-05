@@ -24,9 +24,16 @@ function fakeAudioContext(): AudioContext & {
     setTargetAtTime: vi.fn(),
     setValueAtTime: vi.fn(),
   });
-  const connectable = <T extends object>(value: T): T & { connect: ReturnType<typeof vi.fn> } => {
-    const node = value as T & { connect: ReturnType<typeof vi.fn> };
+  const connectable = <T extends object>(value: T): T & {
+    connect: ReturnType<typeof vi.fn>;
+    disconnect: ReturnType<typeof vi.fn>;
+  } => {
+    const node = value as T & {
+      connect: ReturnType<typeof vi.fn>;
+      disconnect: ReturnType<typeof vi.fn>;
+    };
     node.connect = vi.fn(() => node);
+    node.disconnect = vi.fn();
     return node;
   };
   const context = {
@@ -164,6 +171,23 @@ describe("audio engine lifecycle", () => {
     engine.setEffectsMuted(false);
     engine.play("move");
     expect(context.createOscillator).toHaveBeenCalled();
+  });
+
+  it("disconnects completed one-shot cue nodes from the long-lived effects bus", async () => {
+    const context = fakeAudioContext();
+    const engine = new AudioEngine({ contextFactory: () => context });
+    expect(await engine.unlock()).toBe(true);
+
+    engine.play("move");
+    const oscillator = vi.mocked(context.createOscillator).mock.results[0]!.value;
+    const gainResults = vi.mocked(context.createGain).mock.results;
+    const envelope = gainResults[gainResults.length - 1]!.value;
+    const panner = vi.mocked(context.createStereoPanner).mock.results[0]!.value;
+    oscillator.onended?.(new Event("ended"));
+
+    expect(oscillator.disconnect).toHaveBeenCalledOnce();
+    expect(envelope.disconnect).toHaveBeenCalledOnce();
+    expect(panner.disconnect).toHaveBeenCalledOnce();
   });
 
   it("makes larger clears audibly denser while retaining one shared clear signature", () => {

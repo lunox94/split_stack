@@ -4,6 +4,35 @@ export const NETWORK_DIAGNOSTIC_INCIDENT_LIMIT = 3;
 export const NETWORK_DIAGNOSTIC_EVENT_LIMIT = 100;
 export const NETWORK_DIAGNOSTICS_STORAGE_KEY = "split-stack.network-diagnostics.v1";
 
+export const DESYNCHRONIZATION_REASONS = [
+  "result-consensus-timeout",
+  "clock-sync-timeout",
+  "clock-commit-timeout",
+  "gameplay-journal-overflow",
+  "future-gameplay-critical-applied",
+  "top-out-state-hash-mismatch",
+  "remote-start-out-of-range",
+  "config-ack-timeout",
+  "remote-tick-out-of-range",
+  "remote-tick-checkpoint-missing",
+  "resume-state-tick-mismatch",
+] as const;
+
+export type DesynchronizationReason =
+  (typeof DESYNCHRONIZATION_REASONS)[number];
+
+export const SNAPSHOT_REJECTION_REASONS = [
+  "unbound-player",
+  "session-mismatch",
+  "invalid-payload",
+  "player-mismatch",
+  "tick-mismatch",
+  "stale-sequence",
+] as const;
+
+export type SnapshotRejectionReason =
+  (typeof SNAPSHOT_REJECTION_REASONS)[number];
+
 export type NetworkDiagnosticEventKind =
   | "connection-unstable"
   | "channel-replacement-requested"
@@ -14,7 +43,8 @@ export type NetworkDiagnosticEventKind =
   | "resume-state-sent"
   | "resume-countdown"
   | "resumed"
-  | "connection-lost";
+  | "connection-lost"
+  | "desynchronized";
 
 export interface NetworkDiagnosticEventInput {
   kind: NetworkDiagnosticEventKind;
@@ -22,6 +52,14 @@ export interface NetworkDiagnosticEventInput {
   pauseTick?: number;
   rollbackTicks?: number;
   attempt?: number;
+  reason?: DesynchronizationReason;
+  snapshotsAccepted?: number;
+  snapshotsRejected?: number;
+  lastSnapshotSeq?: number;
+  lastSnapshotTick?: number;
+  lastSnapshotAgeMs?: number;
+  peerLastSnapshotSeq?: number;
+  lastSnapshotRejection?: SnapshotRejectionReason;
 }
 
 export interface NetworkDiagnosticEvent extends NetworkDiagnosticEventInput {
@@ -63,7 +101,14 @@ const EVENT_KINDS = new Set<NetworkDiagnosticEventKind>([
   "resume-countdown",
   "resumed",
   "connection-lost",
+  "desynchronized",
 ]);
+const DESYNCHRONIZATION_REASON_SET = new Set<DesynchronizationReason>(
+  DESYNCHRONIZATION_REASONS,
+);
+const SNAPSHOT_REJECTION_REASON_SET = new Set<SnapshotRejectionReason>(
+  SNAPSHOT_REJECTION_REASONS,
+);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -85,6 +130,37 @@ function readEvent(value: unknown): NetworkDiagnosticEvent | undefined {
   const pauseTick = readNonNegativeInteger(value.pauseTick);
   const rollbackTicks = readNonNegativeInteger(value.rollbackTicks);
   const attempt = readNonNegativeInteger(value.attempt);
+  const reason = DESYNCHRONIZATION_REASON_SET.has(value.reason as DesynchronizationReason)
+    ? value.reason as DesynchronizationReason
+    : undefined;
+  if (value.kind === "desynchronized" && reason === undefined) return undefined;
+  const snapshotsAccepted = readNonNegativeInteger(value.snapshotsAccepted);
+  const snapshotsRejected = readNonNegativeInteger(value.snapshotsRejected);
+  const lastSnapshotSeq = readNonNegativeInteger(value.lastSnapshotSeq);
+  const lastSnapshotTick = readNonNegativeInteger(value.lastSnapshotTick);
+  const lastSnapshotAgeMs = readNonNegativeInteger(value.lastSnapshotAgeMs);
+  const peerLastSnapshotSeq = readNonNegativeInteger(value.peerLastSnapshotSeq);
+  const lastSnapshotRejection = SNAPSHOT_REJECTION_REASON_SET.has(
+    value.lastSnapshotRejection as SnapshotRejectionReason,
+  )
+    ? value.lastSnapshotRejection as SnapshotRejectionReason
+    : undefined;
+  if (
+    value.kind === "desynchronized" &&
+    (
+      snapshotsAccepted === undefined ||
+      snapshotsRejected === undefined ||
+      ![0, 3].includes(
+        [lastSnapshotSeq, lastSnapshotTick, lastSnapshotAgeMs].filter(
+          (field) => field !== undefined,
+        ).length,
+      ) ||
+      (value.lastSnapshotRejection !== undefined &&
+        lastSnapshotRejection === undefined)
+    )
+  ) {
+    return undefined;
+  }
   return {
     kind: value.kind as NetworkDiagnosticEventKind,
     atMs,
@@ -92,6 +168,14 @@ function readEvent(value: unknown): NetworkDiagnosticEvent | undefined {
     ...(pauseTick === undefined ? {} : { pauseTick }),
     ...(rollbackTicks === undefined ? {} : { rollbackTicks }),
     ...(attempt === undefined ? {} : { attempt }),
+    ...(reason === undefined ? {} : { reason }),
+    ...(snapshotsAccepted === undefined ? {} : { snapshotsAccepted }),
+    ...(snapshotsRejected === undefined ? {} : { snapshotsRejected }),
+    ...(lastSnapshotSeq === undefined ? {} : { lastSnapshotSeq }),
+    ...(lastSnapshotTick === undefined ? {} : { lastSnapshotTick }),
+    ...(lastSnapshotAgeMs === undefined ? {} : { lastSnapshotAgeMs }),
+    ...(peerLastSnapshotSeq === undefined ? {} : { peerLastSnapshotSeq }),
+    ...(lastSnapshotRejection === undefined ? {} : { lastSnapshotRejection }),
   };
 }
 
@@ -269,6 +353,29 @@ export class NetworkDiagnostics {
     const pauseTick = nonNegativeInteger(input.pauseTick);
     const rollbackTicks = nonNegativeInteger(input.rollbackTicks);
     const attempt = nonNegativeInteger(input.attempt);
+    const snapshotsAccepted = nonNegativeInteger(input.snapshotsAccepted);
+    const snapshotsRejected = nonNegativeInteger(input.snapshotsRejected);
+    const lastSnapshotSeq = nonNegativeInteger(input.lastSnapshotSeq);
+    const lastSnapshotTick = nonNegativeInteger(input.lastSnapshotTick);
+    const lastSnapshotAgeMs = nonNegativeInteger(input.lastSnapshotAgeMs);
+    const peerLastSnapshotSeq = nonNegativeInteger(input.peerLastSnapshotSeq);
+    if (
+      input.kind === "desynchronized" &&
+      (
+        !DESYNCHRONIZATION_REASON_SET.has(input.reason as DesynchronizationReason) ||
+        snapshotsAccepted === undefined ||
+        snapshotsRejected === undefined ||
+        ![0, 3].includes(
+          [lastSnapshotSeq, lastSnapshotTick, lastSnapshotAgeMs].filter(
+            (field) => field !== undefined,
+          ).length,
+        ) ||
+        (input.lastSnapshotRejection !== undefined &&
+          !SNAPSHOT_REJECTION_REASON_SET.has(input.lastSnapshotRejection))
+      )
+    ) {
+      throw new TypeError("Invalid desynchronization diagnostic event");
+    }
     incident.events.push({
       kind: input.kind,
       atMs,
@@ -276,6 +383,16 @@ export class NetworkDiagnostics {
       ...(pauseTick === undefined ? {} : { pauseTick }),
       ...(rollbackTicks === undefined ? {} : { rollbackTicks }),
       ...(attempt === undefined ? {} : { attempt }),
+      ...(input.reason === undefined ? {} : { reason: input.reason }),
+      ...(snapshotsAccepted === undefined ? {} : { snapshotsAccepted }),
+      ...(snapshotsRejected === undefined ? {} : { snapshotsRejected }),
+      ...(lastSnapshotSeq === undefined ? {} : { lastSnapshotSeq }),
+      ...(lastSnapshotTick === undefined ? {} : { lastSnapshotTick }),
+      ...(lastSnapshotAgeMs === undefined ? {} : { lastSnapshotAgeMs }),
+      ...(peerLastSnapshotSeq === undefined ? {} : { peerLastSnapshotSeq }),
+      ...(input.lastSnapshotRejection === undefined
+        ? {}
+        : { lastSnapshotRejection: input.lastSnapshotRejection }),
     });
     while (incident.events.length > NETWORK_DIAGNOSTIC_EVENT_LIMIT) {
       incident.events.shift();

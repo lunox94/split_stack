@@ -8,6 +8,32 @@ import { createPlayerState } from "../../src/domain/state";
 const SEED = "00112233445566778899aabbccddeeff";
 
 describe("simulation facade", () => {
+  it("exposes cheap tick and status queries without requiring a rendered snapshot", () => {
+    const simulation = createSimulation({ seed: SEED, playerId: "a", practice: false });
+
+    expect(simulation.currentTick()).toBe(0);
+    expect(simulation.hasStatus("scramble")).toBe(false);
+
+    simulation.tick(3);
+    simulation.receiveScramble();
+
+    expect(simulation.currentTick()).toBe(3);
+    expect(simulation.hasStatus("scramble")).toBe(true);
+  });
+
+  it("classifies accepted and rejected movement while preserving dispatch effects", () => {
+    const simulation = createSimulation({ seed: SEED, playerId: "a", practice: false });
+    const accepted = simulation.dispatchWithResult("move-left");
+
+    expect(accepted).toEqual({ accepted: true, effects: [] });
+
+    let rejected = simulation.dispatchWithResult("move-left");
+    while (rejected.accepted) rejected = simulation.dispatchWithResult("move-left");
+
+    expect(rejected).toEqual({ accepted: false, effects: [] });
+    expect(simulation.dispatch("move-left")).toEqual(rejected.effects);
+  });
+
   it("starts with a base piece and hard drop locks immediately into the next piece", () => {
     const simulation = createSimulation({ seed: SEED, playerId: "a", practice: true });
     const before = simulation.readSnapshot();

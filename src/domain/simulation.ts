@@ -49,6 +49,8 @@ import type {
   PlayerGameState,
   PowerKind,
   SpecialKind,
+  StatusState,
+  Tick,
 } from "./types";
 
 export interface SimulationOptions {
@@ -225,8 +227,16 @@ export interface SimulationCheckpoint {
   bufferedSpawnActions: BufferedSpawnActions;
 }
 
+export interface SimulationDispatchResult {
+  accepted: boolean;
+  effects: SimulationEffect[];
+}
+
 export interface Simulation {
   dispatch(action: LogicalAction): SimulationEffect[];
+  dispatchWithResult(action: LogicalAction): SimulationDispatchResult;
+  currentTick(): Tick;
+  hasStatus(kind: StatusState["kind"]): boolean;
   tick(count?: number): SimulationEffect[];
   setPaused(paused: boolean): void;
   readSnapshot(): SimulationSnapshot;
@@ -475,18 +485,32 @@ class LocalSimulation implements Simulation {
   }
 
   dispatch(action: LogicalAction): SimulationEffect[] {
+    return this.dispatchWithResult(action).effects;
+  }
+
+  dispatchWithResult(action: LogicalAction): SimulationDispatchResult {
     const effects: SimulationEffect[] = [];
-    if (this.#paused || this.#player.topOut !== null) return effects;
+    if (this.#paused || this.#player.topOut !== null) {
+      return { accepted: false, effects };
+    }
     if (this.#resolution !== null) {
       this.#bufferSpawnAction(action);
-      return effects;
+      return {
+        accepted:
+          action === "move-left" ||
+          action === "move-right" ||
+          action === "rotate-cw" ||
+          action === "rotate-ccw" ||
+          action === "hold",
+        effects,
+      };
     }
     const active = this.#player.active;
-    if (active === null) return effects;
+    if (active === null) return { accepted: false, effects };
 
     if (action === "hold") {
       this.#hold(effects);
-      return effects;
+      return { accepted: effects.length > 0, effects };
     }
     if (action === "move-left" || action === "move-right") {
       const moved = tryMove(
@@ -500,7 +524,7 @@ class LocalSimulation implements Simulation {
         this.#player.active = moved;
         this.#resolveGroundedAcid(effects);
       }
-      return effects;
+      return { accepted: moved !== null, effects };
     }
     if (action === "rotate-cw" || action === "rotate-ccw") {
       const rotated = tryRotate(
@@ -509,7 +533,7 @@ class LocalSimulation implements Simulation {
         action === "rotate-cw" ? "cw" : "ccw",
       );
       if (rotated !== null) this.#player.active = rotated;
-      return effects;
+      return { accepted: rotated !== null, effects };
     }
     if (action === "soft-drop") {
       const moved = tryMove(this.#player.grid, active, 0, 1, "soft-drop");
@@ -523,7 +547,10 @@ class LocalSimulation implements Simulation {
       } else if (active.descriptor.source === "acid") {
         effects.push(...this.#resolveAcid());
       }
-      return effects;
+      return {
+        accepted: moved !== null || active.descriptor.source === "acid",
+        effects,
+      };
     }
 
     const dropped = hardDrop(this.#player.grid, active);
@@ -533,7 +560,7 @@ class LocalSimulation implements Simulation {
       this.#player.score += dropped.distance * RULES.scoring.hardDrop;
       effects.push(...this.#lockCurrent());
     }
-    return effects;
+    return { accepted: true, effects };
   }
 
   #resolveAcid(): SimulationEffect[] {
@@ -1024,6 +1051,14 @@ class LocalSimulation implements Simulation {
 
   setPaused(paused: boolean): void {
     this.#paused = paused;
+  }
+
+  currentTick(): Tick {
+    return this.#tick;
+  }
+
+  hasStatus(kind: StatusState["kind"]): boolean {
+    return this.#player.statuses.some((status) => status.kind === kind);
   }
 
   checkpoint(): SimulationCheckpoint {

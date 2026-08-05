@@ -26,6 +26,116 @@ interface MarkedCellRenderMetrics {
   };
 }
 
+interface CellPoolUploadMetrics {
+  readonly arrayBufferUploads: readonly {
+    readonly destinationByteOffset: number;
+    readonly sourceByteLength: number;
+    readonly sourceElementOffset: number | null;
+    readonly sourceElementCount: number | null;
+    readonly uploadedByteLength: number;
+  }[];
+}
+
+async function readCellPoolUploadMetrics(
+  page: Page,
+): Promise<CellPoolUploadMetrics> {
+  return page.evaluate(async () => {
+    const rendererUrl = "/src/render/renderer.ts";
+    const { ThreeRenderer } = await import(rendererUrl);
+    const canvas = document.createElement("canvas");
+    canvas.style.cssText = "width:400px;height:800px";
+    document.body.append(canvas);
+
+    const renderer = new ThreeRenderer(canvas, { initialQuality: "full" });
+    const frame = (
+      cells: readonly {
+        readonly column: number;
+        readonly row: number;
+        readonly kind: "I" | "T";
+        readonly role: "active" | "settled";
+      }[],
+    ) => ({
+      mode: "practice" as const,
+      left: {
+        playerId: "cell-pool-upload-test",
+        cells,
+        focused: true,
+        concealed: false,
+      },
+      right: null,
+    });
+    const activeCells = [0, 1, 2, 3].map((column) => ({
+      column,
+      row: 12,
+      kind: "I" as const,
+      role: "active" as const,
+    }));
+    const settledCells = [0, 1, 2, 3].map((column) => ({
+      column,
+      row: 13,
+      kind: "T" as const,
+      role: "settled" as const,
+    }));
+
+    // Prime two distinct historical pools before observing the next frame.
+    renderer.render(frame([...activeCells, ...settledCells]), 100);
+
+    const gl = canvas.getContext("webgl2");
+    if (gl === null) throw new Error("WebGL2 unavailable in browser test");
+    gl.finish();
+    const originalBufferSubData = gl.bufferSubData;
+    const calls: {
+      destinationByteOffset: number;
+      sourceByteLength: number;
+      sourceElementOffset: number | null;
+      sourceElementCount: number | null;
+      uploadedByteLength: number;
+      target: number;
+    }[] = [];
+    const instrumented = function (...args: unknown[]): void {
+      const target = args[0] as number;
+      const destinationByteOffset = args[1] as number;
+      const source = args[2] as ArrayBufferView & { readonly BYTES_PER_ELEMENT?: number };
+      const sourceElementOffset = typeof args[3] === "number" ? args[3] : null;
+      const sourceElementCount = typeof args[4] === "number" ? args[4] : null;
+      const bytesPerElement = source.BYTES_PER_ELEMENT ?? 1;
+      calls.push({
+        destinationByteOffset,
+        sourceByteLength: source.byteLength,
+        sourceElementOffset,
+        sourceElementCount,
+        uploadedByteLength: sourceElementCount === null
+          ? source.byteLength
+          : sourceElementCount * bytesPerElement,
+        target,
+      });
+      Reflect.apply(originalBufferSubData, gl, args);
+    };
+    Object.defineProperty(gl, "bufferSubData", {
+      configurable: true,
+      value: instrumented,
+    });
+
+    try {
+      renderer.render(frame(activeCells), 200);
+      gl.finish();
+    } finally {
+      Object.defineProperty(gl, "bufferSubData", {
+        configurable: true,
+        value: originalBufferSubData,
+      });
+      renderer.dispose();
+      canvas.remove();
+    }
+
+    return {
+      arrayBufferUploads: calls
+        .filter((call) => call.target === gl.ARRAY_BUFFER)
+        .map(({ target: _target, ...call }) => call),
+    };
+  });
+}
+
 async function readMarkedCellRenderMetrics(
   page: Page,
 ): Promise<MarkedCellRenderMetrics> {
@@ -554,6 +664,20 @@ test("simultaneous marked-cell pulses are independent of render order", async ({
   expect(await readMarkedCellOrderDifference(page)).toBeLessThan(0.0001);
 });
 
+test("renderer uploads only the live cell-pool matrix prefix", async ({ page }) => {
+  await openApp(page);
+
+  expect(await readCellPoolUploadMetrics(page)).toEqual({
+    arrayBufferUploads: [{
+      destinationByteOffset: 0,
+      sourceByteLength: 512 * 16 * Float32Array.BYTES_PER_ELEMENT,
+      sourceElementOffset: 0,
+      sourceElementCount: 4 * 16,
+      uploadedByteLength: 4 * 16 * Float32Array.BYTES_PER_ELEMENT,
+    }],
+  });
+});
+
 test("Practice accepts keyboard and compact touch-button actions", async ({ page }) => {
   await openApp(page);
 
@@ -564,20 +688,44 @@ test("Practice accepts keyboard and compact touch-button actions", async ({ page
 
   const board = page.getByRole("application", { name: "Your board" });
   const hold = page.locator('[data-side="left"] .hold-preview .piece-preview-slot');
+  const holdButton = page.getByRole("button", { name: "Hold piece" });
+  const previewShapes = () =>
+    page
+      .locator('[data-side="left"] .next-preview .piece-preview-slot')
+      .evaluateAll((slots) =>
+        slots.map((slot) => (slot as HTMLElement).dataset.displayShape ?? "empty"),
+      );
+  const expectOnePreviewAdvance = async (before: readonly string[]) => {
+    expect(before).toHaveLength(5);
+    await expect.poll(async () => (await previewShapes()).slice(0, 4)).toEqual(
+      before.slice(1),
+    );
+  };
   await expect(board).toBeVisible();
   await expect(page.getByRole("button", { name: "Pause practice" })).toBeVisible();
 
-  await page.keyboard.press("c");
+  const focusedControlBaseline = await numericText(localScore(page));
+  await holdButton.press("Space");
   await expect(hold.locator(".piece-preview-grid")).toBeVisible();
+  await expect.poll(() => numericText(localScore(page))).toBe(focusedControlBaseline);
 
+  await holdButton.evaluate((button) => (button as HTMLElement).blur());
   const keyboardBaseline = await numericText(localScore(page));
   await page.keyboard.press("Space");
   await expectScoreAbove(localScore(page), keyboardBaseline);
 
-  await page.getByRole("button", { name: "Hold piece" }).click();
+  await holdButton.click();
   const touchBaseline = await numericText(localScore(page));
+  const beforePointerDrop = await previewShapes();
   await page.getByRole("button", { name: "Hard drop" }).click();
   await expectScoreAbove(localScore(page), touchBaseline);
+  await expectOnePreviewAdvance(beforePointerDrop);
+
+  const keyboardButtonBaseline = await numericText(localScore(page));
+  const beforeKeyboardDrop = await previewShapes();
+  await page.getByRole("button", { name: "Hard drop" }).press("Enter");
+  await expectScoreAbove(localScore(page), keyboardButtonBaseline);
+  await expectOnePreviewAdvance(beforeKeyboardDrop);
 });
 
 test("the centered Ready panel shows both players and supports a clear undo", async ({

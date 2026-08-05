@@ -140,6 +140,10 @@ rules version 2 and must change together with the peer rules hash.
 - Networking is pumped on a dedicated wall-clock interval rather than from the
   render loop. Privacy-safe diagnostics retain at most three incidents and 100
   events in local storage and may be copied or cleared by the player.
+- If the wall-clock pump catches up across several regular snapshot intervals,
+  it publishes only the newest state. Forced terminal snapshots are never
+  coalesced. This prevents a brief main-thread stall from creating a burst of
+  obsolete full-state frames that prolongs the same stall.
 - Incoming realtime ticks are bounded to three seconds of catch-up work. A
   rolling checkpoint window accepts earlier terminal events without replaying
   from match start; events outside either bound finish neutrally as a desync.
@@ -168,6 +172,15 @@ rules version 2 and must change together with the peer rules hash.
 - The presentation timeline consumes deterministic simulation cues but never
   changes authoritative state. Reduced-motion/reduced-effects variants keep the
   same gameplay timing while removing shake, large travel, or repeated flashes.
+- Competitive and spectator state projection is capped at 30 FPS while their
+  input and 50 ms networking pump remain independent. Remote board models are
+  rebuilt only for a new snapshot sequence, unchanged HUD values do not rewrite
+  the DOM, and instanced WebGL buffers upload only live prefixes. These bounds
+  keep two embedded players responsive without changing the 60 Hz simulation.
+- Input-time status and tick queries do not materialize full render snapshots.
+  Rejected movement does not create a rollback checkpoint or audio node, touch
+  repeat timers are released whenever input is disabled, and a severe visible
+  frame stall drives adaptive quality down instead of looking like suspension.
 - Music uses four bundled 4-channel ProTracker modules. A match chooses one
   deterministically and rematches rotate the choice. The replay core renders
   short stereo PCM chunks into scheduled Web Audio buffer sources rather than

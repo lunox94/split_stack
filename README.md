@@ -74,6 +74,24 @@ Start both instances in the simulator UI, create a challenge in one, join it
 from the other, and ready both players. Use the simulator's Reset control to
 clear participant state and messages between independent test runs.
 
+Keep both players in the two embedded instances on the same simulator page.
+Opening an instance in an additional browser tab starts another Split Stack
+runtime for that participant; the runtime-session election deliberately leaves
+the duplicate as an observer instead of allowing two controllers for one seat.
+
+The simulator also forwards a diagnostic copy of every realtime frame to its
+frontend. A long, snapshot-heavy match can therefore stress the simulator page
+more than a Delta Chat client, even with the Messages panel closed. This is a
+useful overload test, but confirm performance-sensitive changes in a current
+Delta Chat client before treating simulator throughput as a production limit.
+
+To isolate that dashboard overhead, start `webxdc-dev` without `--open`, do not
+load (or first navigate away from) its dashboard, and open exactly one copy of
+each direct participant origin instead: `http://localhost:7001` and
+`http://localhost:7002` for the default port. This keeps realtime relay active
+without the dashboard's message telemetry. It is a useful diagnostic A/B test,
+not a replacement for the headed, same-page embedded-instance check above.
+
 Useful quality commands:
 
 ```sh

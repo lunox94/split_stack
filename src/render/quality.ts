@@ -38,13 +38,14 @@ export interface QualityControllerOptions {
 }
 
 const FRAME_BUDGET_MS = 1_000 / 60;
-const MISSED_BUDGET_WINDOW_MS = 5_000;
+const MISSED_BUDGET_WINDOW_MS = 1_500;
+const MAX_SAMPLED_FRAME_MS = 50;
 
 export class QualityController {
   readonly #onChange: ((profile: RenderQualityProfile) => void) | undefined;
   #quality: EffectQuality;
   #lastObservedAt: number | null = null;
-  #windowStartedAt: number | null = null;
+  #windowElapsedMs = 0;
   #windowFrameTime = 0;
   #windowFrames = 0;
   #lastRenderedAt: number | null = null;
@@ -69,30 +70,39 @@ export class QualityController {
     this.set(reduced ? "reduced" : "full");
   }
 
-  observeFrame(timestampMs: number): void {
-    if (this.#quality !== "full") {
+  noteSuspension(): void {
+    this.#resetMeasurement();
+  }
+
+  observeFrame(
+    timestampMs: number,
+    observedTargetFps: 60 | 30 = this.profile.targetFps,
+  ): void {
+    if (this.#quality === "reduced") {
       this.#lastObservedAt = timestampMs;
       return;
     }
     if (this.#lastObservedAt === null) {
       this.#lastObservedAt = timestampMs;
-      this.#windowStartedAt = timestampMs;
       return;
     }
 
-    const delta = Math.max(0, Math.min(250, timestampMs - this.#lastObservedAt));
+    const rawDelta = Math.max(0, timestampMs - this.#lastObservedAt);
     this.#lastObservedAt = timestampMs;
-    this.#windowStartedAt ??= timestampMs;
-    this.#windowFrameTime += delta;
+    this.#windowElapsedMs += rawDelta;
+    this.#windowFrameTime += Math.min(MAX_SAMPLED_FRAME_MS, rawDelta);
     this.#windowFrames += 1;
 
-    if (timestampMs - this.#windowStartedAt < MISSED_BUDGET_WINDOW_MS) return;
+    if (this.#windowElapsedMs < MISSED_BUDGET_WINDOW_MS) return;
     const average = this.#windowFrameTime / Math.max(1, this.#windowFrames);
-    if (average > FRAME_BUDGET_MS * 1.12) {
-      this.set("limited");
+    const observedFrameBudgetMs = observedTargetFps === 60
+      ? FRAME_BUDGET_MS
+      : 1_000 / observedTargetFps;
+    if (average > observedFrameBudgetMs * 1.12) {
+      this.set(this.#quality === "full" ? "limited" : "reduced");
       return;
     }
-    this.#windowStartedAt = timestampMs;
+    this.#windowElapsedMs = 0;
     this.#windowFrameTime = 0;
     this.#windowFrames = 0;
   }
@@ -111,7 +121,7 @@ export class QualityController {
 
   #resetMeasurement(): void {
     this.#lastObservedAt = null;
-    this.#windowStartedAt = null;
+    this.#windowElapsedMs = 0;
     this.#windowFrameTime = 0;
     this.#windowFrames = 0;
     this.#lastRenderedAt = null;
