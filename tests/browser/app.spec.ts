@@ -416,20 +416,30 @@ async function enforceSingleRealtimeListener(context: BrowserContext): Promise<v
   });
 }
 
-async function installMonotonicOffset(context: BrowserContext): Promise<void> {
+async function installControllableMonotonicClock(context: BrowserContext): Promise<void> {
   await context.addInitScript(() => {
     const realNow = performance.now.bind(performance);
     let offsetMs = 0;
+    let frozenNowMs: number | null = null;
     Object.defineProperty(performance, "now", {
       configurable: true,
-      value: () => realNow() + offsetMs,
+      value: () => frozenNowMs ?? realNow() + offsetMs,
     });
     (
       window as unknown as {
         __splitStackAdvanceMonotonic: (milliseconds: number) => void;
+        __splitStackFreezeMonotonic: () => void;
       }
     ).__splitStackAdvanceMonotonic = (milliseconds) => {
-      offsetMs += milliseconds;
+      if (frozenNowMs === null) offsetMs += milliseconds;
+      else frozenNowMs += milliseconds;
+    };
+    (
+      window as unknown as {
+        __splitStackFreezeMonotonic: () => void;
+      }
+    ).__splitStackFreezeMonotonic = () => {
+      frozenNowMs = realNow() + offsetMs;
     };
   });
 }
@@ -442,6 +452,16 @@ async function advanceMonotonic(page: Page, milliseconds: number): Promise<void>
       }
     ).__splitStackAdvanceMonotonic(amount);
   }, milliseconds);
+}
+
+async function freezeMonotonic(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    (
+      window as unknown as {
+        __splitStackFreezeMonotonic: () => void;
+      }
+    ).__splitStackFreezeMonotonic();
+  });
 }
 
 async function setVisibilityState(
@@ -624,7 +644,7 @@ test("replaces a silent competitive channel without registering a second listene
   test.setTimeout(45_000);
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
-  await installMonotonicOffset(context);
+  await installControllableMonotonicClock(context);
   await enforceSingleRealtimeListener(context);
 
   const { seatA, seatB } = await openVersusPair(context, page);
@@ -635,6 +655,8 @@ test("replaces a silent competitive channel without registering a second listene
   await Promise.all([advanceMonotonic(seatA, 4_000), advanceMonotonic(seatB, 4_000)]);
   await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
 
+  // Keep setup realistic, then make the short-lived outage states deterministic.
+  await freezeMonotonic(seatA);
   await seatB.close();
   await advanceMonotonic(seatA, RULES.network.missingPeerMs + 1);
   await expect(seatA.getByText(/connection unstable/i)).toBeVisible({ timeout: 5_000 });
