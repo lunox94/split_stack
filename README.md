@@ -47,7 +47,7 @@ Requirements:
   range)
 - npm
 
-Install exact dependencies and start the Webxdc development mock:
+Install exact dependencies and start the lightweight Vite development mock:
 
 ```sh
 npm ci
@@ -55,7 +55,24 @@ npm run dev
 ```
 
 The host-supplied `webxdc.js` is referenced by `index.html`; it is mocked only
-in development and deliberately excluded from the release archive.
+in development and deliberately excluded from the release archive. The Vite
+mock is useful for practice mode and quick UI checks, but its `Add Peer` flow
+uses browser tabs and storage events and is not reliable for testing realtime
+channel timing, tab visibility, or reconnect behavior.
+
+For two-player and other realtime testing, use the Webxdc project's recommended
+[`webxdc-dev`](https://github.com/webxdc/webxdc-dev) simulator. It gives each
+participant an isolated app instance and exposes the exchanged messages for
+inspection. Build the installable archive and launch it with:
+
+```sh
+npm run build
+npx -y @webxdc/webxdc-dev@0.21.0 run dist-xdc/split-stack.xdc
+```
+
+Start both instances in the simulator UI, create a challenge in one, join it
+from the other, and ready both players. Use the simulator's Reset control to
+clear participant state and messages between independent test runs.
 
 Useful quality commands:
 
