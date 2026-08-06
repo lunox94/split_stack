@@ -148,4 +148,28 @@ describe("HUD rendering", () => {
     expect(shell.left.statuses.textContent).toContain("Monomino Rush");
     expect(shell.left.statuses.textContent).toContain("3s");
   });
+
+  it("orders Monomino Rush with statuses by activation age before queuing visuals", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+    updateHud(
+      shell.left,
+      "Player A",
+      snapshot({
+        statuses: [
+          { kind: "blackout", remainingTicks: 700 },
+          { kind: "scramble", remainingTicks: 500 },
+          { kind: "ghost-jam", remainingTicks: 850 },
+          { kind: "barrier", remainingTicks: 1_190, capacity: 3 },
+        ],
+        replacementMode: { kind: "monomino-rush", remainingTicks: 180 },
+      }),
+      PREVIEW_OPTIONS,
+    );
+
+    expect(
+      [...shell.left.statuses.querySelectorAll<HTMLElement>(".timed-effect")]
+        .map((row) => row.dataset.effect),
+    ).toEqual(["monomino-rush", "blackout", "scramble", "ghost-jam"]);
+    expect(shell.left.statuses.dataset.queuedEffects).toBe("1");
+  });
 });

@@ -2,9 +2,9 @@ import { RULES } from "../config/rules";
 import { STRINGS, formatString, type StringKey } from "../app/strings";
 import type { PieceDescriptor, PowerKind, SpecialKind } from "../domain/types";
 import type { Preferences } from "../persistence/settings";
-import { createPowerIcon } from "../render/power-icons";
+import { POWER_ACCENT_COLORS, createPowerIcon } from "../render/power-icons";
 import { createSpecialIcon } from "../render/special-icons";
-import type { BoardViewport } from "../render/renderer";
+import type { BoardViewport, RendererLayout } from "../render/renderer";
 import {
   createMarkedCellSample,
   renderPiecePreviewSlot,
@@ -81,18 +81,41 @@ function createHud(document: Document, side: "left" | "right"): HudElements {
   const name = element(document, "span", "player-name", "—");
   const topInfo = element(document, "div", "hud-top-info");
   const stats = element(document, "div", "hud-stats");
-  const stat = (label: string, initial: string): HTMLElement => {
+  const stat = (label: string, shortLabel: string, initial: string): HTMLElement => {
     const item = element(document, "span", "hud-stat");
+    const accessibleLabel = element(
+      document,
+      "span",
+      "sr-only hud-stat-accessible-label",
+      label,
+    );
+    const fullLabel = element(
+      document,
+      "span",
+      "hud-stat-label hud-stat-label-full",
+      label,
+    );
+    fullLabel.setAttribute("aria-hidden", "true");
+    const compactLabel = element(
+      document,
+      "span",
+      "hud-stat-label-short",
+      shortLabel,
+    );
+    compactLabel.setAttribute("aria-hidden", "true");
+    const value = element(document, "span", "hud-stat-value", initial);
     item.append(
-      element(document, "span", "hud-stat-label", label),
-      element(document, "span", "hud-stat-value", initial),
+      accessibleLabel,
+      fullLabel,
+      compactLabel,
+      value,
     );
     stats.append(item);
-    return item.lastElementChild as HTMLElement;
+    return value;
   };
-  const score = stat(STRINGS["hud.score"], "0");
-  const level = stat(STRINGS["hud.level"], "1");
-  const lines = stat(STRINGS["hud.lines"], "0");
+  const score = stat(STRINGS["hud.score"], STRINGS["hud.scoreShort"], "0");
+  const level = stat(STRINGS["hud.level"], STRINGS["hud.levelShort"], "1");
+  const lines = stat(STRINGS["hud.lines"], STRINGS["hud.linesShort"], "0");
   topInfo.append(name, stats);
   const hold = element(
     document,
@@ -210,40 +233,33 @@ function createHud(document: Document, side: "left" | "right"): HudElements {
 export function positionHudToViewport(
   hud: HudElements,
   viewport: BoardViewport,
-  layoutHeight: number,
 ): void {
   const boardLeft = viewport.boardX - viewport.paneX;
-  const bottomSpace = Math.max(
-    0,
-    layoutHeight - (viewport.boardY + viewport.boardHeight),
-  );
-  const outerSpace = hud.pane.dataset.side === "left"
-    ? boardLeft
-    : viewport.paneWidth - (boardLeft + viewport.boardWidth);
   hud.root.style.left = `${boardLeft}px`;
   hud.root.style.top = `${viewport.boardY}px`;
   hud.root.style.width = `${viewport.boardWidth}px`;
   hud.root.style.height = `${viewport.boardHeight}px`;
-  hud.root.style.setProperty("--hud-outer-space", `${Math.max(0, outerSpace)}px`);
-  hud.pane.dataset.hudTop = viewport.boardY >= 92 ? "outside" : "inside";
-  hud.pane.dataset.statusPlacement = bottomSpace >= 44
-    ? "below"
-    : outerSpace >= 104
-      ? "outer"
-      : "inside";
+  hud.root.style.setProperty("--hud-top-height", `${viewport.hud.header.height}px`);
+  hud.root.style.setProperty(
+    "--hud-preview-scale",
+    String(Math.min(1, viewport.boardWidth / 116)),
+  );
+  hud.pane.dataset.hudCompact = String(viewport.hud.header.height <= 64);
+  hud.pane.dataset.hudLabels = viewport.boardWidth < 220 ? "short" : "full";
+  hud.pane.removeAttribute("data-hud-top");
+  hud.pane.removeAttribute("data-status-placement");
 }
 
 export function positionGameplayTip(
   shell: AppShell,
-  viewport: BoardViewport,
-  layoutHeight: number,
+  layout: RendererLayout,
 ): void {
-  const topSpace = Math.max(0, viewport.boardY);
-  const bottomSpace = Math.max(
-    0,
-    layoutHeight - (viewport.boardY + viewport.boardHeight),
-  );
-  const outerSpace = Math.max(0, viewport.boardX);
+  const viewport = layout.left;
+  const arenaLeft = shell.arena.offsetLeft;
+  const arenaTop = shell.arena.offsetTop;
+  const topSpace = Math.max(0, layout.frame.y);
+  const bottomSpace = Math.max(0, layout.height - (layout.frame.y + layout.frame.height));
+  const outerSpace = Math.max(0, layout.frame.x);
   const placement = topSpace >= 128
     ? "above"
     : bottomSpace >= 104
@@ -252,14 +268,79 @@ export function positionGameplayTip(
         ? "outer"
         : "inside";
   shell.match.dataset.tipPlacement = placement;
-  shell.match.style.setProperty("--tip-board-left", `${viewport.boardX}px`);
-  shell.match.style.setProperty("--tip-board-top", `${viewport.boardY}px`);
+  shell.match.style.setProperty(
+    "--tip-frame-left",
+    `${arenaLeft + layout.frame.x}px`,
+  );
+  shell.match.style.setProperty(
+    "--tip-frame-top",
+    `${arenaTop + layout.frame.y}px`,
+  );
+  shell.match.style.setProperty(
+    "--tip-frame-bottom",
+    `${arenaTop + layout.frame.y + layout.frame.height}px`,
+  );
+  shell.match.style.setProperty(
+    "--tip-board-left",
+    `${arenaLeft + viewport.boardX}px`,
+  );
+  shell.match.style.setProperty(
+    "--tip-board-top",
+    `${arenaTop + viewport.boardY}px`,
+  );
   shell.match.style.setProperty("--tip-board-width", `${viewport.boardWidth}px`);
   shell.match.style.setProperty(
     "--tip-board-bottom",
-    `${viewport.boardY + viewport.boardHeight}px`,
+    `${arenaTop + viewport.boardY + viewport.boardHeight}px`,
   );
-  shell.match.style.setProperty("--tip-outer-space", `${outerSpace}px`);
+  shell.match.style.setProperty(
+    "--tip-outer-space",
+    `${arenaLeft + outerSpace}px`,
+  );
+}
+
+export function positionMatchMenuButton(
+  shell: AppShell,
+  layout: RendererLayout,
+): void {
+  const arenaLeft = shell.arena.offsetLeft;
+  const arenaTop = shell.arena.offsetTop;
+  const buttonRadius = 22;
+  const buttonGap = 8;
+  const safeGutter = 8;
+  const top = arenaTop + layout.frame.y +
+    (layout.topHudHeight - buttonRadius * 2) / 2;
+  const nextPreviewWidth = layout.compactTopHud ? 78 : 92;
+  const headerPreviewSpace =
+    layout.left.boardWidth / 2 - buttonRadius - 4;
+  const fitsHeader = headerPreviewSpace >= nextPreviewWidth;
+  const fitsOuter = layout.frame.x >=
+    buttonRadius * 2 + buttonGap + safeGutter;
+  let centerX: number;
+  let placement: "corridor" | "header" | "outer";
+
+  if (layout.centerCorridor !== null) {
+    centerX = arenaLeft + layout.centerCorridor.x + layout.centerCorridor.width / 2;
+    placement = "corridor";
+  } else if (!fitsHeader && fitsOuter) {
+    centerX = arenaLeft + layout.frame.x - buttonGap - buttonRadius;
+    placement = "outer";
+  } else {
+    centerX = arenaLeft + layout.left.hud.header.x + layout.left.hud.header.width / 2;
+    placement = "header";
+    if (!fitsHeader) {
+      const currentScale = Math.min(1, layout.left.boardWidth / 116);
+      const fittingScale = Math.max(0, headerPreviewSpace / nextPreviewWidth);
+      shell.left.root.style.setProperty(
+        "--hud-preview-scale",
+        String(Math.min(currentScale, fittingScale)),
+      );
+    }
+  }
+
+  shell.matchActions.style.left = `${centerX}px`;
+  shell.matchActions.style.top = `${top}px`;
+  shell.match.dataset.menuPlacement = placement;
 }
 
 export interface SettingsInputs {
@@ -322,6 +403,7 @@ export interface AppShell {
   cancelReadyButton: HTMLButtonElement;
   localReadyStatus: HTMLElement;
   opponentReadyStatus: HTMLElement;
+  matchActions: HTMLElement;
   matchMenuButton: HTMLButtonElement;
   matchMenu: HTMLElement;
   matchMenuMessage: HTMLElement;
@@ -711,6 +793,7 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     cancelReadyButton,
     localReadyStatus,
     opponentReadyStatus,
+    matchActions,
     matchMenuButton,
     matchMenu,
     matchMenuMessage,
@@ -1161,6 +1244,10 @@ export function setHudPower(
   deckCursor?: number,
 ): void {
   const charge = Math.max(0, Math.floor(value));
+  const accent = POWER_ACCENT_COLORS[power];
+  if (hud.upcomingPower.style.getPropertyValue("--power-accent") !== accent) {
+    hud.upcomingPower.style.setProperty("--power-accent", accent);
+  }
   if (hud.upcomingPower.dataset.power !== power) {
     hud.upcomingPower.dataset.power = power;
     const icon = createPowerIcon(hud.upcomingPower.ownerDocument, power, label);
@@ -1172,6 +1259,14 @@ export function setHudPower(
     "aria-label",
     `${STRINGS["hud.upcomingPower"]}: ${label}`,
   );
+  const chargeState = charge >= RULES.power.threshold
+    ? "ready"
+    : charge === RULES.power.threshold - 1
+      ? "near"
+      : "charging";
+  if (hud.upcomingPower.dataset.chargeState !== chargeState) {
+    hud.upcomingPower.dataset.chargeState = chargeState;
+  }
   hud.meterSegments.forEach((segment, index) => {
     const filled = index < Math.min(charge, RULES.power.threshold);
     if (segment.classList.contains("is-filled") !== filled) {
@@ -1229,7 +1324,10 @@ export function renderTimedEffects(
   effects: readonly TimedEffectHudItem[],
 ): void {
   const document = hud.statuses.ownerDocument;
-  const visible = effects.slice(0, 2);
+  const visible = effects.slice(0, 4);
+  const queued = effects.slice(visible.length);
+  hud.statuses.dataset.effectLayout = String(visible.length);
+  hud.statuses.dataset.queuedEffects = String(queued.length);
   const existingRows = new Map(
     [...hud.statuses.querySelectorAll<HTMLElement>(".timed-effect")]
       .map((row) => [row.dataset.effect, row] as const),
@@ -1243,29 +1341,37 @@ export function renderTimedEffects(
     if (row.style.getPropertyValue("--effect-accent") !== effect.accent) {
       row.style.setProperty("--effect-accent", effect.accent);
     }
-    let name = row.querySelector<HTMLElement>(".timed-effect-name");
-    let progress = row.querySelector<HTMLElement>(".timed-effect-progress");
-    let fill = row.querySelector<HTMLElement>(".timed-effect-progress-fill");
-    let time = row.querySelector<HTMLElement>(".timed-effect-time");
-    if (name === null || progress === null || fill === null || time === null) {
-      name = element(document, "span", "timed-effect-name");
-      progress = element(document, "span", "timed-effect-progress");
-      progress.setAttribute("role", "progressbar");
-      fill = element(document, "span", "timed-effect-progress-fill");
-      progress.append(fill);
-      time = element(document, "span", "timed-effect-time");
-      row.replaceChildren(name, progress, time);
+    const progress = row.querySelector<HTMLElement>(".timed-effect-progress") ??
+      element(document, "div", "timed-effect-progress");
+    const fill = row.querySelector<HTMLElement>(".timed-effect-progress-fill") ??
+      element(document, "span", "timed-effect-progress-fill");
+    const name = row.querySelector<HTMLElement>(".timed-effect-name") ??
+      element(document, "span", "timed-effect-name");
+    const time = row.querySelector<HTMLElement>(".timed-effect-time") ??
+      element(document, "span", "timed-effect-time");
+    progress.setAttribute("role", "progressbar");
+    if (
+      progress.children.length !== 3 ||
+      progress.children[0] !== fill ||
+      progress.children[1] !== name ||
+      progress.children[2] !== time
+    ) {
+      progress.replaceChildren(fill, name, time);
+    }
+    if (row.children.length !== 1 || row.firstElementChild !== progress) {
+      row.replaceChildren(progress);
     }
     const nameText = effect.detail === undefined
       ? effect.label
       : `${effect.label} ${effect.detail}`;
     if (name.textContent !== nameText) name.textContent = nameText;
+    const remainingText = `${seconds} second${seconds === 1 ? "" : "s"} remaining`;
     const attributes: ReadonlyArray<readonly [string, string]> = [
-      ["aria-label", `${effect.label} remaining`],
+      ["aria-label", `${nameText}, ${remainingText}`],
       ["aria-valuemin", "0"],
       ["aria-valuemax", String(total)],
       ["aria-valuenow", String(Math.min(remaining, total))],
-      ["aria-valuetext", `${seconds} seconds remaining`],
+      ["aria-valuetext", remainingText],
     ];
     for (const [attribute, value] of attributes) {
       if (progress.getAttribute(attribute) !== value) {
@@ -1280,21 +1386,6 @@ export function renderTimedEffects(
     if (time.textContent !== timeText) time.textContent = timeText;
     return row;
   });
-  if (effects.length > visible.length) {
-    const hidden = effects.slice(visible.length);
-    const overflow = hud.statuses.querySelector<HTMLElement>(
-      ".timed-effect-overflow",
-    ) ?? element(document, "span", "timed-effect-overflow");
-    const overflowText = `+${hidden.length} active`;
-    const overflowLabel = `${hidden.length} more active: ${hidden
-      .map((effect) => effect.label)
-      .join(", ")}`;
-    if (overflow.textContent !== overflowText) overflow.textContent = overflowText;
-    if (overflow.getAttribute("aria-label") !== overflowLabel) {
-      overflow.setAttribute("aria-label", overflowLabel);
-    }
-    rows.push(overflow);
-  }
   const current = [...hud.statuses.children];
   if (
     current.length !== rows.length ||

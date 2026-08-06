@@ -68,6 +68,7 @@ import {
   hideGameplayPowerTip,
   positionGameplayTip,
   positionHudToViewport,
+  positionMatchMenuButton,
   renderTimedEffects,
   setElementHidden,
   setHudGarbage,
@@ -275,6 +276,11 @@ function timedEffectHudItems(
       accent: POWER_ACCENT_COLORS["monomino-rush"],
     });
   }
+  effects.sort((left, right) => {
+    const leftAge = left.totalTicks - left.remainingTicks;
+    const rightAge = right.totalTicks - right.remainingTicks;
+    return rightAge - leftAge;
+  });
   return effects;
 }
 
@@ -640,8 +646,10 @@ export async function bootstrap(): Promise<void> {
     shell.container.dataset.reducedEffects = String(preferences.reducedEffects);
     shell.container.dataset.palette = preferences.colorPalette;
     shell.container.dataset.screenShake = String(preferences.screenShake);
-    shell.touchButtons.hidden =
-      mode === "lobby" || mode === "results" || preferences.touchControls !== "buttons";
+    const touchButtonsVisible =
+      mode !== "lobby" && mode !== "results" && preferences.touchControls === "buttons";
+    shell.touchButtons.hidden = !touchButtonsVisible;
+    shell.container.dataset.touchButtonsVisible = String(touchButtonsVisible);
     audio.setEffectsMuted(!preferences.effectsEnabled);
     audio.setEffectsVolume(preferences.effectsVolume);
     audio.setMusicMuted(!preferences.musicEnabled);
@@ -660,12 +668,13 @@ export async function bootstrap(): Promise<void> {
     latestLayout = layout;
     applyViewport(shell.left.boardTarget, layout.left);
     applyViewport(shell.left.blackout, layout.left);
-    positionHudToViewport(shell.left, layout.left, layout.height);
-    positionGameplayTip(shell, layout.left, layout.height);
+    positionHudToViewport(shell.left, layout.left);
+    positionGameplayTip(shell, layout);
+    positionMatchMenuButton(shell, layout);
     if (layout.right !== null) {
       applyViewport(shell.right.boardTarget, layout.right);
       applyViewport(shell.right.blackout, layout.right);
-      positionHudToViewport(shell.right, layout.right, layout.height);
+      positionHudToViewport(shell.right, layout.right);
     }
   };
 
@@ -1165,7 +1174,10 @@ export async function bootstrap(): Promise<void> {
       match.role === "spectator" ? "spectator" : "competitive",
       false,
     );
-    shell.touchButtons.hidden = match.role === "spectator" || preferences.touchControls !== "buttons";
+    const touchButtonsVisible =
+      match.role !== "spectator" && preferences.touchControls === "buttons";
+    shell.touchButtons.hidden = !touchButtonsVisible;
+    shell.container.dataset.touchButtonsVisible = String(touchButtonsVisible);
     shell.readinessPanel.hidden = true;
     shell.left.boardTarget.setAttribute("aria-label", match.role === "spectator" ? STRINGS["match.seatABoard"] : STRINGS["match.localBoard"]);
     shell.right.boardTarget.setAttribute("aria-label", match.role === "spectator" ? STRINGS["match.seatBBoard"] : STRINGS["match.opponentBoard"]);

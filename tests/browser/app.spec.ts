@@ -423,7 +423,9 @@ async function seedCompletedMatch(page: Page): Promise<void> {
 }
 
 function localScore(page: Page): Locator {
-  return page.locator('[data-side="left"] [aria-label="Score"]');
+  return page
+    .locator('[data-side="left"] .hud-stats .hud-stat-value')
+    .first();
 }
 
 async function numericText(locator: Locator): Promise<number> {
@@ -461,6 +463,195 @@ async function openVersusPair(
     timeout: 15_000,
   });
   return { seatA: seatAPage, seatB: seatBPage };
+}
+
+interface ElementRect {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+function rectRight(rect: ElementRect): number {
+  return rect.x + rect.width;
+}
+
+function rectBottom(rect: ElementRect): number {
+  return rect.y + rect.height;
+}
+
+function rectCenterX(rect: ElementRect): number {
+  return rect.x + rect.width / 2;
+}
+
+function rectanglesOverlap(left: ElementRect, right: ElementRect): boolean {
+  return (
+    left.x < rectRight(right) &&
+    rectRight(left) > right.x &&
+    left.y < rectBottom(right) &&
+    rectBottom(left) > right.y
+  );
+}
+
+function expectNear(actual: number, expected: number, label: string, tolerance = 1.25): void {
+  expect(
+    Math.abs(actual - expected),
+    `${label}: expected ${actual} to be within ${tolerance}px of ${expected}`,
+  ).toBeLessThanOrEqual(tolerance);
+}
+
+async function elementRect(locator: Locator): Promise<ElementRect> {
+  await expect(locator).toBeAttached();
+  return locator.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    return {
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+    };
+  });
+}
+
+async function expectPlayerFrameGeometry(
+  page: Page,
+  side: "left" | "right",
+  board: ElementRect,
+  rail: ElementRect,
+  availableBottom: number,
+): Promise<void> {
+  const pane = page.locator(`.player-pane[data-side="${side}"]`);
+  const header = await elementRect(pane.locator(".hud-top-info"));
+  const name = await elementRect(pane.locator(".player-name"));
+  const stats = await elementRect(pane.locator(".hud-stats"));
+  const hold = await elementRect(pane.locator(".hold-preview"));
+  const next = await elementRect(pane.locator(".next-preview"));
+  const footer = await elementRect(pane.locator(".status-row"));
+  const garbage = await elementRect(pane.locator(".incoming-garbage"));
+  const icon = await elementRect(pane.locator(".upcoming-power-icon"));
+  const meter = await elementRect(pane.locator(".power-meter"));
+  const menu = await elementRect(page.getByRole("button", { name: "Match menu" }));
+  const headerHeight = board.width < 160 ? 64 : 72;
+  const completeFrameHeight = headerHeight + 4 + board.height + 4 + 40;
+  const expectedFrameTop = (availableBottom - completeFrameHeight) / 2;
+
+  expectNear(board.y, expectedFrameTop + headerHeight + 4, `${side} board top`);
+  expect(expectedFrameTop).toBeGreaterThanOrEqual(3.5);
+  expectNear(footer.x, board.x, `${side} footer left`);
+  expectNear(footer.y, rectBottom(board) + 4, `${side} footer top`);
+  expectNear(footer.width, board.width, `${side} footer width`);
+  expectNear(footer.height, 40, `${side} footer height`);
+  expect(availableBottom - rectBottom(footer)).toBeGreaterThanOrEqual(3.5);
+
+  for (const [label, content] of [
+    ["player name", name],
+    ["stats", stats],
+    ["Hold", hold],
+    ["Next", next],
+  ] as const) {
+    if (content.width === 0 || content.height === 0) continue;
+    expect(content.y, `${side} ${label} starts inside the header band`).toBeGreaterThanOrEqual(
+      expectedFrameTop - 0.5,
+    );
+    expect(
+      rectBottom(content),
+      `${side} ${label} remains above the board`,
+    ).toBeLessThanOrEqual(board.y - 3.5);
+    expect(content.x, `${side} ${label} starts at or inside the board edge`)
+      .toBeGreaterThanOrEqual(board.x - 0.5);
+    expect(rectRight(content), `${side} ${label} ends at or inside the board edge`)
+      .toBeLessThanOrEqual(rectRight(board) + 0.5);
+    expect(rectanglesOverlap(menu, content), `menu clears ${side} ${label}`).toBe(false);
+  }
+  expect(rectanglesOverlap(stats, hold)).toBe(false);
+  expect(rectanglesOverlap(stats, next)).toBe(false);
+  expect(rectanglesOverlap(hold, next)).toBe(false);
+  expectNear(header.x, board.x, `${side} header left`);
+  expectNear(header.width, board.width, `${side} header width`);
+
+  expectNear(rail.width, 24, `${side} rail width`);
+  expectNear(rail.y, board.y, `${side} rail top`);
+  expectNear(rail.height, board.height, `${side} rail height`);
+  expectNear(icon.width, 20, `${side} icon width`);
+  expectNear(icon.height, 20, `${side} icon height`);
+  expectNear(rectCenterX(icon), rectCenterX(rail), `${side} icon centering`);
+  expectNear(icon.y, rail.y + 2, `${side} rail top padding`);
+  expect(rectBottom(icon)).toBeLessThanOrEqual(rectBottom(rail) + 0.5);
+  expectNear(meter.width, 20, `${side} visible meter width`);
+  expectNear(rectCenterX(meter), rectCenterX(rail), `${side} meter centering`);
+  expectNear(meter.y, rectBottom(icon) + 3, `${side} icon-to-meter gap`);
+  expectNear(rectBottom(meter), rectBottom(rail) - 2, `${side} rail bottom padding`);
+
+  expectNear(rectCenterX(garbage), rectCenterX(rail), `${side} garbage column alignment`);
+  expect(garbage.y).toBeGreaterThanOrEqual(footer.y - 0.5);
+  expect(rectBottom(garbage)).toBeLessThanOrEqual(rectBottom(footer) + 0.5);
+  expect(rectanglesOverlap(footer, garbage)).toBe(false);
+  expect(rectanglesOverlap(menu, board)).toBe(false);
+  expect(rectanglesOverlap(menu, footer)).toBe(false);
+}
+
+async function expectVersusFrameGeometry(
+  page: Page,
+  viewport: { readonly width: number; readonly height: number },
+  availableBottom = viewport.height,
+): Promise<void> {
+  const leftBoard = await elementRect(
+    page.getByRole("application", { name: "Your board" }),
+  );
+  const rightBoard = await elementRect(
+    page.getByRole("application", { name: "Opponent board" }),
+  );
+  const leftRail = await elementRect(
+    page.locator('.player-pane[data-side="left"] .power-rail'),
+  );
+  const rightRail = await elementRect(
+    page.locator('.player-pane[data-side="right"] .power-rail'),
+  );
+
+  expectNear(leftBoard.width, rightBoard.width, "equal board widths");
+  expectNear(leftBoard.height, rightBoard.height, "equal board heights");
+  expectNear(leftBoard.y, rightBoard.y, "aligned board tops");
+  expectNear(rightBoard.x - rectRight(leftBoard), 58, "fixed center corridor");
+  expectNear(leftRail.x, rectRight(leftBoard) + 4, "local board-to-rail gap");
+  expectNear(rightRail.x, rectRight(leftRail) + 2, "inter-rail gap");
+  expectNear(rightBoard.x, rectRight(rightRail) + 4, "opponent rail-to-board gap");
+  expectNear(
+    (leftBoard.x + rectRight(rightBoard)) / 2,
+    viewport.width / 2,
+    "packed PvP frame center",
+  );
+  expect(leftBoard.x).toBeGreaterThanOrEqual(7.5);
+  expect(rectRight(rightBoard)).toBeLessThanOrEqual(viewport.width - 7.5);
+
+  const menu = await elementRect(page.getByRole("button", { name: "Match menu" }));
+  expectNear(rectCenterX(menu), viewport.width / 2, "PvP menu corridor centering");
+  expect(menu.x).toBeGreaterThanOrEqual(rectRight(leftBoard) - 0.5);
+  expect(rectRight(menu)).toBeLessThanOrEqual(rightBoard.x + 0.5);
+  expect(rectBottom(menu)).toBeLessThanOrEqual(leftBoard.y - 3.5);
+
+  await expectPlayerFrameGeometry(page, "left", leftBoard, leftRail, availableBottom);
+  await expectPlayerFrameGeometry(page, "right", rightBoard, rightRail, availableBottom);
+}
+
+async function expectPracticeFrameGeometry(
+  page: Page,
+  viewport: { readonly width: number; readonly height: number },
+  availableBottom = viewport.height,
+): Promise<void> {
+  const board = await elementRect(page.getByRole("application", { name: "Your board" }));
+  const rail = await elementRect(
+    page.locator('.player-pane[data-side="left"] .power-rail'),
+  );
+
+  expectNear(rail.x, rectRight(board) + 4, "Practice board-to-rail gap");
+  expectNear(
+    (board.x + rectRight(rail)) / 2,
+    viewport.width / 2,
+    "centered Practice board-and-rail unit",
+  );
+  expect(board.x).toBeGreaterThanOrEqual(7.5);
+  expect(rectRight(rail)).toBeLessThanOrEqual(viewport.width - 7.5);
+  await expectPlayerFrameGeometry(page, "left", board, rail, availableBottom);
 }
 
 async function enforceSingleRealtimeListener(context: BrowserContext): Promise<void> {
@@ -836,37 +1027,68 @@ test("Practice accepts keyboard and compact touch-button actions", async ({ page
   await expectOnePreviewAdvance(beforeKeyboardDrop);
 });
 
-test("Practice HUD hugs the board with a full-height vertical power rail", async ({ page }) => {
+test("wide Practice gameplay frame reserves its header, footer, and external rail", async ({
+  page,
+}) => {
+  const viewport = { width: 1_280, height: 720 };
+  await page.setViewportSize(viewport);
   await openApp(page);
   await page.getByRole("button", { name: "Practice", exact: true }).click();
 
-  const board = page.getByRole("application", { name: "Your board" });
   const hud = page.locator('[data-side="left"] .player-hud');
-  const meter = page.locator('[data-side="left"] .power-meter');
-  await expect(board).toBeVisible();
+  await expect(page.getByRole("application", { name: "Your board" })).toBeVisible();
+  await expectPracticeFrameGeometry(page, viewport);
 
-  const [boardBox, hudBox, meterBox] = await Promise.all([
-    board.boundingBox(),
-    hud.boundingBox(),
-    meter.boundingBox(),
-  ]);
-  expect(boardBox).not.toBeNull();
-  expect(hudBox).not.toBeNull();
-  expect(meterBox).not.toBeNull();
-  expect(hudBox!.x).toBeCloseTo(boardBox!.x, 0);
-  expect(hudBox!.width).toBeCloseTo(boardBox!.width, 0);
-  expect(meterBox!.x - (boardBox!.x + boardBox!.width)).toBeCloseTo(4, 0);
-  expect(meterBox!.width).toBeCloseTo(12, 0);
-  expect(meterBox!.height).toBeCloseTo(boardBox!.height, 0);
-  await expect(hud.getByText("Score", { exact: true })).toBeVisible();
-  await expect(hud.getByText("Level", { exact: true })).toBeVisible();
-  await expect(hud.getByText("Lines", { exact: true })).toBeVisible();
+  await expect(hud.locator(".hud-stat-label-full", { hasText: "Score" })).toBeVisible();
+  await expect(hud.locator(".hud-stat-label-full", { hasText: "Level" })).toBeVisible();
+  await expect(hud.locator(".hud-stat-label-full", { hasText: "Lines" })).toBeVisible();
   await expect(hud.locator(".power-meter-segment")).toHaveCount(7);
   await expect(hud.locator(".hold-preview")).toHaveCSS("border-top-style", "none");
   await expect(hud.locator(".incoming-garbage svg")).toHaveCSS(
     "color",
     "rgb(127, 137, 154)",
   );
+});
+
+test("constrained Practice keeps its menu clear of the scaled previews", async ({
+  page,
+}) => {
+  const viewport = { width: 320, height: 520 };
+  await page.setViewportSize(viewport);
+  await openApp(page);
+  await page.getByRole("button", { name: "Practice", exact: true }).click();
+
+  await expectPracticeFrameGeometry(page, viewport);
+  await expect(page.locator('[data-side="left"] .player-name')).toBeHidden();
+  await expect(page.locator('[data-side="left"] .hud-stat-label-short').first())
+    .toBeVisible();
+});
+
+test("wide PvP gameplay frame stays packed in a fixed 58px center corridor", async ({
+  context,
+  page,
+}) => {
+  const viewport = { width: 1_280, height: 720 };
+  await page.setViewportSize(viewport);
+  const { seatA, seatB } = await openVersusPair(context, page);
+
+  await expectVersusFrameGeometry(seatA, viewport);
+
+  const dividerVisible = await seatA.locator(".arena").evaluate((arena) => {
+    const style = getComputedStyle(arena, "::after");
+    const content = style.content.trim().toLowerCase();
+    return (
+      style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      Number.parseFloat(style.opacity || "1") > 0 &&
+      Number.parseFloat(style.width || "0") > 0 &&
+      content !== "none" &&
+      content !== "normal"
+    );
+  });
+  expect(dividerVisible, "the centered frame has no decorative divider").toBe(false);
+
+  await seatB.close();
 });
 
 test("the centered Ready panel shows both players and supports a clear undo", async ({
@@ -1198,92 +1420,75 @@ test("keeps competitive recovery paused when WebGL restores in a hidden document
   await seatB.close();
 });
 
-test("versus boards stay visible, side by side, and equal at 360 by 640", async ({
+for (const viewport of [
+  { width: 360, height: 640 },
+  { width: 640, height: 360 },
+] as const) {
+  test(`PvP gameplay frame stays equal and non-overlapping at ${viewport.width}x${viewport.height}`, async ({
+    context,
+    page,
+  }) => {
+    await page.setViewportSize(viewport);
+    const { seatA, seatB } = await openVersusPair(context, page);
+
+    await expectVersusFrameGeometry(seatA, viewport);
+    for (const side of ["left", "right"] as const) {
+      const hud = seatA.locator(`.player-pane[data-side="${side}"]`);
+      await expect(hud.locator(".player-name")).toBeHidden();
+      await expect(hud.locator(".hud-stat-label-short")).toHaveCount(3);
+      await expect(hud.locator(".hud-stat-label-short").first()).toBeVisible();
+      await expect(hud.locator(".hud-stat-label-full").first()).toBeHidden();
+    }
+
+    await seatB.close();
+  });
+}
+
+test("landscape PvP gameplay frame stays above the touch-button tray", async ({
   context,
   page,
 }) => {
-  await page.setViewportSize({ width: 360, height: 640 });
+  const viewport = { width: 640, height: 360 };
+  await page.setViewportSize(viewport);
+  await openApp(page);
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByLabel("Touch controls").selectOption("buttons");
+  await page.getByRole("button", { name: "Back" }).click();
   const { seatA, seatB } = await openVersusPair(context, page);
 
-  const leftPane = seatA.locator('.player-pane[data-side="left"]');
-  const rightPane = seatA.locator('.player-pane[data-side="right"]');
-  const leftBoard = seatA.getByRole("application", { name: "Your board" });
-  const rightBoard = seatA.getByRole("application", { name: "Opponent board" });
-
-  await expect
-    .poll(async () => {
-      const [left, right] = await Promise.all([leftBoard.boundingBox(), rightBoard.boundingBox()]);
-      return left !== null && right !== null && left.width > 0 && right.width > 0;
-    })
-    .toBe(true);
-
-  const [leftPaneBox, rightPaneBox, leftBoardBox, rightBoardBox] = await Promise.all([
-    leftPane.boundingBox(),
-    rightPane.boundingBox(),
-    leftBoard.boundingBox(),
-    rightBoard.boundingBox(),
-  ]);
-  expect(leftPaneBox).not.toBeNull();
-  expect(rightPaneBox).not.toBeNull();
-  expect(leftBoardBox).not.toBeNull();
-  expect(rightBoardBox).not.toBeNull();
-
-  expect(leftPaneBox!.width).toBeCloseTo(180, 0);
-  expect(rightPaneBox!.width).toBeCloseTo(180, 0);
-  expect(rightPaneBox!.x).toBeCloseTo(leftPaneBox!.x + leftPaneBox!.width, 0);
-  expect(rightPaneBox!.y).toBeCloseTo(leftPaneBox!.y, 0);
-  expect(leftBoardBox!.width).toBeCloseTo(rightBoardBox!.width, 0);
-  expect(leftBoardBox!.height).toBeCloseTo(rightBoardBox!.height, 0);
-  expect(leftBoardBox!.x + leftBoardBox!.width).toBeLessThanOrEqual(180.5);
-  expect(rightBoardBox!.x).toBeGreaterThanOrEqual(179.5);
-  expect(leftBoardBox!.y).toBeGreaterThanOrEqual(0);
-  expect(rightBoardBox!.y + rightBoardBox!.height).toBeLessThanOrEqual(640.5);
+  const tray = seatA.locator(".touch-buttons");
+  await expect(tray).toBeVisible();
+  await expect(seatA.locator(".split-stack-app"))
+    .toHaveAttribute("data-touch-buttons-visible", "true");
+  const trayRect = await elementRect(tray);
+  await expectVersusFrameGeometry(seatA, viewport, trayRect.y);
 
   await seatB.close();
 });
 
-test("versus boards remain equal and side by side in landscape", async ({ context, page }) => {
-  await page.setViewportSize({ width: 640, height: 360 });
-  const { seatA, seatB } = await openVersusPair(context, page);
-  const left = seatA.getByRole("application", { name: "Your board" });
-  const right = seatA.getByRole("application", { name: "Opponent board" });
+test("landscape Practice gameplay frame and footer stay above the touch-button tray", async ({
+  page,
+}) => {
+  const viewport = { width: 640, height: 360 };
+  await page.setViewportSize(viewport);
+  await openApp(page);
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByLabel("Touch controls").selectOption("buttons");
+  await page.getByRole("button", { name: "Back" }).click();
+  await page.getByRole("button", { name: "Practice", exact: true }).click();
 
-  const [leftBox, rightBox] = await Promise.all([left.boundingBox(), right.boundingBox()]);
-  expect(leftBox).not.toBeNull();
-  expect(rightBox).not.toBeNull();
-  expect(leftBox!.width).toBeCloseTo(rightBox!.width, 0);
-  expect(leftBox!.height).toBeCloseTo(rightBox!.height, 0);
-  expect(rightBox!.x).toBeGreaterThan(leftBox!.x + leftBox!.width - 1);
-  expect(rightBox!.y).toBeCloseTo(leftBox!.y, 0);
-  expect(rightBox!.x + rightBox!.width).toBeLessThanOrEqual(640.5);
-  expect(rightBox!.y + rightBox!.height).toBeLessThanOrEqual(360.5);
+  const tray = page.locator(".touch-buttons");
+  await expect(tray).toBeVisible();
+  const trayRect = await elementRect(tray);
+  await expectPracticeFrameGeometry(page, viewport, trayRect.y);
 
-  const leftPane = seatA.locator('.player-pane[data-side="left"]');
-  const rightPane = seatA.locator('.player-pane[data-side="right"]');
-  await expect(leftPane).toHaveAttribute("data-hud-top", "inside");
-  await expect(rightPane).toHaveAttribute("data-hud-top", "inside");
-  const [leftPower, leftGarbage, rightPower, rightGarbage] = await Promise.all([
-    leftPane.locator(".upcoming-power-icon").boundingBox(),
-    leftPane.locator(".incoming-garbage").boundingBox(),
-    rightPane.locator(".upcoming-power-icon").boundingBox(),
-    rightPane.locator(".incoming-garbage").boundingBox(),
-  ]);
-  for (const indicator of [leftPower, leftGarbage]) {
-    expect(indicator).not.toBeNull();
-    expect(indicator!.x).toBeGreaterThanOrEqual(leftBox!.x - 0.5);
-    expect(indicator!.x + indicator!.width).toBeLessThanOrEqual(
-      leftBox!.x + leftBox!.width + 0.5,
-    );
-  }
-  for (const indicator of [rightPower, rightGarbage]) {
-    expect(indicator).not.toBeNull();
-    expect(indicator!.x).toBeGreaterThanOrEqual(rightBox!.x - 0.5);
-    expect(indicator!.x + indicator!.width).toBeLessThanOrEqual(
-      rightBox!.x + rightBox!.width + 0.5,
-    );
-  }
-
-  await seatB.close();
+  const footer = await elementRect(
+    page.locator('.player-pane[data-side="left"] .status-row'),
+  );
+  expect(
+    trayRect.y - rectBottom(footer),
+    "the complete gameplay frame clears the touch-button tray",
+  ).toBeGreaterThanOrEqual(3.5);
 });
 
 test("a third participant joins an active challenge as a read-only spectator", async ({

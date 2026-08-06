@@ -10,6 +10,7 @@ import {
   hideGameplayPowerTip,
   positionGameplayTip,
   positionHudToViewport,
+  positionMatchMenuButton,
   renderTimedEffects,
   setHudGarbage,
   setElementHidden,
@@ -44,39 +45,95 @@ describe("application shell", () => {
     expect(hud?.querySelector(".next-preview")?.classList).toContain("is-unboxed");
   });
 
-  it("anchors HUD bounds to the board and selects non-overlapping fallbacks", () => {
+  it("exposes full stat names while providing CSS-addressable short labels", () => {
     const shell = createAppShell(document, document.createElement("div"));
-    const roomy = calculateRendererLayout(400, 800, "versus");
+    const stats = shell.left.root.querySelectorAll<HTMLElement>(".hud-stat");
 
-    positionHudToViewport(shell.left, roomy.left, roomy.height);
-
-    expect(shell.left.root.style.left).toBe("8px");
-    expect(shell.left.root.style.top).toBe("224px");
-    expect(shell.left.root.style.width).toBe("176px");
-    expect(shell.left.pane.dataset.hudTop).toBe("outside");
-    expect(shell.left.pane.dataset.statusPlacement).toBe("below");
-
-    const constrained = calculateRendererLayout(800, 400, "practice");
-    positionHudToViewport(shell.left, constrained.left, constrained.height);
-
-    expect(shell.left.pane.dataset.hudTop).toBe("inside");
-    expect(shell.left.pane.dataset.statusPlacement).toBe("outer");
+    expect(stats).toHaveLength(3);
+    expect([...stats].map((stat) => ({
+      full: stat.querySelector(".hud-stat-label-full")?.textContent,
+      short: stat.querySelector(".hud-stat-label-short")?.textContent,
+      accessible: stat.querySelector(".hud-stat-accessible-label")?.textContent,
+    }))).toEqual([
+      { full: "Score", short: "SCR", accessible: "Score" },
+      { full: "Level", short: "LVL", accessible: "Level" },
+      { full: "Lines", short: "LNS", accessible: "Lines" },
+    ]);
+    for (const stat of stats) {
+      expect(stat.querySelector(".hud-stat-label-full")?.getAttribute("aria-hidden"))
+        .toBe("true");
+      expect(stat.querySelector(".hud-stat-label-short")?.getAttribute("aria-hidden"))
+        .toBe("true");
+      expect(stat.querySelector(".hud-stat-value")?.hasAttribute("aria-label"))
+        .toBe(false);
+    }
   });
 
-  it("places gameplay tips in available board-side space before using an inset", () => {
+  it("anchors permanent HUD bands and responsive labels to the board frame", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+    const roomy = calculateRendererLayout(1280, 720, "practice");
+
+    positionHudToViewport(shell.left, roomy.left);
+
+    expect(shell.left.root.style.left).toBe(`${roomy.left.boardX}px`);
+    expect(shell.left.root.style.top).toBe(`${roomy.left.boardY}px`);
+    expect(shell.left.root.style.width).toBe(`${roomy.left.boardWidth}px`);
+    expect(shell.left.root.style.getPropertyValue("--hud-top-height")).toBe("72px");
+    expect(shell.left.pane.dataset.hudCompact).toBe("false");
+    expect(shell.left.pane.dataset.hudLabels).toBe("full");
+    expect(shell.left.pane.dataset.hudTop).toBeUndefined();
+    expect(shell.left.pane.dataset.statusPlacement).toBeUndefined();
+
+    const constrained = calculateRendererLayout(640, 360, "practice");
+    positionHudToViewport(shell.left, constrained.left);
+
+    expect(shell.left.root.style.getPropertyValue("--hud-top-height")).toBe("64px");
+    expect(shell.left.pane.dataset.hudCompact).toBe("true");
+    expect(shell.left.pane.dataset.hudLabels).toBe("short");
+  });
+
+  it("places gameplay tips around the complete frame before using a board inset", () => {
     const shell = createAppShell(document, document.createElement("div"));
     const above = calculateRendererLayout(400, 800, "versus");
 
-    positionGameplayTip(shell, above.left, above.height);
+    positionGameplayTip(shell, above);
     expect(shell.match.dataset.tipPlacement).toBe("above");
+    expect(shell.match.style.getPropertyValue("--tip-frame-top"))
+      .toBe(`${above.frame.y}px`);
 
     const outer = calculateRendererLayout(800, 400, "practice");
-    positionGameplayTip(shell, outer.left, outer.height);
+    positionGameplayTip(shell, outer);
     expect(shell.match.dataset.tipPlacement).toBe("outer");
 
     const inset = calculateRendererLayout(360, 640, "practice");
-    positionGameplayTip(shell, inset.left, inset.height);
+    positionGameplayTip(shell, inset);
     expect(shell.match.dataset.tipPlacement).toBe("inside");
+  });
+
+  it("keeps the match menu in the PvP corridor or clear Practice whitespace", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+    const versus = calculateRendererLayout(1280, 720, "versus");
+
+    positionMatchMenuButton(shell, versus);
+
+    expect(shell.matchActions.style.left).toBe("640px");
+    expect(shell.matchActions.style.top).toBe("18px");
+    expect(shell.match.dataset.menuPlacement).toBe("corridor");
+
+    const practice = calculateRendererLayout(640, 360, "practice");
+    positionMatchMenuButton(shell, practice);
+
+    expect(shell.matchActions.style.left).toBe("216px");
+    expect(shell.matchActions.style.top).toBe("14px");
+    expect(shell.match.dataset.menuPlacement).toBe("outer");
+
+    const constrained = calculateRendererLayout(320, 520, "practice");
+    positionHudToViewport(shell.left, constrained.left);
+    positionMatchMenuButton(shell, constrained);
+
+    expect(shell.match.dataset.menuPlacement).toBe("header");
+    expect(Number(shell.left.root.style.getPropertyValue("--hud-preview-scale")))
+      .toBeLessThan(1);
   });
 
   it("renders discrete charge and pulses when the upcoming power advances", () => {
@@ -97,6 +154,13 @@ describe("application shell", () => {
         .map((segment) => segment.dataset.charge),
     ).toEqual(["1", "2", "3"]);
     expect(shell.left.meter.getAttribute("aria-valuenow")).toBe("3");
+    expect(shell.left.upcomingPower.dataset.chargeState).toBe("charging");
+
+    setHudPower(shell.left, "nuke", "Nuke", 6, 0);
+    expect(shell.left.upcomingPower.dataset.chargeState).toBe("near");
+
+    setHudPower(shell.left, "nuke", "Nuke", 7, 0);
+    expect(shell.left.upcomingPower.dataset.chargeState).toBe("ready");
 
     setHudPower(shell.left, "collapse", "Collapse", 1, 1);
 
@@ -131,7 +195,7 @@ describe("application shell", () => {
     expect(accessibleLabel).not.toHaveBeenCalled();
   });
 
-  it("shows two colored timed-effect rows with truthful active overflow", () => {
+  it("shows the four earliest active effects and queues later visuals as metadata", () => {
     const shell = createAppShell(document, document.createElement("div"));
     expect(shell.left.statuses.hasAttribute("aria-live")).toBe(false);
 
@@ -158,20 +222,42 @@ describe("application shell", () => {
         totalTicks: 900,
         accent: "#ad8cff",
       },
+      {
+        id: "blackout",
+        label: "Blackout",
+        remainingTicks: 480,
+        totalTicks: 900,
+        accent: "#9b7bff",
+      },
+      {
+        id: "monomino-rush",
+        label: "Monomino Rush",
+        remainingTicks: 180,
+        totalTicks: 480,
+        accent: "#77e65c",
+      },
     ]);
 
     const rows = shell.left.statuses.querySelectorAll<HTMLElement>(
       ".timed-effect",
     );
-    expect(rows).toHaveLength(2);
+    expect(rows).toHaveLength(4);
+    expect([...rows].map((row) => row.dataset.effect)).toEqual([
+      "scramble",
+      "barrier",
+      "ghost-jam",
+      "blackout",
+    ]);
+    expect(shell.left.statuses.dataset.effectLayout).toBe("4");
+    expect(shell.left.statuses.dataset.queuedEffects).toBe("1");
     expect(rows[0]?.textContent).toContain("Scramble");
     expect(rows[0]?.textContent).toContain("5s");
     expect(rows[0]?.style.getPropertyValue("--effect-accent")).toBe("#ff8ade");
     expect(rows[1]?.textContent).toContain("Barrier 3");
     expect(rows[1]?.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow"))
       .toBe("840");
-    expect(shell.left.statuses.querySelector(".timed-effect-overflow")?.textContent)
-      .toBe("+1 active");
+    expect(shell.left.statuses.querySelector(".timed-effect-overflow")).toBeNull();
+    expect(shell.left.statuses.children).toHaveLength(4);
 
     const firstRow = rows[0];
     renderTimedEffects(shell.left, [
@@ -185,6 +271,34 @@ describe("application shell", () => {
     ]);
     expect(shell.left.statuses.querySelector(".timed-effect")).toBe(firstRow);
     expect(firstRow?.textContent).toContain("4s");
+  });
+
+  it("keeps full timer names and whole seconds inside each progressbar", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+
+    renderTimedEffects(shell.left, [
+      {
+        id: "ghost-jam",
+        label: "Ghost Jam With A Deliberately Long Name",
+        remainingTicks: 90,
+        totalTicks: 900,
+        accent: "#ad8cff",
+      },
+    ]);
+
+    const progress = shell.left.statuses.querySelector<HTMLElement>(
+      '[role="progressbar"]',
+    );
+    expect(progress).not.toBeNull();
+    expect(progress?.querySelector(".timed-effect-name")?.textContent).toBe(
+      "Ghost Jam With A Deliberately Long Name",
+    );
+    expect(progress?.querySelector(".timed-effect-time")?.textContent).toBe("2s");
+    expect(progress?.getAttribute("aria-label")).toBe(
+      "Ghost Jam With A Deliberately Long Name, 2 seconds remaining",
+    );
+    expect(progress?.getAttribute("aria-valuetext")).toBe("2 seconds remaining");
+    expect(shell.left.statuses.hasAttribute("aria-live")).toBe(false);
   });
 
   it("presents readiness as a centered state with both players visible", () => {

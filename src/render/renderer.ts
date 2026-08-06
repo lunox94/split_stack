@@ -84,6 +84,20 @@ export interface GameRenderFrame {
   readonly presentation?: PresentationFrame;
 }
 
+export interface LayoutRect {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+export interface BoardHudLayout {
+  readonly header: LayoutRect;
+  readonly rail: LayoutRect;
+  readonly timers: LayoutRect;
+  readonly garbage: LayoutRect;
+}
+
 export interface BoardViewport {
   readonly paneX: number;
   readonly paneWidth: number;
@@ -92,6 +106,7 @@ export interface BoardViewport {
   readonly boardWidth: number;
   readonly boardHeight: number;
   readonly cellSize: number;
+  readonly hud: BoardHudLayout;
 }
 
 export interface RendererLayout {
@@ -100,7 +115,24 @@ export interface RendererLayout {
   readonly mode: GameRenderFrame["mode"];
   readonly left: BoardViewport;
   readonly right: BoardViewport | null;
+  readonly safeBounds: LayoutRect;
+  readonly frame: LayoutRect;
+  readonly compactTopHud: boolean;
+  readonly topHudHeight: number;
+  readonly centerCorridor: LayoutRect | null;
   readonly dividerX: number | null;
+}
+
+export interface LayoutInsets {
+  readonly top: number;
+  readonly right: number;
+  readonly bottom: number;
+  readonly left: number;
+}
+
+export interface RendererLayoutOptions {
+  readonly safeAreaInsets?: Partial<LayoutInsets>;
+  readonly bottomInset?: number;
 }
 
 export interface PresentationMotionTransform {
@@ -307,9 +339,19 @@ export class WebGlUnavailableError extends Error {
 
 const MAX_INSTANCES_PER_POOL = 512;
 export const MAX_PRESENTATION_PARTICLES = 96;
-const BOARD_GUTTER_PX = 12;
-const POWER_RAIL_BOARD_SHIFT_PX = 4;
-const VERTICAL_GUTTER_PX = 16;
+const FRAME_HORIZONTAL_GUTTER_PX = 8;
+const FRAME_VERTICAL_GUTTER_PX = 4;
+const STANDARD_TOP_HUD_HEIGHT_PX = 72;
+const COMPACT_TOP_HUD_HEIGHT_PX = 64;
+const COMPACT_BOARD_WIDTH_THRESHOLD_PX = 160;
+const TOP_HUD_BOARD_GAP_PX = 4;
+const BOTTOM_STATUS_HEIGHT_PX = 40;
+const BOARD_STATUS_GAP_PX = 4;
+const POWER_RAIL_WIDTH_PX = 24;
+const BOARD_RAIL_GAP_PX = 4;
+const INTER_RAIL_GAP_PX = 2;
+const VERSUS_CENTER_CORRIDOR_PX =
+  BOARD_RAIL_GAP_PX * 2 + POWER_RAIL_WIDTH_PX * 2 + INTER_RAIL_GAP_PX;
 
 interface CellPool {
   readonly mesh: InstancedMesh;
@@ -382,41 +424,130 @@ export function calculateRendererLayout(
   width: number,
   height: number,
   mode: GameRenderFrame["mode"],
+  options: RendererLayoutOptions = {},
 ): RendererLayout {
-  const safeWidth = Math.max(1, width);
-  const safeHeight = Math.max(1, height);
-  const paneWidth = mode === "versus" ? safeWidth / 2 : safeWidth;
-  const cellSize = Math.max(
-    1,
+  const viewportWidth = Math.max(1, width);
+  const viewportHeight = Math.max(1, height);
+  const safeTop = Math.max(0, options.safeAreaInsets?.top ?? 0);
+  const safeRight = Math.max(0, options.safeAreaInsets?.right ?? 0);
+  const safeBottom = Math.max(0, options.safeAreaInsets?.bottom ?? 0);
+  const safeLeft = Math.max(0, options.safeAreaInsets?.left ?? 0);
+  const bottomInset = Math.max(0, options.bottomInset ?? 0);
+  const safeBounds = {
+    x: safeLeft + FRAME_HORIZONTAL_GUTTER_PX,
+    y: safeTop + FRAME_VERTICAL_GUTTER_PX,
+    width: Math.max(
+      0,
+      viewportWidth - safeLeft - safeRight - FRAME_HORIZONTAL_GUTTER_PX * 2,
+    ),
+    height: Math.max(
+      0,
+      viewportHeight - safeTop - safeBottom - bottomInset - FRAME_VERTICAL_GUTTER_PX * 2,
+    ),
+  };
+  const versusPaneSplitX = safeBounds.x + safeBounds.width / 2;
+  const leftPaneWidth = mode === "versus" ? versusPaneSplitX : viewportWidth;
+  const rightPaneWidth = viewportWidth - versusPaneSplitX;
+  const horizontalBoardSpace = mode === "versus"
+    ? (safeBounds.width - VERSUS_CENTER_CORRIDOR_PX) / 2
+    : safeBounds.width - BOARD_RAIL_GAP_PX - POWER_RAIL_WIDTH_PX;
+  const horizontalCellSize = horizontalBoardSpace / RULES.board.width;
+  const fixedVerticalSpaceFor = (topHudHeight: number): number =>
+    topHudHeight + TOP_HUD_BOARD_GAP_PX +
+    BOARD_STATUS_GAP_PX + BOTTOM_STATUS_HEIGHT_PX;
+  const cellSizeFor = (topHudHeight: number): number => Math.max(
+    0,
     Math.min(
-      (paneWidth - BOARD_GUTTER_PX * 2) / RULES.board.width,
-      (safeHeight - VERTICAL_GUTTER_PX * 2) /
+      horizontalCellSize,
+      (safeBounds.height - fixedVerticalSpaceFor(topHudHeight)) /
         (RULES.board.height - RULES.board.hiddenRows),
     ),
   );
+  const standardCellSize = cellSizeFor(STANDARD_TOP_HUD_HEIGHT_PX);
+  const compactTopHud = standardCellSize * RULES.board.width <
+    COMPACT_BOARD_WIDTH_THRESHOLD_PX;
+  const topHudHeight = compactTopHud
+    ? COMPACT_TOP_HUD_HEIGHT_PX
+    : STANDARD_TOP_HUD_HEIGHT_PX;
+  const compactWidthCeiling =
+    (COMPACT_BOARD_WIDTH_THRESHOLD_PX - 0.001) / RULES.board.width;
+  const cellSize = compactTopHud
+    ? Math.min(cellSizeFor(topHudHeight), compactWidthCeiling)
+    : standardCellSize;
+  const fixedVerticalSpace = fixedVerticalSpaceFor(topHudHeight);
   const boardWidth = cellSize * RULES.board.width;
   const boardHeight =
     cellSize * (RULES.board.height - RULES.board.hiddenRows);
+  const frameWidth = mode === "versus"
+    ? boardWidth * 2 + VERSUS_CENTER_CORRIDOR_PX
+    : boardWidth + BOARD_RAIL_GAP_PX + POWER_RAIL_WIDTH_PX;
+  const frameHeight = fixedVerticalSpace + boardHeight;
+  const frame = {
+    x: safeBounds.x + (safeBounds.width - frameWidth) / 2,
+    y: safeBounds.y + (safeBounds.height - frameHeight) / 2,
+    width: frameWidth,
+    height: frameHeight,
+  };
+  const boardY = frame.y + topHudHeight + TOP_HUD_BOARD_GAP_PX;
+  const statusY = boardY + boardHeight + BOARD_STATUS_GAP_PX;
+  const leftBoardX = frame.x;
+  const leftRailX = leftBoardX + boardWidth + BOARD_RAIL_GAP_PX;
+  const rightRailX = leftRailX + POWER_RAIL_WIDTH_PX + INTER_RAIL_GAP_PX;
+  const rightBoardX = rightRailX + POWER_RAIL_WIDTH_PX + BOARD_RAIL_GAP_PX;
 
-  const viewportFor = (paneX: number, direction: -1 | 1): BoardViewport => ({
+  const viewportFor = (
+    paneX: number,
+    paneWidth: number,
+    boardX: number,
+    railX: number,
+  ): BoardViewport => ({
     paneX,
     paneWidth,
-    boardX:
-      paneX + (paneWidth - boardWidth) / 2 +
-      direction * POWER_RAIL_BOARD_SHIFT_PX,
-    boardY: (safeHeight - boardHeight) / 2,
+    boardX,
+    boardY,
     boardWidth,
     boardHeight,
     cellSize,
+    hud: {
+      header: { x: boardX, y: frame.y, width: boardWidth, height: topHudHeight },
+      rail: { x: railX, y: boardY, width: POWER_RAIL_WIDTH_PX, height: boardHeight },
+      timers: {
+        x: boardX,
+        y: statusY,
+        width: boardWidth,
+        height: BOTTOM_STATUS_HEIGHT_PX,
+      },
+      garbage: {
+        x: railX,
+        y: statusY,
+        width: POWER_RAIL_WIDTH_PX,
+        height: BOTTOM_STATUS_HEIGHT_PX,
+      },
+    },
   });
+  const centerCorridor = mode === "versus"
+    ? {
+        x: leftBoardX + boardWidth,
+        y: boardY,
+        width: VERSUS_CENTER_CORRIDOR_PX,
+        height: boardHeight,
+      }
+    : null;
 
   return {
-    width: safeWidth,
-    height: safeHeight,
+    width: viewportWidth,
+    height: viewportHeight,
     mode,
-    left: viewportFor(0, -1),
-    right: mode === "versus" ? viewportFor(paneWidth, 1) : null,
-    dividerX: mode === "versus" ? paneWidth : null,
+    left: viewportFor(0, leftPaneWidth, leftBoardX, leftRailX),
+    right: mode === "versus"
+      ? viewportFor(versusPaneSplitX, rightPaneWidth, rightBoardX, rightRailX)
+      : null,
+    safeBounds,
+    frame,
+    compactTopHud,
+    topHudHeight,
+    centerCorridor,
+    dividerX: null,
   };
 }
 
