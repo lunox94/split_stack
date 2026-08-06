@@ -310,7 +310,7 @@ function offensiveTransferColor(attack: PresentationEffect["attack"]): number {
     case "ghost-jam":
       return SPECIAL_ACCENT_HEX.barrier;
     case "scramble":
-      return 0xff5cdb;
+      return 0xff8ade;
     case "hollow-cross":
       return 0xf5ff72;
     default:
@@ -346,8 +346,8 @@ const COMPACT_TOP_HUD_HEIGHT_PX = 64;
 const COMPACT_BOARD_WIDTH_THRESHOLD_PX = 160;
 const TOP_HUD_BOARD_GAP_PX = 4;
 const BOTTOM_STATUS_HEIGHT_PX = 40;
-const BOARD_STATUS_GAP_PX = 4;
-const POWER_RAIL_WIDTH_PX = 24;
+const BOARD_STATUS_GAP_PX = 6;
+const POWER_RAIL_WIDTH_PX = 22;
 const BOARD_RAIL_GAP_PX = 4;
 const INTER_RAIL_GAP_PX = 2;
 const VERSUS_CENTER_CORRIDOR_PX =
@@ -927,45 +927,6 @@ export class ThreeRenderer {
       );
     }
 
-    const capacity = Math.max(0, Math.min(4, board.barrierCapacity ?? 0));
-    if (capacity > 0) {
-      const gap = viewport.cellSize * 0.12;
-      const segmentWidth = (viewport.boardWidth - gap * 3) / 4;
-      for (let segment = 0; segment < 4; segment += 1) {
-        this.#drawEffectRect(
-          segment < capacity ? "barrier-active" : "barrier-empty",
-          segment < capacity ? 0x68eaff : 0x263c52,
-          viewport.boardX + segmentWidth / 2 + segment * (segmentWidth + gap),
-          bottomY + viewport.cellSize * 0.08,
-          segmentWidth,
-          viewport.cellSize * 0.14,
-          segment < capacity ? 0.82 : 0.28,
-        );
-      }
-    }
-
-    if (board.scrambled === true) {
-      const width = viewport.cellSize * 0.1;
-      this.#drawEffectRect(
-        "scramble-edge",
-        0xff5cdb,
-        viewport.boardX + width / 2,
-        bottomY + viewport.boardHeight / 2,
-        width,
-        viewport.boardHeight,
-        0.72,
-      );
-      this.#drawEffectRect(
-        "scramble-edge",
-        0xff5cdb,
-        viewport.boardX + viewport.boardWidth - width / 2,
-        bottomY + viewport.boardHeight / 2,
-        width,
-        viewport.boardHeight,
-        0.72,
-      );
-    }
-
     if (board.monominoRush === true) {
       for (const cell of board.cells) {
         if (cell.kind !== "monomino" || cell.role !== "active") continue;
@@ -1161,18 +1122,43 @@ export class ThreeRenderer {
           0.64,
         );
       }
-    } else if (effect.kind === "barrier") {
-      const capacity = Math.max(0, Math.min(4, effect.capacity ?? 4));
-      const width = viewport.boardWidth / 4;
-      for (let segment = 0; segment < capacity; segment += 1) {
+    } else if (effect.kind === "barrier-hit" && effect.flash) {
+      const fade = 1 - effect.stageProgress;
+      const edgeThickness = viewport.cellSize * (
+        visualEffect.visualStyle === "fade"
+          ? 0.08
+          : 0.08 + effect.stageProgress * 0.1
+      );
+      const opacity = visualEffect.visualStyle === "fade" ? 0.72 : fade * 0.96;
+      for (const [x, y, width, height] of [
+        [centerX, bottomY + edgeThickness / 2, viewport.boardWidth, edgeThickness],
+        [
+          centerX,
+          bottomY + viewport.boardHeight - edgeThickness / 2,
+          viewport.boardWidth,
+          edgeThickness,
+        ],
+        [
+          viewport.boardX + edgeThickness / 2,
+          centerY,
+          edgeThickness,
+          viewport.boardHeight,
+        ],
+        [
+          viewport.boardX + viewport.boardWidth - edgeThickness / 2,
+          centerY,
+          edgeThickness,
+          viewport.boardHeight,
+        ],
+      ] as const) {
         this.#drawEffectRect(
-          "barrier-flare",
-          0x68eaff,
-          viewport.boardX + width * (segment + 0.5),
-          bottomY + viewport.cellSize * 0.08,
-          width * 0.82,
-          viewport.cellSize * 0.18,
-          0.9,
+          "barrier-hit",
+          SPECIAL_ACCENT_HEX.barrier,
+          x,
+          y,
+          width,
+          height,
+          opacity,
         );
       }
     } else if (effect.kind === "blackout") {
@@ -1188,17 +1174,6 @@ export class ThreeRenderer {
         viewport.boardHeight,
         0.86,
         { additive: false },
-      );
-    } else if (effect.kind === "scramble") {
-      const offset = motion.scrambleOscillation * viewport.cellSize;
-      this.#drawEffectRect(
-        "scramble-glitch",
-        0xff5cdb,
-        centerX + offset,
-        centerY,
-        viewport.boardWidth,
-        viewport.cellSize * 0.16,
-        0.58,
       );
     } else if (effect.kind === "ghost-jam") {
       if (effect.stage === "follow-through") {

@@ -42,6 +42,14 @@ describe("HUD rendering", () => {
     const statusChildren = vi.spyOn(shell.left.statuses, "replaceChildren");
     const meterSegment = vi.spyOn(shell.left.meterSegments[0]!.classList, "toggle");
     const meterAccessibility = vi.spyOn(shell.left.meter, "setAttribute");
+    const barrierSegment = vi.spyOn(
+      shell.left.barrierCapacitySegments[0]!.classList,
+      "toggle",
+    );
+    const barrierAccessibility = vi.spyOn(
+      shell.left.barrierCapacity,
+      "setAttribute",
+    );
     const previewGrid = shell.left.preview.querySelector(".piece-preview-grid");
 
     updateHud(shell.left, "Player A", current, PREVIEW_OPTIONS);
@@ -51,6 +59,8 @@ describe("HUD rendering", () => {
     expect(statusChildren).not.toHaveBeenCalled();
     expect(meterSegment).not.toHaveBeenCalled();
     expect(meterAccessibility).not.toHaveBeenCalled();
+    expect(barrierSegment).not.toHaveBeenCalled();
+    expect(barrierAccessibility).not.toHaveBeenCalled();
     expect(shell.left.preview.querySelector(".piece-preview-grid")).toBe(previewGrid);
   });
 
@@ -77,6 +87,73 @@ describe("HUD rendering", () => {
     ).toHaveLength(7);
     expect(shell.left.meter.getAttribute("aria-valuenow")).toBe("7");
     expect(shell.left.statuses.textContent).toContain("Barrier");
+    expect(shell.left.statuses.textContent).not.toContain("Barrier 2");
+    expect(
+      shell.left.barrierCapacitySegments.filter((segment) =>
+        segment.classList.contains("is-filled")
+      ),
+    ).toHaveLength(2);
+    expect(shell.left.barrierCapacity.getAttribute("aria-valuenow")).toBe("2");
+  });
+
+  it("keeps the neutral Barrier channel visible and hides a spent Barrier timer", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+
+    updateHud(
+      shell.left,
+      "Player A",
+      snapshot({
+        statuses: [{ kind: "barrier", remainingTicks: 60, capacity: 0 }],
+      }),
+      PREVIEW_OPTIONS,
+    );
+
+    expect(shell.left.barrierCapacity.hidden).toBe(false);
+    expect(shell.left.barrierCapacitySegments).toHaveLength(4);
+    expect(
+      shell.left.barrierCapacitySegments.some((segment) =>
+        segment.classList.contains("is-filled")
+      ),
+    ).toBe(false);
+    expect(shell.left.statuses.textContent).not.toContain("Barrier");
+  });
+
+  it("steps Barrier capacity right-to-left without inferring presentation events", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+    updateHud(
+      shell.left,
+      "Player A",
+      snapshot({
+        statuses: [{ kind: "barrier", remainingTicks: 1_200, capacity: 4 }],
+      }),
+      PREVIEW_OPTIONS,
+    );
+    expect(
+      shell.left.barrierCapacitySegments.map((segment) =>
+        segment.style.getPropertyValue("--barrier-step-delay")
+      ),
+    ).toEqual(["0ms", "55ms", "110ms", "165ms"]);
+
+    updateHud(
+      shell.left,
+      "Player A",
+      snapshot({
+        statuses: [{ kind: "barrier", remainingTicks: 1_190, capacity: 1 }],
+      }),
+      PREVIEW_OPTIONS,
+    );
+
+    expect(
+      shell.left.barrierCapacitySegments.map((segment) => ({
+        filled: segment.classList.contains("is-filled"),
+        delay: segment.style.getPropertyValue("--barrier-step-delay"),
+      })),
+    ).toEqual([
+      { filled: true, delay: "0ms" },
+      { filled: false, delay: "110ms" },
+      { filled: false, delay: "55ms" },
+      { filled: false, delay: "0ms" },
+    ]);
   });
 
   it("still advances an animated Glitch preview when its visual frame changes", () => {

@@ -175,6 +175,23 @@ describe("PresentationRouter", () => {
     ]);
   });
 
+  it("routes a Barrier block to the affected board", () => {
+    const scheduler = new RecordingScheduler();
+    const router = new PresentationRouter(scheduler, () => 125);
+
+    router.consumeSimulationEffects([
+      { kind: "barrier-block", rows: 2 },
+    ], "right");
+
+    expect(scheduler.cues).toEqual([
+      {
+        id: "presentation:1:barrier-block",
+        kind: "barrier-hit",
+        board: "right",
+      },
+    ]);
+  });
+
   it("routes the new meter powers and embedded status triggers", () => {
     const scheduler = new RecordingScheduler();
     const remoteGhostCells = [

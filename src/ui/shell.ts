@@ -5,6 +5,7 @@ import type { Preferences } from "../persistence/settings";
 import { POWER_ACCENT_COLORS, createPowerIcon } from "../render/power-icons";
 import { createSpecialIcon } from "../render/special-icons";
 import type { BoardViewport, RendererLayout } from "../render/renderer";
+import { BARRIER_CAPACITY_TRANSITION_MS } from "./barrier-capacity";
 import {
   createMarkedCellSample,
   renderPiecePreviewSlot,
@@ -57,6 +58,8 @@ export interface HudElements {
   incomingCount: HTMLElement;
   meter: HTMLElement;
   meterSegments: readonly HTMLElement[];
+  barrierCapacity: HTMLElement;
+  barrierCapacitySegments: readonly HTMLElement[];
   statuses: HTMLElement;
   blackout: HTMLElement;
   setPiecePreviews(
@@ -183,14 +186,46 @@ function createHud(document: Document, side: "left" | "right"): HudElements {
   const statuses = element(document, "div", "status-row");
   statuses.setAttribute("role", "group");
   statuses.setAttribute("aria-label", "Active powers");
-  const blackout = element(
+  const barrierCapacity = element(document, "div", "barrier-capacity");
+  barrierCapacity.setAttribute("role", "meter");
+  barrierCapacity.setAttribute("aria-label", "Barrier capacity");
+  barrierCapacity.setAttribute("aria-valuemin", "0");
+  barrierCapacity.setAttribute("aria-valuemax", String(RULES.garbage.barrierCapacity));
+  barrierCapacity.setAttribute("aria-valuenow", "0");
+  barrierCapacity.setAttribute(
+    "aria-valuetext",
+    `0 of ${RULES.garbage.barrierCapacity} blocks remaining`,
+  );
+  barrierCapacity.dataset.capacity = "0";
+  barrierCapacity.dataset.visualCapacity = "0";
+  barrierCapacity.style.setProperty(
+    "--barrier-transition-duration",
+    `${BARRIER_CAPACITY_TRANSITION_MS}ms`,
+  );
+  const barrierCapacitySegments = Array.from(
+    { length: RULES.garbage.barrierCapacity },
+    (_, index) => {
+      const segment = element(document, "span", "barrier-capacity-segment");
+      segment.dataset.capacity = String(index + 1);
+      barrierCapacity.append(segment);
+      return segment;
+    },
+  );
+  const blackout = element(document, "div", "blackout-cover");
+  blackout.setAttribute("role", "img");
+  blackout.setAttribute("aria-label", STRINGS["match.blackoutCover"]);
+  const blackoutIcon = createSpecialIcon(
     document,
-    "div",
-    "blackout-cover",
+    "blackout",
     STRINGS["match.blackoutCover"],
   );
+  blackoutIcon.classList.add("blackout-icon");
+  blackoutIcon.setAttribute("aria-hidden", "true");
+  blackoutIcon.removeAttribute("role");
+  blackoutIcon.removeAttribute("aria-label");
+  blackout.append(blackoutIcon);
   blackout.hidden = true;
-  hud.append(statuses);
+  hud.append(barrierCapacity, statuses);
   pane.append(boardTarget, blackout, hud);
   const setPiecePreviews = (
     held: PieceDescriptor | null,
@@ -224,6 +259,8 @@ function createHud(document: Document, side: "left" | "right"): HudElements {
     incomingCount,
     meter,
     meterSegments,
+    barrierCapacity,
+    barrierCapacitySegments,
     statuses,
     blackout,
     setPiecePreviews,
@@ -429,6 +466,16 @@ export interface AppShell {
   ): void;
   setScrambled(active: boolean): void;
 }
+
+interface HelpPreviewAnimationController {
+  start(render: (elapsedMs: number) => void, intervalMs: number): void;
+  stop(): void;
+}
+
+const HELP_PREVIEW_ANIMATIONS = new WeakMap<
+  AppShell,
+  HelpPreviewAnimationController
+>();
 
 export function createAppShell(document: Document, mount: HTMLElement): AppShell {
   const container = element(document, "main", "split-stack-app");
@@ -748,6 +795,28 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     results: resultsParts.screen,
   } as const;
   let readinessSignature: string | null = null;
+  let helpPreviewTimer: number | null = null;
+  const stopHelpPreviewAnimation = (): void => {
+    if (helpPreviewTimer === null) return;
+    document.defaultView?.clearInterval(helpPreviewTimer);
+    helpPreviewTimer = null;
+  };
+  const startHelpPreviewAnimation = (
+    render: (elapsedMs: number) => void,
+    intervalMs: number,
+  ): void => {
+    stopHelpPreviewAnimation();
+    const window = document.defaultView;
+    if (window === null) return;
+    const startedAtMs = window.performance.now();
+    helpPreviewTimer = window.setInterval(() => {
+      if (helpParts.screen.hidden) {
+        stopHelpPreviewAnimation();
+        return;
+      }
+      render(Math.max(0, window.performance.now() - startedAtMs));
+    }, intervalMs);
+  };
 
   const shell: AppShell = {
     container,
@@ -811,6 +880,7 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     rematchButton,
     resultsLeaveButton,
     show(screen): void {
+      if (screen !== "help") stopHelpPreviewAnimation();
       for (const [name, node] of Object.entries(screens)) node.hidden = name !== screen;
     },
     setPreferences(preferences): void {
@@ -916,6 +986,10 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
       );
     },
   };
+  HELP_PREVIEW_ANIMATIONS.set(shell, {
+    start: startHelpPreviewAnimation,
+    stop: stopHelpPreviewAnimation,
+  });
   return shell;
 }
 
@@ -969,6 +1043,10 @@ export function hideGameplayPowerTip(shell: AppShell): void {
 
 export function showHelp(shell: AppShell, kind: "how" | "controls"): void {
   const document = shell.helpBody.ownerDocument;
+  const animation = HELP_PREVIEW_ANIMATIONS.get(shell);
+  animation?.stop();
+  let animatePiecePreviews: ((elapsedMs: number) => void) | null = null;
+  let previewCadenceMs = 150;
   shell.helpBody.replaceChildren();
   if (kind === "how") {
     shell.helpHeading.textContent = STRINGS["help.heading"];
@@ -1114,18 +1192,32 @@ export function showHelp(shell: AppShell, kind: "how" | "controls"): void {
       colorPalette: shell.container.dataset.palette === "colorblind"
         ? "colorblind"
         : "standard",
-      reducedMotion: shell.container.dataset.reducedMotion === "true",
-      reducedFlashes: shell.container.dataset.reducedFlashes === "true",
+      reducedMotion: shell.container.dataset.reducedMotion === "true" ||
+        shell.container.dataset.reducedEffects === "true",
+      reducedFlashes: shell.container.dataset.reducedFlashes === "true" ||
+        shell.container.dataset.reducedEffects === "true",
       elapsedMs: 0,
     };
+    const animatedSamples: Array<{
+      readonly sample: HTMLElement;
+      readonly descriptor: PieceDescriptor;
+    }> = [];
     for (const entry of pieceEntries) {
-      const card = element(document, "article", "special-guide-card");
+      const card = element(
+        document,
+        "article",
+        "special-guide-card is-piece-guide",
+      );
       const sample = element(
         document,
         "div",
-        "special-piece-sample piece-preview-slot is-primary",
+        "special-piece-sample special-piece-illustration",
       );
       renderPiecePreviewSlot(sample, entry.descriptor, previewOptions);
+      if (entry.descriptor.previewCosmetics !== undefined) {
+        animatedSamples.push({ sample, descriptor: entry.descriptor });
+        previewCadenceMs = entry.descriptor.previewCosmetics.intervalMs;
+      }
       const copy = element(document, "div");
       copy.append(
         element(document, "h4", undefined, STRINGS[entry.name]),
@@ -1136,6 +1228,20 @@ export function showHelp(shell: AppShell, kind: "how" | "controls"): void {
     }
     piecesSection.append(pieces);
     shell.helpBody.append(meterSection, markedSection, piecesSection);
+    if (
+      !previewOptions.reducedMotion &&
+      !previewOptions.reducedFlashes &&
+      animatedSamples.length > 0
+    ) {
+      animatePiecePreviews = (elapsedMs): void => {
+        for (const { sample, descriptor } of animatedSamples) {
+          renderPiecePreviewSlot(sample, descriptor, {
+            ...previewOptions,
+            elapsedMs,
+          });
+        }
+      };
+    }
   } else {
     shell.helpHeading.textContent = STRINGS["lobby.practiceControls"];
     const controlLayout = element(document, "div", "control-help-layout");
@@ -1234,6 +1340,9 @@ export function showHelp(shell: AppShell, kind: "how" | "controls"): void {
     shell.helpBody.append(controlLayout);
   }
   shell.show("help");
+  if (animatePiecePreviews !== null) {
+    animation?.start(animatePiecePreviews, previewCadenceMs);
+  }
 }
 
 export function setHudPower(

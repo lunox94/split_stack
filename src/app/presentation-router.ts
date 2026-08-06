@@ -67,6 +67,10 @@ export class PresentationRouter {
         });
         continue;
       }
+      if (effect.kind === "barrier-block") {
+        this.#schedule({ id, kind: "barrier-hit", board });
+        continue;
+      }
       const outgoingAttack = outgoingAttackFor(effect);
       if (outgoingAttack !== null) {
         this.#schedule({

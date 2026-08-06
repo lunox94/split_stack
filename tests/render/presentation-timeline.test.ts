@@ -293,6 +293,52 @@ describe("presentation timeline", () => {
     );
   });
 
+  it("shows a nonblocking Barrier hit for 220 ms with reduced variants", () => {
+    const full = new PresentationTimeline();
+    const cue = {
+      id: "barrier-hit",
+      kind: "barrier-hit" as const,
+      board: "right" as const,
+    };
+
+    expect(full.schedule(cue, 1_000)).toEqual({
+      impactAtMs: 0,
+      blockingUntilMs: 0,
+      durationMs: 220,
+    });
+    expect(full.frameAt(1_000)).toMatchObject({
+      blocking: false,
+      effects: [{
+        id: "barrier-hit",
+        kind: "barrier-hit",
+        board: "right",
+        stage: "action",
+        moment: "impact",
+        visualStyle: "motion",
+        flash: true,
+      }],
+    });
+    expect(full.frameAt(1_219).effects).toHaveLength(1);
+    expect(full.frameAt(1_220).effects).toHaveLength(0);
+
+    const reducedMotion = new PresentationTimeline({ reducedMotion: true });
+    reducedMotion.schedule(cue, 0);
+    expect(reducedMotion.frameAt(110).effects[0]).toMatchObject({
+      stage: "action",
+      moment: "impact",
+      visualStyle: "fade",
+      particleCount: 0,
+      flash: true,
+    });
+
+    const reducedFlashes = new PresentationTimeline({ reducedFlashes: true });
+    reducedFlashes.schedule(cue, 0);
+    expect(reducedFlashes.frameAt(110).effects[0]).toMatchObject({
+      visualStyle: "motion",
+      flash: false,
+    });
+  });
+
   it("preserves competitive timing while reduced motion removes shake and particles", () => {
     const full = new PresentationTimeline({
       reducedMotion: false,

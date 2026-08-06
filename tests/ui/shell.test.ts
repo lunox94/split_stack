@@ -38,6 +38,13 @@ describe("application shell", () => {
     expect(shell.left.upcomingPower.getAttribute("role")).toBe("img");
     expect(shell.left.incoming.getAttribute("role")).toBe("img");
     expect(shell.left.statuses.getAttribute("role")).toBe("group");
+    expect(shell.left.barrierCapacity.getAttribute("role")).toBe("meter");
+    expect(shell.left.barrierCapacitySegments).toHaveLength(4);
+    expect(
+      shell.left.barrierCapacitySegments.filter((segment) =>
+        segment.classList.contains("is-filled")
+      ),
+    ).toHaveLength(0);
     expect(
       hud?.querySelector('[data-special-icon="garbage-core"]'),
     ).not.toBeNull();
@@ -123,7 +130,7 @@ describe("application shell", () => {
     const practice = calculateRendererLayout(640, 360, "practice");
     positionMatchMenuButton(shell, practice);
 
-    expect(shell.matchActions.style.left).toBe("216px");
+    expect(shell.matchActions.style.left).toBe("217.5px");
     expect(shell.matchActions.style.top).toBe("14px");
     expect(shell.match.dataset.menuPlacement).toBe("outer");
 
@@ -210,7 +217,6 @@ describe("application shell", () => {
       {
         id: "barrier",
         label: "Barrier",
-        detail: "3",
         remainingTicks: 840,
         totalTicks: 1_200,
         accent: "#57e6ff",
@@ -253,7 +259,8 @@ describe("application shell", () => {
     expect(rows[0]?.textContent).toContain("Scramble");
     expect(rows[0]?.textContent).toContain("5s");
     expect(rows[0]?.style.getPropertyValue("--effect-accent")).toBe("#ff8ade");
-    expect(rows[1]?.textContent).toContain("Barrier 3");
+    expect(rows[1]?.textContent).toContain("Barrier");
+    expect(rows[1]?.textContent).not.toContain("Barrier 3");
     expect(rows[1]?.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow"))
       .toBe("840");
     expect(shell.left.statuses.querySelector(".timed-effect-overflow")).toBeNull();
@@ -610,6 +617,68 @@ describe("application shell", () => {
     expect(shell.lobby.textContent).not.toContain("Power Glossary");
     expect(shell.controlsHelpButton.textContent).toBe("Controls");
   });
+
+  it("cycles the How to Play Glitch Piece only while that screen is visible", () => {
+    vi.useFakeTimers();
+    try {
+      const shell = createAppShell(document, document.createElement("div"));
+      showHelp(shell, "how");
+      const glitchSample = shell.helpBody.querySelector<HTMLElement>(
+        '.special-piece-sample[data-source="glitch"]',
+      );
+
+      expect(glitchSample?.dataset.displayShape).toBe("I");
+      vi.advanceTimersByTime(150);
+      expect(glitchSample?.dataset.displayShape).toBe("J");
+
+      shell.show("lobby");
+      vi.advanceTimersByTime(450);
+      expect(glitchSample?.dataset.displayShape).toBe("J");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("renders Special Pieces in dedicated unboxed Help illustrations", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+    showHelp(shell, "how");
+
+    const illustrations = shell.helpBody.querySelectorAll<HTMLElement>(
+      '[data-help-group="pieces"] .special-piece-illustration',
+    );
+    expect(illustrations).toHaveLength(3);
+    for (const illustration of illustrations) {
+      expect(illustration.querySelector(".piece-preview-grid")).not.toBeNull();
+      expect(illustration.classList).not.toContain("piece-preview-slot");
+      expect(illustration.classList).not.toContain("is-primary");
+    }
+  });
+
+  it.each(["reducedMotion", "reducedFlashes", "reducedEffects"] as const)(
+    "keeps the How to Play Glitch Piece static with %s enabled",
+    (preference) => {
+      vi.useFakeTimers();
+      try {
+        const shell = createAppShell(document, document.createElement("div"));
+        shell.container.dataset[preference] = "true";
+        showHelp(shell, "how");
+        const glitchSample = shell.helpBody.querySelector<HTMLElement>(
+          '.special-piece-sample[data-source="glitch"]',
+        );
+
+        expect(glitchSample?.dataset.glitch).toBe("static");
+        expect(glitchSample?.dataset.displayShape).toBe("concealed");
+        expect(
+          [...(glitchSample?.querySelectorAll<HTMLElement>(".piece-preview-cell") ?? [])]
+            .map((cell) => cell.dataset.shape),
+        ).toEqual(["I", "J", "T", "S", "Z"]);
+        vi.advanceTimersByTime(450);
+        expect(glitchSample?.dataset.displayShape).toBe("concealed");
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("separates touch help from a complete action-to-key table", () => {
     const shell = createAppShell(document, document.createElement("div"));

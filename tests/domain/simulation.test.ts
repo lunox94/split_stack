@@ -382,7 +382,7 @@ describe("simulation facade", () => {
     player.active!.y = 20;
     player.powerCharge = 19;
     player.upcomingPower = "nuke";
-    player.incomingGarbage = [{ id: "incoming", rows: 1, readyTick: 0, hole: 2 }];
+    player.incomingGarbage = [{ id: "incoming", rows: 3, readyTick: 0, hole: 2 }];
     const simulation = createSimulation({
       seed: SEED,
       playerId: "a",
@@ -412,10 +412,13 @@ describe("simulation facade", () => {
       "spawn-next",
     ]);
     expect(effects.some((effect) => effect.kind === "garbage-attack")).toBe(false);
+    expect(effects.filter((effect) => effect.kind === "barrier-block")).toEqual([
+      { kind: "barrier-block", rows: 3 },
+    ]);
     expect(simulation.readSnapshot().player.statuses).toContainEqual({
       kind: "barrier",
       remainingTicks: 1_200,
-      capacity: 3,
+      capacity: 1,
     });
   });
 

@@ -26,7 +26,7 @@ describe("canonical meter-power presentation", () => {
       "#ff8ade",
       "#ff665e",
       "#ffd84a",
-      "#77e65c",
+      "#f2f6ff",
       "#42e8ba",
       "#4dbdff",
       "#ad8cff",

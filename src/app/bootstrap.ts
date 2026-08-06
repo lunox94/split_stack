@@ -80,6 +80,11 @@ import {
   type HudElements,
   type TimedEffectHudItem,
 } from "../ui/shell";
+import {
+  presentHudBarrierResolution,
+  resetHudBarrierCapacityPresentation,
+  setHudBarrierCapacity,
+} from "../ui/barrier-capacity";
 import type { PiecePreviewOptions } from "../ui/piece-preview";
 import { boardModelFromRemoteSnapshot, boardModelFromSimulation } from "./view-model";
 import {
@@ -87,6 +92,7 @@ import {
   cueForIncomingAttack,
   panForPowerCue,
 } from "./audio-policy";
+import { hapticDurationForSimulationEffect } from "./haptic-policy";
 import { PresentationRouter } from "./presentation-router";
 import {
   appendBoundedUnique,
@@ -111,7 +117,10 @@ import {
   type SessionClaimV1,
 } from "./runtime-election";
 import { STRINGS, formatString, type StringKey } from "./strings";
-import { PresentationTimeline } from "../render/presentation-timeline";
+import {
+  PresentationTimeline,
+  type PresentationBoard,
+} from "../render/presentation-timeline";
 import {
   NETWORKED_PRESENTATION_FPS,
   RuntimePresentationCadence,
@@ -247,26 +256,27 @@ function timedEffectHudItems(
   statuses: readonly StatusState[],
   replacementMode: ReplacementMode | null,
 ): TimedEffectHudItem[] {
-  const effects: TimedEffectHudItem[] = statuses.map((status) => {
-    const totalTicks = status.kind === "scramble"
-      ? RULES.power.scrambleTicks
-      : status.kind === "ghost-jam"
-        ? RULES.power.ghostJamTicks
-        : status.kind === "blackout"
-          ? RULES.power.blackoutTicks
-          : RULES.garbage.barrierTicks;
-    const accent = status.kind === "blackout" || status.kind === "barrier"
-      ? SPECIAL_ACCENT_COLORS[status.kind]
-      : POWER_ACCENT_COLORS[status.kind];
-    return {
-      id: status.kind,
-      label: powerLabel(status.kind),
-      ...(status.kind === "barrier" ? { detail: String(status.capacity) } : {}),
-      remainingTicks: status.remainingTicks,
-      totalTicks,
-      accent,
-    };
-  });
+  const effects: TimedEffectHudItem[] = statuses
+    .filter((status) => status.kind !== "barrier" || status.capacity > 0)
+    .map((status) => {
+      const totalTicks = status.kind === "scramble"
+        ? RULES.power.scrambleTicks
+        : status.kind === "ghost-jam"
+          ? RULES.power.ghostJamTicks
+          : status.kind === "blackout"
+            ? RULES.power.blackoutTicks
+            : RULES.garbage.barrierTicks;
+      const accent = status.kind === "blackout" || status.kind === "barrier"
+        ? SPECIAL_ACCENT_COLORS[status.kind]
+        : POWER_ACCENT_COLORS[status.kind];
+      return {
+        id: status.kind,
+        label: powerLabel(status.kind),
+        remainingTicks: status.remainingTicks,
+        totalTicks,
+        accent,
+      };
+    });
   if (replacementMode?.kind === "monomino-rush") {
     effects.push({
       id: "monomino-rush",
@@ -316,6 +326,11 @@ function setTextContentIfChanged(element: HTMLElement, text: string): void {
   if (element.textContent !== text) element.textContent = text;
 }
 
+function setHudScrambled(hud: HudElements, active: boolean): void {
+  const value = String(active);
+  if (hud.pane.dataset.scrambled !== value) hud.pane.dataset.scrambled = value;
+}
+
 function setTimedEffectsIfChanged(
   hud: HudElements,
   effects: readonly TimedEffectHudItem[],
@@ -349,6 +364,8 @@ export function updateHud(
     );
     delete hud.meter.dataset.powerCursor;
     setHudGarbage(hud, 0, false);
+    setHudBarrierCapacity(hud, 0);
+    setHudScrambled(hud, false);
     setTimedEffectsIfChanged(hud, []);
     return;
   }
@@ -359,6 +376,10 @@ export function updateHud(
   const powerCharge = player?.powerCharge ?? (snapshot as PlayerSnapshotV1).powerCharge;
   const upcomingPower = player?.upcomingPower ?? (snapshot as PlayerSnapshotV1).upcomingPower;
   const statuses = player?.statuses ?? (snapshot as PlayerSnapshotV1).statuses;
+  setHudScrambled(
+    hud,
+    statuses.some((status) => status.kind === "scramble"),
+  );
   const replacementMode = player?.replacementMode ??
     (snapshot as PlayerSnapshotV1).replacementMode;
   const incoming = player?.incomingGarbage ?? (snapshot as PlayerSnapshotV1).incomingGarbage;
@@ -381,6 +402,11 @@ export function updateHud(
   const incomingRows = incoming.reduce((sum, packet) => sum + packet.rows, 0);
   const readyGarbage = incoming.some((packet) => packet.readyTick <= currentTick);
   setHudGarbage(hud, incomingRows, readyGarbage);
+  const barrier = statuses.find(
+    (status): status is Extract<StatusState, { kind: "barrier" }> =>
+      status.kind === "barrier",
+  );
+  setHudBarrierCapacity(hud, barrier?.capacity ?? 0);
   setTimedEffectsIfChanged(hud, timedEffectHudItems(statuses, replacementMode));
 }
 
@@ -524,6 +550,8 @@ export async function bootstrap(): Promise<void> {
   });
 
   const resetPresentation = (): void => {
+    resetHudBarrierCapacityPresentation(shell.left);
+    resetHudBarrierCapacityPresentation(shell.right);
     presentationTimeline = new PresentationTimeline({
       reducedMotion: preferences.reducedMotion,
       reducedFlashes: preferences.reducedFlashes,
@@ -925,12 +953,34 @@ export async function bootstrap(): Promise<void> {
     audio.play("defeat");
   };
 
-  const processEffects = (effects: readonly SimulationEffect[], pan = -0.45): void => {
-    presentationRouter.consumeSimulationEffects(
-      effects,
-      pan <= 0 ? "left" : "right",
+  const processEffects = (
+    effects: readonly SimulationEffect[],
+    board: PresentationBoard = "left",
+  ): void => {
+    const pan = board === "left" ? -0.45 : 0.45;
+    const barrierActivated = effects.some((effect) => effect.kind === "barrier-start");
+    const barrierBlockedRows = effects.reduce(
+      (total, effect) => total +
+        (effect.kind === "barrier-block" ? Math.max(0, effect.rows ?? 0) : 0),
+      0,
     );
+    if (barrierActivated || barrierBlockedRows > 0) {
+      presentHudBarrierResolution(board === "left" ? shell.left : shell.right, {
+        activated: barrierActivated,
+        blockedRows: barrierBlockedRows,
+        animate: !preferences.reducedMotion &&
+          !preferences.reducedFlashes &&
+          !preferences.reducedEffects,
+      });
+    }
+    presentationRouter.consumeSimulationEffects(effects, board);
     for (const effect of effects) {
+      const hapticDuration = hapticDurationForSimulationEffect(
+        effect,
+        preferences.vibration,
+        board,
+      );
+      if (hapticDuration !== null) navigator.vibrate?.(hapticDuration);
       if (effect.kind === "piece-locked") audio.play("lock", { pan });
       else if (effect.kind === "t-spin") audio.play("t-spin", { pan });
       else if (effect.kind === "line-clear" && effect.phase === "impact") {
@@ -1286,7 +1336,7 @@ export async function bootstrap(): Promise<void> {
           return resumeCompetitiveTransport();
         },
         onSimulationEffects: (effects) => {
-          processEffects(effects, -0.45);
+          processEffects(effects, "left");
         },
         onTerminal: (_terminal: CompetitiveTerminalState) => {
           setInputsEnabled(false);

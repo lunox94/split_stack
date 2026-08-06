@@ -20,21 +20,18 @@ export const POWER_ACCENT_COLORS: Readonly<Record<PowerKind, string>> = {
   scramble: "#ff8ade",
   nuke: "#ff665e",
   collapse: "#ffd84a",
-  "monomino-rush": "#77e65c",
+  "monomino-rush": "#f2f6ff",
   "acid-rain": "#42e8ba",
   oversize: "#4dbdff",
   "ghost-jam": "#ad8cff",
 };
 
-export const POWER_ACCENT_HEX: Readonly<Record<PowerKind, number>> = {
-  scramble: 0xff8ade,
-  nuke: 0xff665e,
-  collapse: 0xffd84a,
-  "monomino-rush": 0x77e65c,
-  "acid-rain": 0x42e8ba,
-  oversize: 0x4dbdff,
-  "ghost-jam": 0xad8cff,
-};
+export const POWER_ACCENT_HEX = Object.fromEntries(
+  Object.entries(POWER_ACCENT_COLORS).map(([power, color]) => [
+    power,
+    Number.parseInt(color.slice(1), 16),
+  ]),
+) as Readonly<Record<PowerKind, number>>;
 
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 

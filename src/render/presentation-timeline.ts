@@ -90,6 +90,12 @@ export interface BarrierCue {
   readonly capacity: number;
 }
 
+export interface BarrierHitCue {
+  readonly id: string;
+  readonly kind: "barrier-hit";
+  readonly board: PresentationBoard;
+}
+
 export interface StatusPowerCue {
   readonly id: string;
   readonly kind:
@@ -128,6 +134,7 @@ export type PresentationCue =
   | GarbageRiseCue
   | CollapseCue
   | BarrierCue
+  | BarrierHitCue
   | StatusPowerCue
   | GhostJamCue
   | SpecialChainCue;
@@ -229,6 +236,12 @@ const STATUS_POWER_TIMING: PresentationTiming = {
   durationMs: 500,
 };
 
+const BARRIER_HIT_TIMING: PresentationTiming = {
+  impactAtMs: 0,
+  blockingUntilMs: 0,
+  durationMs: 220,
+};
+
 const SPECIAL_STEP_MS = 55;
 
 const orderedSpecials = (cue: SpecialChainCue): SpecialTriggerPoint[] =>
@@ -243,6 +256,7 @@ const acidStepMs = (cue: AcidDissolveCue): number =>
   Math.min(35, 310 / Math.max(1, acidRows(cue).length));
 
 const timingFor = (cue: PresentationCue): PresentationTiming => {
+  if (cue.kind === "barrier-hit") return BARRIER_HIT_TIMING;
   if (cue.kind === "line-clear") return LINE_CLEAR_TIMING;
   if (cue.kind === "offensive-transfer") return OFFENSIVE_TRANSFER_TIMING;
   if (cue.kind === "nuke") return NUKE_TIMING;
@@ -324,21 +338,28 @@ export class PresentationTimeline {
       const elapsed = atMs - scheduled.startedAtMs;
       if (elapsed < 0 || elapsed >= scheduled.timing.durationMs) continue;
       blocking ||= elapsed < scheduled.timing.blockingUntilMs;
-      const stage: PresentationStage = elapsed < scheduled.timing.impactAtMs
-        ? "anticipation"
-        : elapsed < scheduled.timing.blockingUntilMs
-          ? "action"
-          : "follow-through";
-      const stageStart = stage === "anticipation"
+      const instantAction = scheduled.cue.kind === "barrier-hit";
+      const stage: PresentationStage = instantAction
+        ? "action"
+        : elapsed < scheduled.timing.impactAtMs
+          ? "anticipation"
+          : elapsed < scheduled.timing.blockingUntilMs
+            ? "action"
+            : "follow-through";
+      const stageStart = instantAction
         ? 0
-        : stage === "action"
+        : stage === "anticipation"
+          ? 0
+          : stage === "action"
+            ? scheduled.timing.impactAtMs
+            : scheduled.timing.blockingUntilMs;
+      const stageEnd = instantAction
+        ? scheduled.timing.durationMs
+        : stage === "anticipation"
           ? scheduled.timing.impactAtMs
-          : scheduled.timing.blockingUntilMs;
-      const stageEnd = stage === "anticipation"
-        ? scheduled.timing.impactAtMs
-        : stage === "action"
-          ? scheduled.timing.blockingUntilMs
-          : scheduled.timing.durationMs;
+          : stage === "action"
+            ? scheduled.timing.blockingUntilMs
+            : scheduled.timing.durationMs;
       const stageProgress = clampProgress(
         (elapsed - stageStart) / (stageEnd - stageStart),
       );
@@ -397,7 +418,7 @@ export class PresentationTimeline {
             : stage === "action"
               ? "impact"
             : "particles";
-      const particleCount = this.#reducedMotion
+      const particleCount = this.#reducedMotion || scheduled.cue.kind === "barrier-hit"
         ? 0
         : Math.round(
             (scheduled.cue.kind === "nuke" && stage !== "anticipation"

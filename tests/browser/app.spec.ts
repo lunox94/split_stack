@@ -532,13 +532,13 @@ async function expectPlayerFrameGeometry(
   const meter = await elementRect(pane.locator(".power-meter"));
   const menu = await elementRect(page.getByRole("button", { name: "Match menu" }));
   const headerHeight = board.width < 160 ? 64 : 72;
-  const completeFrameHeight = headerHeight + 4 + board.height + 4 + 40;
+  const completeFrameHeight = headerHeight + 4 + board.height + 6 + 40;
   const expectedFrameTop = (availableBottom - completeFrameHeight) / 2;
 
   expectNear(board.y, expectedFrameTop + headerHeight + 4, `${side} board top`);
   expect(expectedFrameTop).toBeGreaterThanOrEqual(3.5);
   expectNear(footer.x, board.x, `${side} footer left`);
-  expectNear(footer.y, rectBottom(board) + 4, `${side} footer top`);
+  expectNear(footer.y, rectBottom(board) + 6, `${side} footer top`);
   expectNear(footer.width, board.width, `${side} footer width`);
   expectNear(footer.height, 40, `${side} footer height`);
   expect(availableBottom - rectBottom(footer)).toBeGreaterThanOrEqual(3.5);
@@ -569,15 +569,15 @@ async function expectPlayerFrameGeometry(
   expectNear(header.x, board.x, `${side} header left`);
   expectNear(header.width, board.width, `${side} header width`);
 
-  expectNear(rail.width, 24, `${side} rail width`);
+  expectNear(rail.width, 22, `${side} rail width`);
   expectNear(rail.y, board.y, `${side} rail top`);
   expectNear(rail.height, board.height, `${side} rail height`);
-  expectNear(icon.width, 20, `${side} icon width`);
-  expectNear(icon.height, 20, `${side} icon height`);
+  expectNear(icon.width, 18, `${side} icon width`);
+  expectNear(icon.height, 18, `${side} icon height`);
   expectNear(rectCenterX(icon), rectCenterX(rail), `${side} icon centering`);
   expectNear(icon.y, rail.y + 2, `${side} rail top padding`);
   expect(rectBottom(icon)).toBeLessThanOrEqual(rectBottom(rail) + 0.5);
-  expectNear(meter.width, 20, `${side} visible meter width`);
+  expectNear(meter.width, 18, `${side} visible meter width`);
   expectNear(rectCenterX(meter), rectCenterX(rail), `${side} meter centering`);
   expectNear(meter.y, rectBottom(icon) + 3, `${side} icon-to-meter gap`);
   expectNear(rectBottom(meter), rectBottom(rail) - 2, `${side} rail bottom padding`);
@@ -611,7 +611,7 @@ async function expectVersusFrameGeometry(
   expectNear(leftBoard.width, rightBoard.width, "equal board widths");
   expectNear(leftBoard.height, rightBoard.height, "equal board heights");
   expectNear(leftBoard.y, rightBoard.y, "aligned board tops");
-  expectNear(rightBoard.x - rectRight(leftBoard), 58, "fixed center corridor");
+  expectNear(rightBoard.x - rectRight(leftBoard), 54, "fixed center corridor");
   expectNear(leftRail.x, rectRight(leftBoard) + 4, "local board-to-rail gap");
   expectNear(rightRail.x, rectRight(leftRail) + 2, "inter-rail gap");
   expectNear(rightBoard.x, rectRight(rightRail) + 4, "opponent rail-to-board gap");
@@ -1043,6 +1043,10 @@ test("wide Practice gameplay frame reserves its header, footer, and external rai
   await expect(hud.locator(".hud-stat-label-full", { hasText: "Level" })).toBeVisible();
   await expect(hud.locator(".hud-stat-label-full", { hasText: "Lines" })).toBeVisible();
   await expect(hud.locator(".power-meter-segment")).toHaveCount(7);
+  await expect(hud.locator(".power-meter-segment").first()).toHaveCSS(
+    "background-color",
+    "rgba(29, 43, 59, 0.96)",
+  );
   await expect(hud.locator(".hold-preview")).toHaveCSS("border-top-style", "none");
   await expect(hud.locator(".incoming-garbage svg")).toHaveCSS(
     "color",
@@ -1064,7 +1068,7 @@ test("constrained Practice keeps its menu clear of the scaled previews", async (
     .toBeVisible();
 });
 
-test("wide PvP gameplay frame stays packed in a fixed 58px center corridor", async ({
+test("wide PvP gameplay frame stays packed in a fixed 54px center corridor", async ({
   context,
   page,
 }) => {

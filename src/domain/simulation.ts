@@ -97,6 +97,7 @@ export interface SimulationEffect {
     | "acid-lock"
     | "acid-dissolve"
     | "garbage-rise"
+    | "barrier-block"
     | "top-out"
     | "hold";
   eventId?: string;
@@ -642,6 +643,9 @@ class LocalSimulation implements Simulation {
       ...(result.barrier === null ? [] : [result.barrier]),
     ];
     if (result.appliedRows > 0) effects.push({ kind: "garbage-rise", rows: result.appliedRows });
+    if (result.blockedRows > 0) {
+      effects.push({ kind: "barrier-block", rows: result.blockedRows });
+    }
     if (result.topOut) {
       this.#player.topOut = { tick: this.#tick, reason: "garbage" };
       this.#player.stats.topOutTick = this.#tick;
