@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   actionsForGesture,
   classifyCompletedGesture,
+  GestureInput,
   isGameplayGestureTarget,
 } from "../../src/input/gestures";
 import { KeyboardInput, keyboardActionForKey } from "../../src/input/keyboard";
@@ -126,6 +127,121 @@ describe("isGameplayGestureTarget", () => {
     expect(isGameplayGestureTarget(hudText)).toBe(true);
     expect(isGameplayGestureTarget(button)).toBe(false);
     expect(isGameplayGestureTarget(nestedButtonIcon)).toBe(false);
+  });
+});
+
+describe("GestureInput native touch suppression", () => {
+  it("keeps the enabled native touch lifecycle inside the gameplay surface", () => {
+    const root = document.createElement("div");
+    const gameplaySurface = document.createElement("div");
+    root.append(gameplaySurface);
+    document.body.append(root);
+    const input = new GestureInput(root, () => undefined, {
+      getCellSize: () => 20,
+    });
+
+    for (const type of ["touchstart", "touchmove", "touchend"] as const) {
+      const reachedTarget = vi.fn();
+      gameplaySurface.addEventListener(type, reachedTarget);
+      const event = new Event(type, {
+        bubbles: true,
+        cancelable: true,
+      });
+
+      gameplaySurface.dispatchEvent(event);
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(reachedTarget).not.toHaveBeenCalled();
+    }
+    input.dispose();
+    root.remove();
+  });
+
+  it("leaves explicit controls and gesture-blocked regions touchable", () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const input = new GestureInput(root, () => undefined, {
+      getCellSize: () => 20,
+    });
+    const blockedRegion = document.createElement("div");
+    blockedRegion.setAttribute("data-gesture-blocked", "");
+    const controls = [
+      document.createElement("button"),
+      document.createElement("input"),
+      document.createElement("select"),
+      document.createElement("a"),
+      blockedRegion,
+    ];
+    root.append(...controls);
+
+    for (const control of controls) {
+      const reachedControl = vi.fn();
+      control.addEventListener("touchstart", reachedControl);
+      const event = new Event("touchstart", {
+        bubbles: true,
+        cancelable: true,
+      });
+
+      control.dispatchEvent(event);
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(reachedControl).toHaveBeenCalledOnce();
+    }
+    input.dispose();
+    root.remove();
+  });
+
+  it("stops suppressing native touch while disabled and after disposal", () => {
+    const root = document.createElement("div");
+    const gameplaySurface = document.createElement("div");
+    root.append(gameplaySurface);
+    document.body.append(root);
+    const input = new GestureInput(root, () => undefined, {
+      getCellSize: () => 20,
+    });
+    const reachedTarget = vi.fn();
+    gameplaySurface.addEventListener("touchmove", reachedTarget);
+    const dispatchTouchMove = (): Event => {
+      const event = new Event("touchmove", {
+        bubbles: true,
+        cancelable: true,
+      });
+      gameplaySurface.dispatchEvent(event);
+      return event;
+    };
+
+    input.setEnabled(false);
+    expect(dispatchTouchMove().defaultPrevented).toBe(false);
+    expect(reachedTarget).toHaveBeenCalledTimes(1);
+
+    input.setEnabled(true);
+    expect(dispatchTouchMove().defaultPrevented).toBe(true);
+    expect(reachedTarget).toHaveBeenCalledTimes(1);
+
+    input.dispose();
+    expect(dispatchTouchMove().defaultPrevented).toBe(false);
+    expect(reachedTarget).toHaveBeenCalledTimes(2);
+    root.remove();
+  });
+
+  it("preserves pointer-driven gameplay actions", () => {
+    const actions: string[] = [];
+    const root = document.createElement("div");
+    const gameplaySurface = document.createElement("div");
+    root.append(gameplaySurface);
+    document.body.append(root);
+    const input = new GestureInput(
+      root,
+      ({ action }) => actions.push(action),
+      { getCellSize: () => 20, now: () => 100 },
+    );
+
+    gameplaySurface.dispatchEvent(pointerEvent("pointerdown", 1));
+    gameplaySurface.dispatchEvent(pointerEvent("pointerup", 1));
+
+    expect(actions).toEqual(["rotate-cw"]);
+    input.dispose();
+    root.remove();
   });
 });
 

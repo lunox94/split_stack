@@ -308,6 +308,7 @@ export class WebGlUnavailableError extends Error {
 const MAX_INSTANCES_PER_POOL = 512;
 export const MAX_PRESENTATION_PARTICLES = 96;
 const BOARD_GUTTER_PX = 12;
+const POWER_RAIL_BOARD_SHIFT_PX = 4;
 const VERTICAL_GUTTER_PX = 16;
 
 interface CellPool {
@@ -397,10 +398,12 @@ export function calculateRendererLayout(
   const boardHeight =
     cellSize * (RULES.board.height - RULES.board.hiddenRows);
 
-  const viewportFor = (paneX: number): BoardViewport => ({
+  const viewportFor = (paneX: number, direction: -1 | 1): BoardViewport => ({
     paneX,
     paneWidth,
-    boardX: paneX + (paneWidth - boardWidth) / 2,
+    boardX:
+      paneX + (paneWidth - boardWidth) / 2 +
+      direction * POWER_RAIL_BOARD_SHIFT_PX,
     boardY: (safeHeight - boardHeight) / 2,
     boardWidth,
     boardHeight,
@@ -411,8 +414,8 @@ export function calculateRendererLayout(
     width: safeWidth,
     height: safeHeight,
     mode,
-    left: viewportFor(0),
-    right: mode === "versus" ? viewportFor(paneWidth) : null,
+    left: viewportFor(0, -1),
+    right: mode === "versus" ? viewportFor(paneWidth, 1) : null,
     dividerX: mode === "versus" ? paneWidth : null,
   };
 }

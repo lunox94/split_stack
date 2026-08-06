@@ -3,15 +3,190 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_PREFERENCES } from "../../src/persistence/settings";
+import { calculateRendererLayout } from "../../src/render/renderer";
 import { SPECIAL_ICON_PATHS } from "../../src/render/special-icons";
 import {
   createAppShell,
+  hideGameplayPowerTip,
+  positionGameplayTip,
+  positionHudToViewport,
+  renderTimedEffects,
+  setHudGarbage,
   setElementHidden,
+  setHudPower,
+  setMatchMenu,
   setPowerMeterAccessibility,
   showHelp,
+  showGameplayPowerTip,
 } from "../../src/ui/shell";
 
 describe("application shell", () => {
+  it("builds a labeled board-attached HUD with a seven-segment inner power rail", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+    const hud = shell.left.pane.querySelector<HTMLElement>(".player-hud");
+
+    expect(hud?.dataset.side).toBe("left");
+    expect(
+      [...(hud?.querySelectorAll(".hud-stat-label") ?? [])].map(
+        (label) => label.textContent,
+      ),
+    ).toEqual(["Score", "Level", "Lines"]);
+    expect(hud?.querySelectorAll(".power-meter-segment")).toHaveLength(7);
+    expect(hud?.querySelector(".upcoming-power-icon")).not.toBeNull();
+    expect(shell.left.score.hasAttribute("aria-label")).toBe(false);
+    expect(shell.left.upcomingPower.getAttribute("role")).toBe("img");
+    expect(shell.left.incoming.getAttribute("role")).toBe("img");
+    expect(shell.left.statuses.getAttribute("role")).toBe("group");
+    expect(
+      hud?.querySelector('[data-special-icon="garbage-core"]'),
+    ).not.toBeNull();
+    expect(hud?.querySelector(".hold-preview")?.classList).toContain("is-unboxed");
+    expect(hud?.querySelector(".next-preview")?.classList).toContain("is-unboxed");
+  });
+
+  it("anchors HUD bounds to the board and selects non-overlapping fallbacks", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+    const roomy = calculateRendererLayout(400, 800, "versus");
+
+    positionHudToViewport(shell.left, roomy.left, roomy.height);
+
+    expect(shell.left.root.style.left).toBe("8px");
+    expect(shell.left.root.style.top).toBe("224px");
+    expect(shell.left.root.style.width).toBe("176px");
+    expect(shell.left.pane.dataset.hudTop).toBe("outside");
+    expect(shell.left.pane.dataset.statusPlacement).toBe("below");
+
+    const constrained = calculateRendererLayout(800, 400, "practice");
+    positionHudToViewport(shell.left, constrained.left, constrained.height);
+
+    expect(shell.left.pane.dataset.hudTop).toBe("inside");
+    expect(shell.left.pane.dataset.statusPlacement).toBe("outer");
+  });
+
+  it("places gameplay tips in available board-side space before using an inset", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+    const above = calculateRendererLayout(400, 800, "versus");
+
+    positionGameplayTip(shell, above.left, above.height);
+    expect(shell.match.dataset.tipPlacement).toBe("above");
+
+    const outer = calculateRendererLayout(800, 400, "practice");
+    positionGameplayTip(shell, outer.left, outer.height);
+    expect(shell.match.dataset.tipPlacement).toBe("outer");
+
+    const inset = calculateRendererLayout(360, 640, "practice");
+    positionGameplayTip(shell, inset.left, inset.height);
+    expect(shell.match.dataset.tipPlacement).toBe("inside");
+  });
+
+  it("renders discrete charge and pulses when the upcoming power advances", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+
+    setHudPower(shell.left, "nuke", "Nuke", 3, 0);
+
+    expect(
+      shell.left.upcomingPower.querySelector('[data-power-icon="nuke"]'),
+    ).not.toBeNull();
+    expect(
+      shell.left.upcomingPower.querySelector('[data-power-icon="nuke"]')
+        ?.getAttribute("aria-hidden"),
+    ).toBe("true");
+    expect(
+      shell.left.meterSegments
+        .filter((segment) => segment.classList.contains("is-filled"))
+        .map((segment) => segment.dataset.charge),
+    ).toEqual(["1", "2", "3"]);
+    expect(shell.left.meter.getAttribute("aria-valuenow")).toBe("3");
+
+    setHudPower(shell.left, "collapse", "Collapse", 1, 1);
+
+    expect(
+      shell.left.upcomingPower.querySelector('[data-power-icon="collapse"]'),
+    ).not.toBeNull();
+    expect(shell.left.meter.classList).toContain("is-activating");
+  });
+
+  it("uses the Garbage Core glyph for empty, warned, and ready garbage states", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+
+    setHudGarbage(shell.left, 0, false);
+    expect(shell.left.incoming.dataset.state).toBe("empty");
+    expect(shell.left.incoming.getAttribute("aria-label")).toBe(
+      "Incoming garbage: 0",
+    );
+
+    setHudGarbage(shell.left, 3, false);
+    expect(shell.left.incoming.dataset.state).toBe("warning");
+    expect(shell.left.incomingCount.textContent).toBe("3");
+    expect(shell.left.incoming.getAttribute("aria-label")).toContain("queued");
+
+    setHudGarbage(shell.left, 3, true);
+    expect(shell.left.incoming.dataset.state).toBe("ready");
+    expect(shell.left.incoming.getAttribute("aria-label")).toContain("ready to rise");
+
+    const countText = vi.spyOn(shell.left.incomingCount, "textContent", "set");
+    const accessibleLabel = vi.spyOn(shell.left.incoming, "setAttribute");
+    setHudGarbage(shell.left, 3, true);
+    expect(countText).not.toHaveBeenCalled();
+    expect(accessibleLabel).not.toHaveBeenCalled();
+  });
+
+  it("shows two colored timed-effect rows with truthful active overflow", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+    expect(shell.left.statuses.hasAttribute("aria-live")).toBe(false);
+
+    renderTimedEffects(shell.left, [
+      {
+        id: "scramble",
+        label: "Scramble",
+        remainingTicks: 300,
+        totalTicks: 600,
+        accent: "#ff8ade",
+      },
+      {
+        id: "barrier",
+        label: "Barrier",
+        detail: "3",
+        remainingTicks: 840,
+        totalTicks: 1_200,
+        accent: "#57e6ff",
+      },
+      {
+        id: "ghost-jam",
+        label: "Ghost Jam",
+        remainingTicks: 600,
+        totalTicks: 900,
+        accent: "#ad8cff",
+      },
+    ]);
+
+    const rows = shell.left.statuses.querySelectorAll<HTMLElement>(
+      ".timed-effect",
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.textContent).toContain("Scramble");
+    expect(rows[0]?.textContent).toContain("5s");
+    expect(rows[0]?.style.getPropertyValue("--effect-accent")).toBe("#ff8ade");
+    expect(rows[1]?.textContent).toContain("Barrier 3");
+    expect(rows[1]?.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow"))
+      .toBe("840");
+    expect(shell.left.statuses.querySelector(".timed-effect-overflow")?.textContent)
+      .toBe("+1 active");
+
+    const firstRow = rows[0];
+    renderTimedEffects(shell.left, [
+      {
+        id: "scramble",
+        label: "Scramble",
+        remainingTicks: 240,
+        totalTicks: 600,
+        accent: "#ff8ade",
+      },
+    ]);
+    expect(shell.left.statuses.querySelector(".timed-effect")).toBe(firstRow);
+    expect(firstRow?.textContent).toContain("4s");
+  });
+
   it("presents readiness as a centered state with both players visible", () => {
     const shell = createAppShell(document, document.createElement("div"));
 
@@ -34,6 +209,62 @@ describe("application shell", () => {
     expect(shell.readinessPanel.hidden).toBe(true);
     expect(shell.overlayText.hidden).toBe(false);
     expect(shell.overlayText.textContent).toBe("Match starts in 3");
+  });
+
+  it("uses one compact match-menu trigger for Practice and live play", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+
+    expect(shell.match.querySelectorAll(".match-actions > button")).toHaveLength(1);
+    expect(shell.matchMenuButton.getAttribute("aria-label")).toBe("Match menu");
+    expect(shell.matchMenuButton.getAttribute("aria-haspopup")).toBe("dialog");
+    expect(shell.matchMenu.getAttribute("aria-describedby")).toBe(
+      shell.matchMenuMessage.id,
+    );
+
+    setMatchMenu(shell, "practice", true);
+
+    expect(shell.matchMenu.hidden).toBe(false);
+    expect(shell.matchMenuButton.getAttribute("aria-expanded")).toBe("true");
+    expect(shell.matchMenuMessage.textContent).toContain("Practice is paused");
+    expect(shell.matchMenuCloseButton.textContent).toBe("Resume");
+    expect(shell.leaveMatchButton.textContent).toBe("Leave match");
+
+    setMatchMenu(shell, "competitive", true);
+
+    expect(shell.matchMenuMessage.textContent).toContain("keeps running");
+    expect(shell.matchMenuCloseButton.textContent).toBe("Return to match");
+
+    setMatchMenu(shell, "competitive", false);
+
+    expect(shell.matchMenu.hidden).toBe(true);
+    expect(shell.matchMenuButton.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("shows a simple nonmodal upcoming-power tip with the familiar icon", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+
+    showGameplayPowerTip(
+      shell,
+      "acid-rain",
+      "Acid Rain",
+      "Use three drops that dissolve their selected columns.",
+    );
+
+    expect(shell.gameplayTip.hidden).toBe(false);
+    expect(shell.gameplayTip.dataset.power).toBe("acid-rain");
+    expect(
+      shell.gameplayTip.querySelector('[data-power-icon="acid-rain"]'),
+    ).not.toBeNull();
+    expect(shell.gameplayTip.textContent).toContain("Upcoming power · Acid Rain");
+    expect(shell.gameplayTip.textContent).toContain("Use three drops");
+    expect(shell.gameplayTipAnnouncement.getAttribute("role")).toBe("status");
+    expect(shell.gameplayTipAnnouncement.textContent).toContain(
+      "Upcoming power · Acid Rain. Use three drops",
+    );
+
+    hideGameplayPowerTip(shell);
+
+    expect(shell.gameplayTip.hidden).toBe(true);
   });
 
   it("renders Hold and a large-first five-piece queue as real miniatures", () => {
@@ -233,21 +464,22 @@ describe("application shell", () => {
     );
   });
 
-  it("groups the glossary by meter powers, marked powers, and special pieces", () => {
+  it("merges every illustrated power group into How to Play", () => {
     const shell = createAppShell(document, document.createElement("div"));
-    showHelp(shell, "powers");
+    showHelp(shell, "how");
 
     const meter = shell.helpBody.querySelector<HTMLElement>(
-      '[data-glossary-group="meter"]',
+      '[data-help-group="meter"]',
     );
     const marked = shell.helpBody.querySelector<HTMLElement>(
-      '[data-glossary-group="marked"]',
+      '[data-help-group="marked"]',
     );
     const pieces = shell.helpBody.querySelector<HTMLElement>(
-      '[data-glossary-group="pieces"]',
+      '[data-help-group="pieces"]',
     );
 
     expect(meter?.querySelector("h3")?.textContent).toBe("Meter powers");
+    expect(meter?.querySelectorAll("[data-power-icon]")).toHaveLength(7);
     expect(meter?.textContent).toContain("Oversize");
     expect(meter?.textContent).toContain("Ghost Jam");
     expect(meter?.textContent).not.toContain("Blackout");
@@ -255,10 +487,14 @@ describe("application shell", () => {
     expect(marked?.querySelector("h3")?.textContent).toBe("Marked-piece powers");
     expect(marked?.textContent).toContain("Blackout");
     expect(marked?.textContent).toContain("Barrier");
+    expect(marked?.querySelectorAll(".marked-cell-sample")).toHaveLength(5);
     expect(pieces?.querySelector("h3")?.textContent).toBe("Special pieces");
     expect(pieces?.textContent).toContain("Hollow Cross");
     expect(pieces?.textContent).toContain("Glitch Piece");
     expect(pieces?.textContent).toContain("Oversize shapes");
+    expect(pieces?.querySelectorAll(".special-piece-sample")).toHaveLength(3);
+    expect(shell.lobby.textContent).not.toContain("Power Glossary");
+    expect(shell.controlsHelpButton.textContent).toBe("Controls");
   });
 
   it("separates touch help from a complete action-to-key table", () => {
@@ -271,7 +507,9 @@ describe("application shell", () => {
     const keyboard = shell.helpBody.querySelector<HTMLElement>(
       '[data-control-scheme="keyboard"]',
     );
-    expect(touch?.querySelectorAll("li")).toHaveLength(3);
+    expect(touch?.querySelectorAll(".gesture-control-row")).toHaveLength(6);
+    expect(touch?.textContent).toContain("entire gameplay area");
+    expect(touch?.querySelectorAll("[data-control-action]")).toHaveLength(7);
     expect(keyboard?.querySelector("table")).not.toBeNull();
 
     const rows = new Map(

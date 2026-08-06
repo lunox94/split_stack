@@ -15,6 +15,11 @@ async function openApp(page: Page, identity = "Browser Tester"): Promise<void> {
   await page.waitForLoadState("networkidle");
 }
 
+async function leaveThroughMatchMenu(page: Page): Promise<void> {
+  await page.getByRole("button", { name: "Match menu" }).click();
+  await page.getByRole("button", { name: "Leave match" }).click();
+}
+
 interface MarkedCellRenderMetrics {
   readonly darkBadgeCoverage: number;
   readonly accentGlyphCoverage: number;
@@ -684,6 +689,11 @@ test("lobby keeps help opt-in and exposes the complete settings surface", async 
   await page.getByRole("button", { name: "How to Play" }).click();
   await expect(page.getByRole("heading", { name: "How to Play" })).toBeVisible();
   await expect(page.getByText(/keep your stack below the top/i)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Meter powers" })).toBeVisible();
+  await expect(page.locator('[data-help-group="meter"] [data-power-icon]')).toHaveCount(7);
+  await expect(page.getByRole("heading", { name: "Marked-piece powers" })).toBeVisible();
+  await expect(page.locator('[data-help-group="marked"] .marked-cell-sample')).toHaveCount(5);
+  await expect(page.getByRole("heading", { name: "Special pieces" })).toBeVisible();
   const markedPresentationAnimations = await page
     .locator(".marked-cell-sample .piece-preview-cell")
     .first()
@@ -699,14 +709,12 @@ test("lobby keeps help opt-in and exposes the complete settings surface", async 
   });
   await page.getByRole("button", { name: "Back" }).click();
 
-  await page.getByRole("button", { name: "Power Glossary" }).click();
-  await expect(page.getByRole("heading", { name: "Power Glossary" })).toBeVisible();
-  await expect(page.getByText("Blackout", { exact: true })).toBeVisible();
-  await expect(page.getByText("Acid Rain", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Back" }).click();
-
-  await page.getByRole("button", { name: "Practice Controls" }).click();
-  await expect(page.getByRole("heading", { name: "Practice Controls" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Power Glossary" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Controls", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Controls", exact: true })).toBeVisible();
+  await expect(page.getByText(/entire gameplay area/i)).toBeVisible();
+  await expect(page.locator(".gesture-control-row")).toHaveCount(6);
+  await expect(page.locator("[data-control-action]")).toHaveCount(7);
   await expect(page.getByRole("heading", { name: "Keyboard controls" })).toBeVisible();
   await expect(page.getByRole("row", { name: /Move left\/right.*A.*D/i })).toBeVisible();
   await expect(page.getByRole("row", { name: /Hard drop.*Space/i })).toBeVisible();
@@ -790,7 +798,19 @@ test("Practice accepts keyboard and compact touch-button actions", async ({ page
     );
   };
   await expect(board).toBeVisible();
-  await expect(page.getByRole("button", { name: "Pause practice" })).toBeVisible();
+  const matchMenuButton = page.getByRole("button", { name: "Match menu" });
+  await expect(matchMenuButton).toBeVisible();
+
+  await matchMenuButton.click();
+  await expect(page.getByRole("dialog", { name: "Match menu" })).toBeVisible();
+  await expect(page.getByText(/Practice is paused/i)).toBeVisible();
+  const pausedBaseline = await numericText(localScore(page));
+  await page.getByRole("dialog", { name: "Match menu" }).evaluate(() => {
+    (document.activeElement as HTMLElement | null)?.blur();
+  });
+  await page.keyboard.press("Space");
+  await expect.poll(() => numericText(localScore(page))).toBe(pausedBaseline);
+  await page.getByRole("button", { name: "Resume", exact: true }).click();
 
   const focusedControlBaseline = await numericText(localScore(page));
   await holdButton.press("Space");
@@ -814,6 +834,39 @@ test("Practice accepts keyboard and compact touch-button actions", async ({ page
   await page.getByRole("button", { name: "Hard drop" }).press("Enter");
   await expectScoreAbove(localScore(page), keyboardButtonBaseline);
   await expectOnePreviewAdvance(beforeKeyboardDrop);
+});
+
+test("Practice HUD hugs the board with a full-height vertical power rail", async ({ page }) => {
+  await openApp(page);
+  await page.getByRole("button", { name: "Practice", exact: true }).click();
+
+  const board = page.getByRole("application", { name: "Your board" });
+  const hud = page.locator('[data-side="left"] .player-hud');
+  const meter = page.locator('[data-side="left"] .power-meter');
+  await expect(board).toBeVisible();
+
+  const [boardBox, hudBox, meterBox] = await Promise.all([
+    board.boundingBox(),
+    hud.boundingBox(),
+    meter.boundingBox(),
+  ]);
+  expect(boardBox).not.toBeNull();
+  expect(hudBox).not.toBeNull();
+  expect(meterBox).not.toBeNull();
+  expect(hudBox!.x).toBeCloseTo(boardBox!.x, 0);
+  expect(hudBox!.width).toBeCloseTo(boardBox!.width, 0);
+  expect(meterBox!.x - (boardBox!.x + boardBox!.width)).toBeCloseTo(4, 0);
+  expect(meterBox!.width).toBeCloseTo(12, 0);
+  expect(meterBox!.height).toBeCloseTo(boardBox!.height, 0);
+  await expect(hud.getByText("Score", { exact: true })).toBeVisible();
+  await expect(hud.getByText("Level", { exact: true })).toBeVisible();
+  await expect(hud.getByText("Lines", { exact: true })).toBeVisible();
+  await expect(hud.locator(".power-meter-segment")).toHaveCount(7);
+  await expect(hud.locator(".hold-preview")).toHaveCSS("border-top-style", "none");
+  await expect(hud.locator(".incoming-garbage svg")).toHaveCSS(
+    "color",
+    "rgb(127, 137, 154)",
+  );
 });
 
 test("the centered Ready panel shows both players and supports a clear undo", async ({
@@ -1205,6 +1258,31 @@ test("versus boards remain equal and side by side in landscape", async ({ contex
   expect(rightBox!.x + rightBox!.width).toBeLessThanOrEqual(640.5);
   expect(rightBox!.y + rightBox!.height).toBeLessThanOrEqual(360.5);
 
+  const leftPane = seatA.locator('.player-pane[data-side="left"]');
+  const rightPane = seatA.locator('.player-pane[data-side="right"]');
+  await expect(leftPane).toHaveAttribute("data-hud-top", "inside");
+  await expect(rightPane).toHaveAttribute("data-hud-top", "inside");
+  const [leftPower, leftGarbage, rightPower, rightGarbage] = await Promise.all([
+    leftPane.locator(".upcoming-power-icon").boundingBox(),
+    leftPane.locator(".incoming-garbage").boundingBox(),
+    rightPane.locator(".upcoming-power-icon").boundingBox(),
+    rightPane.locator(".incoming-garbage").boundingBox(),
+  ]);
+  for (const indicator of [leftPower, leftGarbage]) {
+    expect(indicator).not.toBeNull();
+    expect(indicator!.x).toBeGreaterThanOrEqual(leftBox!.x - 0.5);
+    expect(indicator!.x + indicator!.width).toBeLessThanOrEqual(
+      leftBox!.x + leftBox!.width + 0.5,
+    );
+  }
+  for (const indicator of [rightPower, rightGarbage]) {
+    expect(indicator).not.toBeNull();
+    expect(indicator!.x).toBeGreaterThanOrEqual(rightBox!.x - 0.5);
+    expect(indicator!.x + indicator!.width).toBeLessThanOrEqual(
+      rightBox!.x + rightBox!.width + 0.5,
+    );
+  }
+
   await seatB.close();
 });
 
@@ -1240,6 +1318,8 @@ test("leaving an active match records a forfeit before releasing the seat", asyn
   await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
   await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
 
+  await seatB.getByRole("button", { name: "Match menu" }).click();
+  await expect(seatB.getByText(/keeps running while this menu is open/i)).toBeVisible();
   await seatB.getByRole("button", { name: "Leave match" }).click();
 
   await expect(seatA.getByRole("heading", { name: "Victory" })).toBeVisible({
@@ -1280,7 +1360,7 @@ test("leaving during a failed realtime join closes the challenge and cancels its
   await expect(
     page.getByText("Live play is unavailable here. You can still use Practice."),
   ).toBeVisible({ timeout: 15_000 });
-  await page.getByRole("button", { name: "Leave match" }).click();
+  await leaveThroughMatchMenu(page);
   await expect(page.getByRole("heading", { name: "Split Stack" })).toBeVisible();
   await expect(seatB.getByRole("heading", { name: "Split Stack" })).toBeVisible({
     timeout: 15_000,
@@ -1351,7 +1431,7 @@ test("a durably confirmed newer runtime replaces a duplicate and a seat release 
     )
     .toBe(3);
 
-  await newerSeatB.getByRole("button", { name: "Leave match" }).click();
+  await leaveThroughMatchMenu(newerSeatB);
   await expect(seatA.getByRole("heading", { name: "Split Stack" })).toBeVisible({
     timeout: 15_000,
   });
@@ -1484,5 +1564,8 @@ test("Practice pauses for a real WebGL context loss and survives restoration", a
 
   expect(restored).toBe(true);
   await expect(page.getByRole("application", { name: "Your board" })).toBeVisible();
-  await expect(page.getByRole("button", { name: /practice/i })).toBeVisible();
+  await page.getByRole("button", { name: "Match menu" }).click();
+  await expect(page.getByText(/Practice is paused/i)).toBeVisible();
+  await page.getByRole("button", { name: "Resume", exact: true }).click();
+  await expect(page.locator(".center-overlay")).toBeHidden();
 });

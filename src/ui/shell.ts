@@ -1,7 +1,10 @@
 import { RULES } from "../config/rules";
 import { STRINGS, formatString, type StringKey } from "../app/strings";
-import type { PieceDescriptor, SpecialKind } from "../domain/types";
+import type { PieceDescriptor, PowerKind, SpecialKind } from "../domain/types";
 import type { Preferences } from "../persistence/settings";
+import { createPowerIcon } from "../render/power-icons";
+import { createSpecialIcon } from "../render/special-icons";
+import type { BoardViewport } from "../render/renderer";
 import {
   createMarkedCellSample,
   renderPiecePreviewSlot,
@@ -41,6 +44,7 @@ function menuScreen(document: Document, heading: string): {
 
 export interface HudElements {
   pane: HTMLElement;
+  root: HTMLElement;
   boardTarget: HTMLElement;
   name: HTMLElement;
   score: HTMLElement;
@@ -50,8 +54,9 @@ export interface HudElements {
   preview: HTMLElement;
   upcomingPower: HTMLElement;
   incoming: HTMLElement;
+  incomingCount: HTMLElement;
   meter: HTMLElement;
-  meterFill: HTMLElement;
+  meterSegments: readonly HTMLElement[];
   statuses: HTMLElement;
   blackout: HTMLElement;
   setPiecePreviews(
@@ -72,19 +77,37 @@ function createHud(document: Document, side: "left" | "right"): HudElements {
     side === "left" ? STRINGS["match.localBoard"] : STRINGS["match.opponentBoard"],
   );
   const hud = element(document, "div", "player-hud");
+  hud.dataset.side = side;
   const name = element(document, "span", "player-name", "—");
-  const score = element(document, "span", "hud-stat", "0");
-  score.setAttribute("aria-label", STRINGS["hud.score"]);
-  const level = element(document, "span", "hud-stat", "1");
-  level.setAttribute("aria-label", STRINGS["hud.level"]);
-  const lines = element(document, "span", "hud-stat", "0");
-  lines.setAttribute("aria-label", STRINGS["hud.lines"]);
-  const hold = element(document, "section", "piece-preview-group hold-preview");
+  const topInfo = element(document, "div", "hud-top-info");
+  const stats = element(document, "div", "hud-stats");
+  const stat = (label: string, initial: string): HTMLElement => {
+    const item = element(document, "span", "hud-stat");
+    item.append(
+      element(document, "span", "hud-stat-label", label),
+      element(document, "span", "hud-stat-value", initial),
+    );
+    stats.append(item);
+    return item.lastElementChild as HTMLElement;
+  };
+  const score = stat(STRINGS["hud.score"], "0");
+  const level = stat(STRINGS["hud.level"], "1");
+  const lines = stat(STRINGS["hud.lines"], "0");
+  topInfo.append(name, stats);
+  const hold = element(
+    document,
+    "section",
+    "piece-preview-group hold-preview is-unboxed",
+  );
   hold.setAttribute("aria-label", STRINGS["hud.hold"]);
   const holdLabel = element(document, "span", "piece-preview-label", STRINGS["hud.hold"]);
   const holdSlot = element(document, "div", "piece-preview-slot is-hold");
   hold.append(holdLabel, holdSlot);
-  const preview = element(document, "section", "piece-preview-group next-preview");
+  const preview = element(
+    document,
+    "section",
+    "piece-preview-group next-preview is-unboxed",
+  );
   preview.setAttribute("aria-label", STRINGS["hud.next"]);
   const previewLabel = element(
     document,
@@ -104,28 +127,39 @@ function createHud(document: Document, side: "left" | "right"): HudElements {
     return slot;
   });
   preview.append(previewLabel, previewSlots);
-  const upcomingPower = element(
+  const upcomingPower = element(document, "div", "upcoming-power-icon");
+  upcomingPower.setAttribute("role", "img");
+  upcomingPower.setAttribute("aria-label", STRINGS["hud.upcomingPower"]);
+  const incoming = element(document, "div", "incoming-garbage");
+  incoming.setAttribute("role", "img");
+  incoming.dataset.state = "empty";
+  incoming.setAttribute("aria-label", `${STRINGS["hud.incomingGarbage"]}: 0`);
+  const incomingIcon = createSpecialIcon(
     document,
-    "span",
-    "hud-detail",
-    `${STRINGS["hud.upcomingPower"]}: —`,
+    "garbage-core",
+    STRINGS["hud.incomingGarbage"],
   );
-  const incoming = element(
-    document,
-    "span",
-    "hud-detail",
-    `${STRINGS["hud.incomingGarbage"]}: 0`,
-  );
+  incomingIcon.setAttribute("aria-hidden", "true");
+  incomingIcon.removeAttribute("role");
+  const incomingCount = element(document, "span", "incoming-garbage-count", "0");
+  incoming.append(incomingIcon, incomingCount);
   const meter = element(document, "div", "power-meter");
   meter.setAttribute("role", "progressbar");
   meter.setAttribute("aria-label", STRINGS["hud.power"]);
   meter.setAttribute("aria-valuemin", "0");
   meter.setAttribute("aria-valuemax", String(RULES.power.threshold));
-  const meterFill = element(document, "span");
-  meter.append(meterFill);
-  hud.append(name, score, level, lines, hold, preview, upcomingPower, incoming, meter);
+  const meterSegments = Array.from({ length: RULES.power.threshold }, (_, index) => {
+    const segment = element(document, "span", "power-meter-segment");
+    segment.dataset.charge = String(index + 1);
+    meter.append(segment);
+    return segment;
+  });
+  const powerRail = element(document, "div", "power-rail");
+  powerRail.append(upcomingPower, meter, incoming);
+  hud.append(topInfo, hold, preview, powerRail);
   const statuses = element(document, "div", "status-row");
-  statuses.setAttribute("aria-live", "polite");
+  statuses.setAttribute("role", "group");
+  statuses.setAttribute("aria-label", "Active powers");
   const blackout = element(
     document,
     "div",
@@ -133,7 +167,8 @@ function createHud(document: Document, side: "left" | "right"): HudElements {
     STRINGS["match.blackoutCover"],
   );
   blackout.hidden = true;
-  pane.append(boardTarget, blackout, hud, statuses);
+  hud.append(statuses);
+  pane.append(boardTarget, blackout, hud);
   const setPiecePreviews = (
     held: PieceDescriptor | null,
     next: readonly PieceDescriptor[],
@@ -153,6 +188,7 @@ function createHud(document: Document, side: "left" | "right"): HudElements {
   setPiecePreviews(null, [], initialPreviewOptions);
   return {
     pane,
+    root: hud,
     boardTarget,
     name,
     score,
@@ -162,12 +198,68 @@ function createHud(document: Document, side: "left" | "right"): HudElements {
     preview,
     upcomingPower,
     incoming,
+    incomingCount,
     meter,
-    meterFill,
+    meterSegments,
     statuses,
     blackout,
     setPiecePreviews,
   };
+}
+
+export function positionHudToViewport(
+  hud: HudElements,
+  viewport: BoardViewport,
+  layoutHeight: number,
+): void {
+  const boardLeft = viewport.boardX - viewport.paneX;
+  const bottomSpace = Math.max(
+    0,
+    layoutHeight - (viewport.boardY + viewport.boardHeight),
+  );
+  const outerSpace = hud.pane.dataset.side === "left"
+    ? boardLeft
+    : viewport.paneWidth - (boardLeft + viewport.boardWidth);
+  hud.root.style.left = `${boardLeft}px`;
+  hud.root.style.top = `${viewport.boardY}px`;
+  hud.root.style.width = `${viewport.boardWidth}px`;
+  hud.root.style.height = `${viewport.boardHeight}px`;
+  hud.root.style.setProperty("--hud-outer-space", `${Math.max(0, outerSpace)}px`);
+  hud.pane.dataset.hudTop = viewport.boardY >= 92 ? "outside" : "inside";
+  hud.pane.dataset.statusPlacement = bottomSpace >= 44
+    ? "below"
+    : outerSpace >= 104
+      ? "outer"
+      : "inside";
+}
+
+export function positionGameplayTip(
+  shell: AppShell,
+  viewport: BoardViewport,
+  layoutHeight: number,
+): void {
+  const topSpace = Math.max(0, viewport.boardY);
+  const bottomSpace = Math.max(
+    0,
+    layoutHeight - (viewport.boardY + viewport.boardHeight),
+  );
+  const outerSpace = Math.max(0, viewport.boardX);
+  const placement = topSpace >= 128
+    ? "above"
+    : bottomSpace >= 104
+      ? "below"
+      : outerSpace >= 224
+        ? "outer"
+        : "inside";
+  shell.match.dataset.tipPlacement = placement;
+  shell.match.style.setProperty("--tip-board-left", `${viewport.boardX}px`);
+  shell.match.style.setProperty("--tip-board-top", `${viewport.boardY}px`);
+  shell.match.style.setProperty("--tip-board-width", `${viewport.boardWidth}px`);
+  shell.match.style.setProperty(
+    "--tip-board-bottom",
+    `${viewport.boardY + viewport.boardHeight}px`,
+  );
+  shell.match.style.setProperty("--tip-outer-space", `${outerSpace}px`);
 }
 
 export interface SettingsInputs {
@@ -207,7 +299,6 @@ export interface AppShell {
   createButton: HTMLButtonElement;
   joinButton: HTMLButtonElement;
   helpButton: HTMLButtonElement;
-  glossaryButton: HTMLButtonElement;
   controlsHelpButton: HTMLButtonElement;
   settingsButton: HTMLButtonElement;
   lobbyStatus: HTMLElement;
@@ -231,8 +322,13 @@ export interface AppShell {
   cancelReadyButton: HTMLButtonElement;
   localReadyStatus: HTMLElement;
   opponentReadyStatus: HTMLElement;
+  matchMenuButton: HTMLButtonElement;
+  matchMenu: HTMLElement;
+  matchMenuMessage: HTMLElement;
+  matchMenuCloseButton: HTMLButtonElement;
   leaveMatchButton: HTMLButtonElement;
-  pausePracticeButton: HTMLButtonElement;
+  gameplayTip: HTMLElement;
+  gameplayTipAnnouncement: HTMLElement;
   overlay: HTMLElement;
   overlayText: HTMLElement;
   touchButtons: HTMLElement;
@@ -271,10 +367,9 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
   lobbyActions.append(createButton, joinButton, practiceButton);
   const secondary = element(document, "div", "secondary-actions");
   const helpButton = button(document, STRINGS["lobby.howToPlay"]);
-  const glossaryButton = button(document, STRINGS["lobby.powerGlossary"]);
   const controlsHelpButton = button(document, STRINGS["lobby.practiceControls"]);
   const settingsButton = button(document, STRINGS["lobby.settings"]);
-  secondary.append(helpButton, glossaryButton, controlsHelpButton, settingsButton);
+  secondary.append(helpButton, controlsHelpButton, settingsButton);
   const historyHeading = element(document, "h3", undefined, STRINGS["lobby.history"]);
   const history = element(document, "ul", "history-list");
   lobbyParts.panel.append(
@@ -411,11 +506,50 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
   right.pane.classList.add("is-remote");
   arena.append(left.pane, right.pane);
   const matchActions = element(document, "div", "match-actions");
-  const pausePracticeButton = button(document, STRINGS["controls.pauseShort"]);
-  pausePracticeButton.setAttribute("aria-label", STRINGS["controls.pausePractice"]);
-  const leaveMatchButton = button(document, STRINGS["results.leaveShort"]);
-  leaveMatchButton.setAttribute("aria-label", STRINGS["results.leave"]);
-  matchActions.append(pausePracticeButton, leaveMatchButton);
+  const matchMenuButton = button(document, "☰", "match-menu-button");
+  matchMenuButton.setAttribute("aria-label", STRINGS["match.menu"]);
+  matchMenuButton.setAttribute("aria-haspopup", "dialog");
+  matchMenuButton.setAttribute("aria-expanded", "false");
+  matchMenuButton.hidden = true;
+  matchActions.append(matchMenuButton);
+  const matchMenu = element(document, "section", "match-menu-popover");
+  matchMenu.setAttribute("role", "dialog");
+  matchMenu.setAttribute("aria-modal", "false");
+  matchMenu.setAttribute("aria-labelledby", "match-menu-heading");
+  matchMenu.setAttribute("aria-describedby", "match-menu-message");
+  matchMenu.hidden = true;
+  const matchMenuHeading = element(
+    document,
+    "h2",
+    "match-menu-heading",
+    STRINGS["match.menu"],
+  );
+  matchMenuHeading.id = "match-menu-heading";
+  const matchMenuMessage = element(document, "p", "match-menu-message");
+  matchMenuMessage.id = "match-menu-message";
+  const matchMenuCloseButton = button(
+    document,
+    STRINGS["match.returnToMatch"],
+    "primary",
+  );
+  const leaveMatchButton = button(document, STRINGS["results.leave"]);
+  matchMenu.append(
+    matchMenuHeading,
+    matchMenuMessage,
+    matchMenuCloseButton,
+    leaveMatchButton,
+  );
+  const gameplayTip = element(document, "aside", "gameplay-tip");
+  gameplayTip.setAttribute("aria-hidden", "true");
+  gameplayTip.hidden = true;
+  const gameplayTipAnnouncement = element(
+    document,
+    "div",
+    "sr-only gameplay-tip-announcement",
+  );
+  gameplayTipAnnouncement.setAttribute("role", "status");
+  gameplayTipAnnouncement.setAttribute("aria-live", "polite");
+  gameplayTipAnnouncement.setAttribute("aria-atomic", "true");
   const overlay = element(document, "div", "center-overlay");
   overlay.dataset.presentation = "modal";
   const overlayCard = element(document, "div", "center-overlay-card");
@@ -495,7 +629,16 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     STRINGS["match.unsupportedWebgl"],
   );
   unsupported.hidden = true;
-  match.append(arena, matchActions, overlay, touchButtons, unsupported);
+  match.append(
+    arena,
+    matchActions,
+    matchMenu,
+    gameplayTip,
+    gameplayTipAnnouncement,
+    overlay,
+    touchButtons,
+    unsupported,
+  );
 
   const resultsParts = menuScreen(document, STRINGS["results.draw"]);
   const resultsStats = element(document, "dl", "results-stats");
@@ -532,7 +675,6 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     createButton,
     joinButton,
     helpButton,
-    glossaryButton,
     controlsHelpButton,
     settingsButton,
     lobbyStatus,
@@ -569,8 +711,13 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     cancelReadyButton,
     localReadyStatus,
     opponentReadyStatus,
+    matchMenuButton,
+    matchMenu,
+    matchMenuMessage,
+    matchMenuCloseButton,
     leaveMatchButton,
-    pausePracticeButton,
+    gameplayTip,
+    gameplayTipAnnouncement,
     overlay,
     overlayText,
     touchButtons,
@@ -689,7 +836,55 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
   return shell;
 }
 
-export function showHelp(shell: AppShell, kind: "how" | "powers" | "controls"): void {
+export type MatchMenuMode = "practice" | "competitive" | "spectator";
+
+export function setMatchMenu(
+  shell: AppShell,
+  mode: MatchMenuMode,
+  open: boolean,
+): void {
+  shell.matchMenu.dataset.mode = mode;
+  shell.matchMenuMessage.textContent = mode === "practice"
+    ? STRINGS["match.menuPractice"]
+    : STRINGS["match.menuCompetitive"];
+  shell.matchMenuCloseButton.textContent = mode === "practice"
+    ? STRINGS["controls.resumeShort"]
+    : STRINGS["match.returnToMatch"];
+  shell.matchMenu.hidden = !open;
+  shell.matchMenuButton.setAttribute("aria-expanded", String(open));
+}
+
+export function showGameplayPowerTip(
+  shell: AppShell,
+  power: PowerKind,
+  label: string,
+  description: string,
+): void {
+  const document = shell.gameplayTip.ownerDocument;
+  const copy = element(document, "div", "gameplay-tip-copy");
+  copy.append(
+    element(
+      document,
+      "strong",
+      "gameplay-tip-heading",
+      formatString("tip.upcomingPower", { power: label }),
+    ),
+    element(document, "span", "gameplay-tip-description", description),
+  );
+  shell.gameplayTip.dataset.power = power;
+  shell.gameplayTip.replaceChildren(createPowerIcon(document, power, label), copy);
+  shell.gameplayTip.hidden = false;
+  shell.gameplayTipAnnouncement.textContent = `${formatString(
+    "tip.upcomingPower",
+    { power: label },
+  )}. ${description}`;
+}
+
+export function hideGameplayPowerTip(shell: AppShell): void {
+  shell.gameplayTip.hidden = true;
+}
+
+export function showHelp(shell: AppShell, kind: "how" | "controls"): void {
   const document = shell.helpBody.ownerDocument;
   shell.helpBody.replaceChildren();
   if (kind === "how") {
@@ -699,12 +894,49 @@ export function showHelp(shell: AppShell, kind: "how" | "powers" | "controls"): 
       "help.controls",
       "help.powers",
       "help.specialCells",
-      "help.noAutoTutorial",
     ] as const) {
       shell.helpBody.append(element(document, "p", undefined, STRINGS[key]));
     }
-    shell.helpBody.append(
-      element(document, "h3", undefined, STRINGS["help.specialCellsHeading"]),
+
+    const meterSection = element(document, "section", "help-guide-group");
+    meterSection.dataset.helpGroup = "meter";
+    meterSection.append(
+      element(document, "h3", undefined, STRINGS["help.meterPowersHeading"]),
+    );
+    const meterGuide = element(document, "div", "power-guide");
+    const meterEntries: ReadonlyArray<{
+      readonly power: PowerKind;
+      readonly name: StringKey;
+      readonly description: StringKey;
+    }> = [
+      { power: "scramble", name: "power.scramble", description: "power.scrambleDescription" },
+      { power: "nuke", name: "power.nuke", description: "power.nukeDescription" },
+      { power: "collapse", name: "power.collapse", description: "power.collapseDescription" },
+      {
+        power: "monomino-rush",
+        name: "power.monominoRush",
+        description: "power.monominoRushDescription",
+      },
+      { power: "acid-rain", name: "power.acidRain", description: "power.acidRainDescription" },
+      { power: "oversize", name: "power.oversize", description: "power.oversizeDescription" },
+      { power: "ghost-jam", name: "power.ghostJam", description: "power.ghostJamDescription" },
+    ];
+    for (const entry of meterEntries) {
+      const card = element(document, "article", "power-guide-card");
+      const copy = element(document, "div");
+      copy.append(
+        element(document, "h4", undefined, STRINGS[entry.name]),
+        element(document, "p", undefined, STRINGS[entry.description]),
+      );
+      card.append(createPowerIcon(document, entry.power, STRINGS[entry.name]), copy);
+      meterGuide.append(card);
+    }
+    meterSection.append(meterGuide);
+
+    const markedSection = element(document, "section", "help-guide-group");
+    markedSection.dataset.helpGroup = "marked";
+    markedSection.append(
+      element(document, "h3", undefined, STRINGS["help.markedPowersHeading"]),
     );
     const specials = element(document, "div", "special-guide");
     const specialEntries: ReadonlyArray<{
@@ -757,63 +989,120 @@ export function showHelp(shell: AppShell, kind: "how" | "powers" | "controls"): 
       );
       specials.append(card);
     }
-    shell.helpBody.append(specials);
-  } else if (kind === "powers") {
-    shell.helpHeading.textContent = STRINGS["lobby.powerGlossary"];
-    const appendGroup = (
-      group: "meter" | "marked" | "pieces",
-      heading: StringKey,
-      entries: ReadonlyArray<readonly [StringKey, StringKey]>,
-    ): void => {
-      const section = element(document, "section", "glossary-group");
-      section.dataset.glossaryGroup = group;
-      const list = element(document, "dl", "glossary-list");
-      for (const [name, description] of entries) {
-        list.append(
-          element(document, "dt", undefined, STRINGS[name]),
-          element(document, "dd", undefined, STRINGS[description]),
-        );
-      }
-      section.append(element(document, "h3", undefined, STRINGS[heading]), list);
-      shell.helpBody.append(section);
+    markedSection.append(specials);
+
+    const piecesSection = element(document, "section", "help-guide-group");
+    piecesSection.dataset.helpGroup = "pieces";
+    piecesSection.append(
+      element(document, "h3", undefined, STRINGS["help.specialPiecesHeading"]),
+    );
+    const pieces = element(document, "div", "special-guide");
+    const pieceEntries: ReadonlyArray<{
+      readonly descriptor: PieceDescriptor;
+      readonly name: StringKey;
+      readonly description: StringKey;
+    }> = [
+      {
+        descriptor: { source: "cross", shape: "cross" },
+        name: "help.hollowCross",
+        description: "help.hollowCrossDescription",
+      },
+      {
+        descriptor: {
+          source: "glitch",
+          shape: "I",
+          previewCosmetics: {
+            kind: "glitch-cycle",
+            shapes: ["I", "J", "L", "O", "S", "T", "Z"],
+            intervalMs: 150,
+            finalShapeConcealed: true,
+          },
+        },
+        name: "help.glitchPiece",
+        description: "help.glitchPieceDescription",
+      },
+      {
+        descriptor: { source: "oversize", shape: "T" },
+        name: "help.oversizeShapes",
+        description: "help.oversizeShapesDescription",
+      },
+    ];
+    const previewOptions: PiecePreviewOptions = {
+      colorPalette: shell.container.dataset.palette === "colorblind"
+        ? "colorblind"
+        : "standard",
+      reducedMotion: shell.container.dataset.reducedMotion === "true",
+      reducedFlashes: shell.container.dataset.reducedFlashes === "true",
+      elapsedMs: 0,
     };
-    appendGroup("meter", "help.meterPowersHeading", [
-      ["power.scramble", "power.scrambleDescription"],
-      ["power.nuke", "power.nukeDescription"],
-      ["power.collapse", "power.collapseDescription"],
-      ["power.monominoRush", "power.monominoRushDescription"],
-      ["power.acidRain", "power.acidRainDescription"],
-      ["power.oversize", "power.oversizeDescription"],
-      ["power.ghostJam", "power.ghostJamDescription"],
-    ]);
-    appendGroup("marked", "help.markedPowersHeading", [
-      ["special.columnBomb", "special.columnBombDescription"],
-      ["special.garbageCore", "special.garbageCoreDescription"],
-      ["special.glitchCore", "special.glitchCoreDescription"],
-      ["power.blackout", "special.blackoutDescription"],
-      ["power.barrier", "special.barrierDescription"],
-    ]);
-    appendGroup("pieces", "help.specialPiecesHeading", [
-      ["help.hollowCross", "help.hollowCrossDescription"],
-      ["help.glitchPiece", "help.glitchPieceDescription"],
-      ["help.oversizeShapes", "help.oversizeShapesDescription"],
-    ]);
+    for (const entry of pieceEntries) {
+      const card = element(document, "article", "special-guide-card");
+      const sample = element(
+        document,
+        "div",
+        "special-piece-sample piece-preview-slot is-primary",
+      );
+      renderPiecePreviewSlot(sample, entry.descriptor, previewOptions);
+      const copy = element(document, "div");
+      copy.append(
+        element(document, "h4", undefined, STRINGS[entry.name]),
+        element(document, "p", undefined, STRINGS[entry.description]),
+      );
+      card.append(sample, copy);
+      pieces.append(card);
+    }
+    piecesSection.append(pieces);
+    shell.helpBody.append(meterSection, markedSection, piecesSection);
   } else {
     shell.helpHeading.textContent = STRINGS["lobby.practiceControls"];
+    const controlLayout = element(document, "div", "control-help-layout");
     const touchSection = element(document, "section", "control-help-section");
     touchSection.dataset.controlScheme = "touch";
-    const touchList = element(document, "ul");
-    for (const description of [
-      STRINGS["help.touchRotate"],
-      STRINGS["help.touchMove"],
-      STRINGS["help.touchDrop"],
-    ]) {
-      touchList.append(element(document, "li", undefined, description));
+    const gestureGuide = element(document, "div", "gesture-control-guide");
+    const gestureRows: ReadonlyArray<readonly [string, StringKey, StringKey]> = [
+      ["●", "controls.rotateClockwise", "help.gestureTap"],
+      ["●●", "controls.rotateCounterclockwise", "help.gestureTwoFingerTap"],
+      ["↔", "help.moveLeftRight", "help.gestureMove"],
+      ["⇣", "controls.softDrop", "help.gestureSoftDrop"],
+      ["⇊", "controls.hardDrop", "help.gestureHardDrop"],
+      ["⇧", "help.holdAction", "help.gestureHold"],
+    ];
+    for (const [glyph, action, description] of gestureRows) {
+      const row = element(document, "div", "gesture-control-row");
+      row.append(
+        element(document, "span", "gesture-control-glyph", glyph),
+        element(document, "strong", undefined, STRINGS[action]),
+        element(document, "span", "gesture-control-copy", STRINGS[description]),
+      );
+      gestureGuide.append(row);
     }
     touchSection.append(
       element(document, "h3", undefined, STRINGS["help.touchControlsHeading"]),
-      touchList,
+      element(document, "p", "muted", STRINGS["help.touchArea"]),
+      gestureGuide,
+      element(document, "h4", undefined, STRINGS["help.touchButtonsHeading"]),
+      element(document, "p", "muted", STRINGS["help.touchButtonsIntro"]),
     );
+    const buttonGuide = element(document, "div", "touch-button-guide");
+    const buttonEntries: ReadonlyArray<readonly [string, StringKey, string]> = [
+      ["←", "controls.moveLeft", "move-left"],
+      ["↺", "controls.rotateCounterclockwise", "rotate-ccw"],
+      ["↻", "controls.rotateClockwise", "rotate-cw"],
+      ["→", "controls.moveRight", "move-right"],
+      ["↓", "controls.softDrop", "soft-drop"],
+      ["⇊", "controls.hardDrop", "hard-drop"],
+      ["H", "controls.hold", "hold"],
+    ];
+    for (const [glyph, label, action] of buttonEntries) {
+      const item = element(document, "span", "touch-button-help");
+      item.dataset.controlAction = action;
+      item.append(
+        element(document, "span", "touch-button-help-glyph", glyph),
+        element(document, "span", undefined, STRINGS[label]),
+      );
+      buttonGuide.append(item);
+    }
+    touchSection.append(buttonGuide);
 
     const keyboardSection = element(document, "section", "control-help-section");
     keyboardSection.dataset.controlScheme = "keyboard";
@@ -858,13 +1147,161 @@ export function showHelp(shell: AppShell, kind: "how" | "powers" | "controls"): 
       element(document, "h3", undefined, STRINGS["help.keyboardControlsHeading"]),
       table,
     );
-    shell.helpBody.append(touchSection, keyboardSection);
+    controlLayout.append(touchSection, keyboardSection);
+    shell.helpBody.append(controlLayout);
   }
   shell.show("help");
 }
 
-export function meterProgress(value: number): string {
-  return `${Math.max(0, Math.min(100, (value / RULES.power.threshold) * 100))}%`;
+export function setHudPower(
+  hud: HudElements,
+  power: PowerKind,
+  label: string,
+  value: number,
+  deckCursor?: number,
+): void {
+  const charge = Math.max(0, Math.floor(value));
+  if (hud.upcomingPower.dataset.power !== power) {
+    hud.upcomingPower.dataset.power = power;
+    const icon = createPowerIcon(hud.upcomingPower.ownerDocument, power, label);
+    icon.setAttribute("aria-hidden", "true");
+    icon.removeAttribute("role");
+    hud.upcomingPower.replaceChildren(icon);
+  }
+  hud.upcomingPower.setAttribute(
+    "aria-label",
+    `${STRINGS["hud.upcomingPower"]}: ${label}`,
+  );
+  hud.meterSegments.forEach((segment, index) => {
+    const filled = index < Math.min(charge, RULES.power.threshold);
+    if (segment.classList.contains("is-filled") !== filled) {
+      segment.classList.toggle("is-filled", filled);
+    }
+  });
+  setPowerMeterAccessibility(hud.meter, charge);
+
+  if (deckCursor === undefined) return;
+  const cursor = String(deckCursor);
+  const previous = hud.meter.dataset.powerCursor;
+  hud.meter.dataset.powerCursor = cursor;
+  if (previous === undefined || previous === cursor) return;
+  hud.meter.classList.remove("is-activating");
+  void hud.meter.offsetWidth;
+  hud.meter.classList.add("is-activating");
+  hud.meter.ownerDocument.defaultView?.setTimeout(() => {
+    hud.meter.classList.remove("is-activating");
+  }, 520);
+}
+
+export function setHudGarbage(
+  hud: HudElements,
+  rows: number,
+  ready: boolean,
+): void {
+  const count = Math.max(0, Math.floor(rows));
+  const state = count === 0 ? "empty" : ready ? "ready" : "warning";
+  const countText = String(count);
+  const label = state === "ready"
+    ? `${STRINGS["hud.incomingGarbage"]}: ${count}, ready to rise`
+    : state === "warning"
+      ? `${STRINGS["hud.incomingGarbage"]}: ${count}, queued`
+      : `${STRINGS["hud.incomingGarbage"]}: 0`;
+  if (hud.incoming.dataset.state !== state) hud.incoming.dataset.state = state;
+  if (hud.incomingCount.textContent !== countText) {
+    hud.incomingCount.textContent = countText;
+  }
+  if (hud.incoming.getAttribute("aria-label") !== label) {
+    hud.incoming.setAttribute("aria-label", label);
+  }
+}
+
+export interface TimedEffectHudItem {
+  readonly id: string;
+  readonly label: string;
+  readonly detail?: string;
+  readonly remainingTicks: number;
+  readonly totalTicks: number;
+  readonly accent: string;
+}
+
+export function renderTimedEffects(
+  hud: HudElements,
+  effects: readonly TimedEffectHudItem[],
+): void {
+  const document = hud.statuses.ownerDocument;
+  const visible = effects.slice(0, 2);
+  const existingRows = new Map(
+    [...hud.statuses.querySelectorAll<HTMLElement>(".timed-effect")]
+      .map((row) => [row.dataset.effect, row] as const),
+  );
+  const rows: HTMLElement[] = visible.map((effect) => {
+    const remaining = Math.max(0, Math.floor(effect.remainingTicks));
+    const total = Math.max(1, Math.floor(effect.totalTicks));
+    const seconds = Math.ceil(remaining / RULES.timing.ticksPerSecond);
+    const row = existingRows.get(effect.id) ?? element(document, "div", "timed-effect");
+    row.dataset.effect = effect.id;
+    if (row.style.getPropertyValue("--effect-accent") !== effect.accent) {
+      row.style.setProperty("--effect-accent", effect.accent);
+    }
+    let name = row.querySelector<HTMLElement>(".timed-effect-name");
+    let progress = row.querySelector<HTMLElement>(".timed-effect-progress");
+    let fill = row.querySelector<HTMLElement>(".timed-effect-progress-fill");
+    let time = row.querySelector<HTMLElement>(".timed-effect-time");
+    if (name === null || progress === null || fill === null || time === null) {
+      name = element(document, "span", "timed-effect-name");
+      progress = element(document, "span", "timed-effect-progress");
+      progress.setAttribute("role", "progressbar");
+      fill = element(document, "span", "timed-effect-progress-fill");
+      progress.append(fill);
+      time = element(document, "span", "timed-effect-time");
+      row.replaceChildren(name, progress, time);
+    }
+    const nameText = effect.detail === undefined
+      ? effect.label
+      : `${effect.label} ${effect.detail}`;
+    if (name.textContent !== nameText) name.textContent = nameText;
+    const attributes: ReadonlyArray<readonly [string, string]> = [
+      ["aria-label", `${effect.label} remaining`],
+      ["aria-valuemin", "0"],
+      ["aria-valuemax", String(total)],
+      ["aria-valuenow", String(Math.min(remaining, total))],
+      ["aria-valuetext", `${seconds} seconds remaining`],
+    ];
+    for (const [attribute, value] of attributes) {
+      if (progress.getAttribute(attribute) !== value) {
+        progress.setAttribute(attribute, value);
+      }
+    }
+    const progressValue = `${Math.max(0, Math.min(100, remaining / total * 100))}%`;
+    if (fill.style.getPropertyValue("--effect-progress") !== progressValue) {
+      fill.style.setProperty("--effect-progress", progressValue);
+    }
+    const timeText = `${seconds}s`;
+    if (time.textContent !== timeText) time.textContent = timeText;
+    return row;
+  });
+  if (effects.length > visible.length) {
+    const hidden = effects.slice(visible.length);
+    const overflow = hud.statuses.querySelector<HTMLElement>(
+      ".timed-effect-overflow",
+    ) ?? element(document, "span", "timed-effect-overflow");
+    const overflowText = `+${hidden.length} active`;
+    const overflowLabel = `${hidden.length} more active: ${hidden
+      .map((effect) => effect.label)
+      .join(", ")}`;
+    if (overflow.textContent !== overflowText) overflow.textContent = overflowText;
+    if (overflow.getAttribute("aria-label") !== overflowLabel) {
+      overflow.setAttribute("aria-label", overflowLabel);
+    }
+    rows.push(overflow);
+  }
+  const current = [...hud.statuses.children];
+  if (
+    current.length !== rows.length ||
+    rows.some((row, index) => current[index] !== row)
+  ) {
+    hud.statuses.replaceChildren(...rows);
+  }
 }
 
 export function setElementHidden(element: HTMLElement, hidden: boolean): void {

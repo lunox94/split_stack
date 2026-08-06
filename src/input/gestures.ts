@@ -73,7 +73,7 @@ export interface GestureInputOptions {
 
 export function isGameplayGestureTarget(target: EventTarget | null): boolean {
   return !(target instanceof Element) ||
-    target.closest("button, input, select, a, [data-gesture-blocked='true']") === null;
+    target.closest("button, input, select, a, [data-gesture-blocked]") === null;
 }
 
 export class GestureInput {
@@ -105,6 +105,18 @@ export class GestureInput {
     });
     element.addEventListener("pointerup", this.#onPointerUp, { passive: false });
     element.addEventListener("pointercancel", this.#onPointerCancel);
+    element.addEventListener("touchstart", this.#onNativeTouch, {
+      capture: true,
+      passive: false,
+    });
+    element.addEventListener("touchmove", this.#onNativeTouch, {
+      capture: true,
+      passive: false,
+    });
+    element.addEventListener("touchend", this.#onNativeTouch, {
+      capture: true,
+      passive: false,
+    });
   }
 
   setEnabled(enabled: boolean): void {
@@ -127,6 +139,9 @@ export class GestureInput {
     this.#element.removeEventListener("pointermove", this.#onPointerMove);
     this.#element.removeEventListener("pointerup", this.#onPointerUp);
     this.#element.removeEventListener("pointercancel", this.#onPointerCancel);
+    this.#element.removeEventListener("touchstart", this.#onNativeTouch, true);
+    this.#element.removeEventListener("touchmove", this.#onNativeTouch, true);
+    this.#element.removeEventListener("touchend", this.#onNativeTouch, true);
   }
 
   #emit(intent: GestureIntent): void {
@@ -231,5 +246,11 @@ export class GestureInput {
 
   readonly #onPointerCancel = (): void => {
     this.release();
+  };
+
+  readonly #onNativeTouch = (event: TouchEvent): void => {
+    if (!this.#enabled || !isGameplayGestureTarget(event.target)) return;
+    event.preventDefault();
+    event.stopPropagation();
   };
 }

@@ -16,6 +16,7 @@ import type {
   PieceDescriptor,
   PlayerGameState,
   PowerKind,
+  ReplacementMode,
   StatusState,
 } from "../domain/types";
 import { GestureInput, isGameplayGestureTarget } from "../input/gestures";
@@ -43,12 +44,19 @@ import {
   type MaterializedChallenge,
 } from "../network/webxdc-durable";
 import { HistoryMaterializer, isMatchResultV1 } from "../persistence/history";
+import { createPowerTipTracker } from "../persistence/power-tips";
 import {
   loadPreferences,
   savePreferences,
   type Preferences,
   type StoragePort,
 } from "../persistence/settings";
+import {
+  POWER_ACCENT_COLORS,
+} from "../render/power-icons";
+import {
+  SPECIAL_ACCENT_COLORS,
+} from "../render/special-icons";
 import {
   ThreeRenderer,
   type BoardRenderModel,
@@ -57,12 +65,19 @@ import {
 } from "../render/renderer";
 import {
   createAppShell,
-  meterProgress,
+  hideGameplayPowerTip,
+  positionGameplayTip,
+  positionHudToViewport,
+  renderTimedEffects,
   setElementHidden,
-  setPowerMeterAccessibility,
+  setHudGarbage,
+  setHudPower,
+  setMatchMenu,
   showHelp,
+  showGameplayPowerTip,
   type AppShell,
   type HudElements,
+  type TimedEffectHudItem,
 } from "../ui/shell";
 import type { PiecePreviewOptions } from "../ui/piece-preview";
 import { boardModelFromRemoteSnapshot, boardModelFromSimulation } from "./view-model";
@@ -214,16 +229,53 @@ function powerLabel(power: DisplayPowerKind): string {
   return STRINGS[keys[power]];
 }
 
-function statusLabel(status: StatusState): string {
-  const seconds = Math.ceil(status.remainingTicks / RULES.timing.ticksPerSecond);
-  if (status.kind === "barrier") {
-    return formatString("status.barrier", {
-      power: powerLabel("barrier"),
-      capacity: status.capacity,
-      seconds,
+function powerDescription(power: PowerKind): string {
+  const keys: Record<PowerKind, StringKey> = {
+    scramble: "power.scrambleDescription",
+    nuke: "power.nukeDescription",
+    collapse: "power.collapseDescription",
+    "monomino-rush": "power.monominoRushDescription",
+    "acid-rain": "power.acidRainDescription",
+    oversize: "power.oversizeDescription",
+    "ghost-jam": "power.ghostJamDescription",
+  };
+  return STRINGS[keys[power]];
+}
+
+function timedEffectHudItems(
+  statuses: readonly StatusState[],
+  replacementMode: ReplacementMode | null,
+): TimedEffectHudItem[] {
+  const effects: TimedEffectHudItem[] = statuses.map((status) => {
+    const totalTicks = status.kind === "scramble"
+      ? RULES.power.scrambleTicks
+      : status.kind === "ghost-jam"
+        ? RULES.power.ghostJamTicks
+        : status.kind === "blackout"
+          ? RULES.power.blackoutTicks
+          : RULES.garbage.barrierTicks;
+    const accent = status.kind === "blackout" || status.kind === "barrier"
+      ? SPECIAL_ACCENT_COLORS[status.kind]
+      : POWER_ACCENT_COLORS[status.kind];
+    return {
+      id: status.kind,
+      label: powerLabel(status.kind),
+      ...(status.kind === "barrier" ? { detail: String(status.capacity) } : {}),
+      remainingTicks: status.remainingTicks,
+      totalTicks,
+      accent,
+    };
+  });
+  if (replacementMode?.kind === "monomino-rush") {
+    effects.push({
+      id: "monomino-rush",
+      label: powerLabel("monomino-rush"),
+      remainingTicks: replacementMode.remainingTicks ?? 0,
+      totalTicks: RULES.power.monominoRushTicks,
+      accent: POWER_ACCENT_COLORS["monomino-rush"],
     });
   }
-  return formatString("status.timed", { power: powerLabel(status.kind), seconds });
+  return effects;
 }
 
 function applyViewport(element: HTMLElement, viewport: BoardViewport): void {
@@ -258,25 +310,14 @@ function setTextContentIfChanged(element: HTMLElement, text: string): void {
   if (element.textContent !== text) element.textContent = text;
 }
 
-function setMeterProgressIfChanged(element: HTMLElement, progress: string): void {
-  if (element.style.getPropertyValue("--meter-progress") !== progress) {
-    element.style.setProperty("--meter-progress", progress);
-  }
-}
-
-function setStatusLabelsIfChanged(element: HTMLElement, labels: readonly string[]): void {
-  const signature = JSON.stringify(labels);
-  if (HUD_STATUS_SIGNATURES.get(element) === signature) return;
-  HUD_STATUS_SIGNATURES.set(element, signature);
-  const document = element.ownerDocument;
-  element.replaceChildren(
-    ...labels.map((label) => {
-      const pill = document.createElement("span");
-      pill.className = "status-pill";
-      pill.textContent = label;
-      return pill;
-    }),
-  );
+function setTimedEffectsIfChanged(
+  hud: HudElements,
+  effects: readonly TimedEffectHudItem[],
+): void {
+  const signature = JSON.stringify(effects);
+  if (HUD_STATUS_SIGNATURES.get(hud.statuses) === signature) return;
+  HUD_STATUS_SIGNATURES.set(hud.statuses, signature);
+  renderTimedEffects(hud, effects);
 }
 
 export function updateHud(
@@ -291,11 +332,18 @@ export function updateHud(
     setTextContentIfChanged(hud.level, "1");
     setTextContentIfChanged(hud.lines, "0");
     hud.setPiecePreviews(null, [], previewOptions);
-    setTextContentIfChanged(hud.upcomingPower, `${STRINGS["hud.upcomingPower"]}: —`);
-    setTextContentIfChanged(hud.incoming, `${STRINGS["hud.incomingGarbage"]}: 0`);
-    setMeterProgressIfChanged(hud.meterFill, "0%");
-    setPowerMeterAccessibility(hud.meter, 0);
-    setStatusLabelsIfChanged(hud.statuses, []);
+    hud.upcomingPower.replaceChildren();
+    delete hud.upcomingPower.dataset.power;
+    hud.upcomingPower.setAttribute("aria-label", `${STRINGS["hud.upcomingPower"]}: —`);
+    hud.meterSegments.forEach((segment) => segment.classList.remove("is-filled"));
+    hud.meter.setAttribute("aria-valuenow", "0");
+    hud.meter.setAttribute(
+      "aria-valuetext",
+      formatString("hud.powerCharge", { charge: 0, threshold: RULES.power.threshold }),
+    );
+    delete hud.meter.dataset.powerCursor;
+    setHudGarbage(hud, 0, false);
+    setTimedEffectsIfChanged(hud, []);
     return;
   }
   const player = playerStateFrom(snapshot);
@@ -308,39 +356,26 @@ export function updateHud(
   const replacementMode = player?.replacementMode ??
     (snapshot as PlayerSnapshotV1).replacementMode;
   const incoming = player?.incomingGarbage ?? (snapshot as PlayerSnapshotV1).incomingGarbage;
+  const powerDeckCursor = player?.powerDeckCursor ??
+    (snapshot as PlayerSnapshotV1).powerDeckCursor;
+  const currentTick = "tick" in snapshot ? snapshot.tick : snapshot.stateTick;
   setTextContentIfChanged(hud.score, String(score));
   setTextContentIfChanged(hud.level, String(level));
   setTextContentIfChanged(hud.lines, String(lines));
   const held = "player" in snapshot ? snapshot.player.hold : snapshot.hold;
   const next = "player" in snapshot ? snapshot.preview : snapshot.nextFive;
   hud.setPiecePreviews(held, next, previewOptions);
-  setTextContentIfChanged(
-    hud.upcomingPower,
-    `${STRINGS["hud.upcomingPower"]}: ${powerLabel(upcomingPower)}`,
+  setHudPower(
+    hud,
+    upcomingPower,
+    powerLabel(upcomingPower),
+    powerCharge,
+    powerDeckCursor,
   );
-  setTextContentIfChanged(
-    hud.incoming,
-    `${STRINGS["hud.incomingGarbage"]}: ${incoming.reduce((sum, packet) => sum + packet.rows, 0)}`,
-  );
-  setMeterProgressIfChanged(hud.meterFill, meterProgress(powerCharge));
-  setPowerMeterAccessibility(hud.meter, powerCharge);
-  const replacementLabel = replacementMode?.kind === "monomino-rush"
-    ? formatString("hud.replacementSeconds", {
-        power: powerLabel("monomino-rush"),
-        seconds: Math.ceil(
-          (replacementMode.remainingTicks ?? 0) / RULES.timing.ticksPerSecond,
-        ),
-      })
-    : replacementMode?.kind === "acid-rain"
-      ? formatString("hud.replacementPieces", {
-          power: powerLabel("acid-rain"),
-          count: replacementMode.remainingPieces ?? 0,
-        })
-      : null;
-  setStatusLabelsIfChanged(
-    hud.statuses,
-    [...statuses.map(statusLabel), ...(replacementLabel === null ? [] : [replacementLabel])],
-  );
+  const incomingRows = incoming.reduce((sum, packet) => sum + packet.rows, 0);
+  const readyGarbage = incoming.some((packet) => packet.readyTick <= currentTick);
+  setHudGarbage(hud, incomingRows, readyGarbage);
+  setTimedEffectsIfChanged(hud, timedEffectHudItems(statuses, replacementMode));
 }
 
 function cueForPower(power: PowerKind): AudioCue {
@@ -353,6 +388,7 @@ export async function bootstrap(): Promise<void> {
 
   const shell = createAppShell(document, mount);
   const storage = safeStorage(window);
+  const powerTips = createPowerTipTracker(storage);
   const networkDiagnostics = new NetworkDiagnostics({ storage });
   const mediaPrefersReduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
   let preferences = loadPreferences(storage, mediaPrefersReduced);
@@ -390,6 +426,8 @@ export async function bootstrap(): Promise<void> {
   let leaveInProgress = false;
   let lastCountdownSecond = 0;
   let lastCompetitiveInputsEnabled: boolean | null = null;
+  let matchMenuOpen = false;
+  let powerTipTimeout: number | null = null;
   let lastLocalLevel = 1;
   let warnedUpcomingPower: PowerKind | null = null;
   let currentMusicMatchId: string | null = null;
@@ -405,6 +443,30 @@ export async function bootstrap(): Promise<void> {
     primaryGlitchStartedAtMs = 0;
     glitchPreviewLoopActive = false;
     glitchPreviewArrivalPlayed = false;
+  };
+
+  const hidePowerTip = (): void => {
+    if (powerTipTimeout !== null) {
+      window.clearTimeout(powerTipTimeout);
+      powerTipTimeout = null;
+    }
+    hideGameplayPowerTip(shell);
+  };
+
+  const maybeShowPowerTip = (power: PowerKind): void => {
+    if (!preferences.gameplayTips || !powerTips.shouldShow(power)) return;
+    showGameplayPowerTip(
+      shell,
+      power,
+      powerLabel(power),
+      powerDescription(power),
+    );
+    powerTips.markShown(power);
+    if (powerTipTimeout !== null) window.clearTimeout(powerTipTimeout);
+    powerTipTimeout = window.setTimeout(() => {
+      powerTipTimeout = null;
+      hideGameplayPowerTip(shell);
+    }, 6_000);
   };
 
   const syncPrimaryGlitchPreview = (
@@ -591,15 +653,19 @@ export async function bootstrap(): Promise<void> {
       preferences.reducedEffects,
     ));
     renderer?.setColorPalette(preferences.colorPalette);
+    if (!preferences.gameplayTips) hidePowerTip();
   };
 
   const positionTargets = (layout: RendererLayout): void => {
     latestLayout = layout;
     applyViewport(shell.left.boardTarget, layout.left);
     applyViewport(shell.left.blackout, layout.left);
+    positionHudToViewport(shell.left, layout.left, layout.height);
+    positionGameplayTip(shell, layout.left, layout.height);
     if (layout.right !== null) {
       applyViewport(shell.right.boardTarget, layout.right);
       applyViewport(shell.right.blackout, layout.right);
+      positionHudToViewport(shell.right, layout.right, layout.height);
     }
   };
 
@@ -739,6 +805,7 @@ export async function bootstrap(): Promise<void> {
   };
 
   const leaveRuntime = (): void => {
+    setInputsEnabled(false);
     stopCompetitivePump();
     stopGlitchPreview();
     audio.stopMusic();
@@ -759,6 +826,9 @@ export async function bootstrap(): Promise<void> {
     shell.setScrambled(false);
     announcedConfigHash = null;
     shell.overlay.hidden = true;
+    hidePowerTip();
+    matchMenuOpen = false;
+    setMatchMenu(shell, "competitive", false);
   };
 
   const showLobby = (): void => {
@@ -766,7 +836,7 @@ export async function bootstrap(): Promise<void> {
     mode = "lobby";
     shell.show("lobby");
     shell.readinessPanel.hidden = true;
-    shell.pausePracticeButton.hidden = true;
+    shell.matchMenuButton.hidden = true;
     shell.touchButtons.hidden = true;
     shell.unsupported.hidden = renderer !== null;
     renderHistory();
@@ -778,6 +848,7 @@ export async function bootstrap(): Promise<void> {
     stopGlitchPreview();
     audio.stopMusic();
     currentMusicMatchId = null;
+    setInputsEnabled(false);
     resultShownFor = result.matchId;
     mode = "results";
     lastScrambleActive = false;
@@ -824,6 +895,7 @@ export async function bootstrap(): Promise<void> {
     mode = "results";
     lastScrambleActive = false;
     shell.setScrambled(false);
+    setInputsEnabled(false);
     stopGlitchPreview();
     audio.stopMusic();
     currentMusicMatchId = null;
@@ -888,12 +960,12 @@ export async function bootstrap(): Promise<void> {
     if (snapshot.level > lastLocalLevel) audio.play("level-up", { pan: -0.45 });
     lastLocalLevel = snapshot.level;
     const warningThreshold = Math.max(1, RULES.power.threshold - 5);
-    if (
-      snapshot.player.powerCharge >= warningThreshold &&
-      warnedUpcomingPower !== snapshot.player.upcomingPower
-    ) {
-      warnedUpcomingPower = snapshot.player.upcomingPower;
-      audio.play("power-warning", { pan: -0.45 });
+    if (snapshot.player.powerCharge >= warningThreshold) {
+      if (warnedUpcomingPower !== snapshot.player.upcomingPower) {
+        warnedUpcomingPower = snapshot.player.upcomingPower;
+        audio.play("power-warning", { pan: -0.45 });
+      }
+      maybeShowPowerTip(snapshot.player.upcomingPower);
     } else if (snapshot.player.powerCharge < warningThreshold) {
       warnedUpcomingPower = null;
     }
@@ -950,7 +1022,9 @@ export async function bootstrap(): Promise<void> {
     shell.setScrambled(false);
     announcedConfigHash = null;
     shell.readinessPanel.hidden = true;
-    shell.pausePracticeButton.hidden = true;
+    shell.matchMenuButton.hidden = true;
+    matchMenuOpen = false;
+    setMatchMenu(shell, "competitive", false);
     shell.touchButtons.hidden = true;
     shell.overlay.hidden = true;
     setInputsEnabled(false);
@@ -980,9 +1054,9 @@ export async function bootstrap(): Promise<void> {
     shell.left.pane.classList.add("is-local");
     shell.left.boardTarget.setAttribute("aria-label", STRINGS["match.localBoard"]);
     shell.readinessPanel.hidden = true;
-    shell.pausePracticeButton.hidden = false;
-    shell.pausePracticeButton.textContent = STRINGS["controls.pauseShort"];
-    shell.pausePracticeButton.setAttribute("aria-label", STRINGS["controls.pausePractice"]);
+    shell.matchMenuButton.hidden = false;
+    matchMenuOpen = false;
+    setMatchMenu(shell, "practice", false);
     shell.overlay.hidden = true;
     shell.show("match");
     applyPreferences();
@@ -1039,9 +1113,10 @@ export async function bootstrap(): Promise<void> {
     ) {
       shell.setOverlayMessage(presentation.message, presentation.surface);
     }
-    if (lastCompetitiveInputsEnabled !== presentation.inputsEnabled) {
-      lastCompetitiveInputsEnabled = presentation.inputsEnabled;
-      setInputsEnabled(presentation.inputsEnabled);
+    const inputsEnabled = presentation.inputsEnabled && !matchMenuOpen;
+    if (lastCompetitiveInputsEnabled !== inputsEnabled) {
+      lastCompetitiveInputsEnabled = inputsEnabled;
+      setInputsEnabled(inputsEnabled);
     }
     return presentation;
   };
@@ -1083,12 +1158,19 @@ export async function bootstrap(): Promise<void> {
     resultShownFor = null;
     announcedConfigHash = null;
     shell.arena.dataset.mode = "versus";
-    shell.pausePracticeButton.hidden = true;
+    shell.matchMenuButton.hidden = false;
+    matchMenuOpen = false;
+    setMatchMenu(
+      shell,
+      match.role === "spectator" ? "spectator" : "competitive",
+      false,
+    );
     shell.touchButtons.hidden = match.role === "spectator" || preferences.touchControls !== "buttons";
     shell.readinessPanel.hidden = true;
     shell.left.boardTarget.setAttribute("aria-label", match.role === "spectator" ? STRINGS["match.seatABoard"] : STRINGS["match.localBoard"]);
     shell.right.boardTarget.setAttribute("aria-label", match.role === "spectator" ? STRINGS["match.seatBBoard"] : STRINGS["match.opponentBoard"]);
     shell.show("match");
+    if (match.role !== "spectator") mode = "competitive";
     const retryActiveMatch = (): void => {
       window.setTimeout(() => {
         if (activeMatch !== match) return;
@@ -1137,7 +1219,6 @@ export async function bootstrap(): Promise<void> {
       retryActiveMatch();
       return;
     }
-    mode = "competitive";
     shell.left.pane.classList.add("is-local");
     shell.right.pane.classList.add("is-remote");
     const local = match.role === "a" ? match.challenge.seatA : seatB;
@@ -1438,7 +1519,6 @@ export async function bootstrap(): Promise<void> {
 
   shell.practiceButton.addEventListener("click", startPractice);
   shell.helpButton.addEventListener("click", () => showHelp(shell, "how"));
-  shell.glossaryButton.addEventListener("click", () => showHelp(shell, "powers"));
   shell.controlsHelpButton.addEventListener("click", () => showHelp(shell, "controls"));
   shell.helpBack.addEventListener("click", () => shell.show("lobby"));
   shell.settingsButton.addEventListener("click", () => shell.show("settings"));
@@ -1557,23 +1637,58 @@ export async function bootstrap(): Promise<void> {
     shell.setReadiness(view.localReady, view.peerReady);
   });
 
-  shell.pausePracticeButton.addEventListener("click", () => {
+  const setPracticePaused = (paused: boolean): void => {
     if (practice === null) return;
-    practicePaused = !practicePaused;
-    practice.setPaused(practicePaused);
-    if (practicePaused) audio.pauseMusic();
+    practicePaused = paused;
+    practice.setPaused(paused);
+    if (paused) audio.pauseMusic();
     else audio.resumeMusic();
-    shell.pausePracticeButton.textContent = practicePaused
-      ? STRINGS["controls.resumeShort"]
-      : STRINGS["controls.pauseShort"];
-    shell.pausePracticeButton.setAttribute(
-      "aria-label",
-      practicePaused ? STRINGS["controls.resumePractice"] : STRINGS["controls.pausePractice"],
+    setInputsEnabled(!paused);
+  };
+
+  const openMatchMenu = (): void => {
+    if (matchMenuOpen || (mode !== "practice" && mode !== "competitive" && mode !== "spectator")) {
+      return;
+    }
+    matchMenuOpen = true;
+    hidePowerTip();
+    if (mode === "practice") {
+      setPracticePaused(true);
+      shell.overlay.hidden = true;
+    } else if (mode === "competitive") {
+      lastCompetitiveInputsEnabled = false;
+      setInputsEnabled(false);
+    }
+    setMatchMenu(shell, mode, true);
+    shell.matchMenuCloseButton.focus();
+  };
+
+  const closeMatchMenu = (): void => {
+    if (!matchMenuOpen) return;
+    const closingMode = mode;
+    matchMenuOpen = false;
+    setMatchMenu(
+      shell,
+      closingMode === "practice" || closingMode === "spectator"
+        ? closingMode
+        : "competitive",
+      false,
     );
-    shell.overlay.hidden = !practicePaused;
-    shell.setOverlayMessage(STRINGS["match.practicePaused"]);
-    setInputsEnabled(!practicePaused);
+    if (closingMode === "practice") {
+      setPracticePaused(false);
+    } else if (closingMode === "competitive") {
+      lastCompetitiveInputsEnabled = null;
+      const view = competitive?.view();
+      if (view !== undefined) applyCompetitivePresentation(view);
+    }
+    shell.matchMenuButton.focus();
+  };
+
+  shell.matchMenuButton.addEventListener("click", () => {
+    if (matchMenuOpen) closeMatchMenu();
+    else openMatchMenu();
   });
+  shell.matchMenuCloseButton.addEventListener("click", closeMatchMenu);
 
   const settleExplicitForfeit = async (session: CompetitiveSession): Promise<void> => {
     try {
@@ -1662,11 +1777,10 @@ export async function bootstrap(): Promise<void> {
       renderer?.noteSuspension();
     }
     if (mode === "practice" && practice !== null) {
-      practicePaused = hidden || practicePaused;
-      practice.setPaused(practicePaused);
       if (hidden) {
-        shell.overlay.hidden = false;
-        shell.setOverlayMessage(STRINGS["match.practicePaused"]);
+        setPracticePaused(true);
+        matchMenuOpen = true;
+        setMatchMenu(shell, "practice", true);
       }
     } else if (mode === "competitive") {
       if (hidden) competitive?.setHidden(true);
@@ -1684,14 +1798,16 @@ export async function bootstrap(): Promise<void> {
   });
   window.addEventListener("keydown", (event) => {
     if (
-      mode === "practice" &&
+      (mode === "practice" || mode === "competitive" || mode === "spectator") &&
       !event.altKey &&
       !event.ctrlKey &&
       !event.metaKey &&
-      (event.key.toLowerCase() === "p" || event.key === "Escape")
+      ((mode === "practice" && event.key.toLowerCase() === "p") ||
+        event.key === "Escape")
     ) {
       event.preventDefault();
-      shell.pausePracticeButton.click();
+      if (matchMenuOpen) closeMatchMenu();
+      else openMatchMenu();
     }
   });
   window.addEventListener("pointerdown", () => void audio.unlock());
@@ -1920,7 +2036,7 @@ export async function bootstrap(): Promise<void> {
     : renderer === null
       ? STRINGS["match.unsupportedWebgl"]
       : "";
-  shell.pausePracticeButton.hidden = true;
+  shell.matchMenuButton.hidden = true;
   shell.show("lobby");
   renderHistory();
   setInputsEnabled(false);

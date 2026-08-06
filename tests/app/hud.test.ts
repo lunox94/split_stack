@@ -18,10 +18,12 @@ function snapshot(overrides: Partial<PlayerSnapshotV1> = {}): PlayerSnapshotV1 {
     score: 120,
     level: 2,
     lines: 3,
+    stateTick: 120,
     powerCharge: 4,
+    powerDeckCursor: 0,
     upcomingPower: "nuke",
     statuses: [{ kind: "blackout", remainingTicks: 120 }],
-    incomingGarbage: [{ id: "garbage-1", rows: 2, hole: 4, applyAtTick: 180 }],
+    incomingGarbage: [{ id: "garbage-1", rows: 2, hole: 4, readyTick: 180 }],
     hold: { source: "base", shape: "T" },
     nextFive: [{ source: "base", shape: "I" }],
     replacementMode: null,
@@ -38,7 +40,7 @@ describe("HUD rendering", () => {
     const scoreText = vi.spyOn(shell.left.score, "textContent", "set");
     const levelText = vi.spyOn(shell.left.level, "textContent", "set");
     const statusChildren = vi.spyOn(shell.left.statuses, "replaceChildren");
-    const meterStyle = vi.spyOn(shell.left.meterFill.style, "setProperty");
+    const meterSegment = vi.spyOn(shell.left.meterSegments[0]!.classList, "toggle");
     const meterAccessibility = vi.spyOn(shell.left.meter, "setAttribute");
     const previewGrid = shell.left.preview.querySelector(".piece-preview-grid");
 
@@ -47,7 +49,7 @@ describe("HUD rendering", () => {
     expect(scoreText).not.toHaveBeenCalled();
     expect(levelText).not.toHaveBeenCalled();
     expect(statusChildren).not.toHaveBeenCalled();
-    expect(meterStyle).not.toHaveBeenCalled();
+    expect(meterSegment).not.toHaveBeenCalled();
     expect(meterAccessibility).not.toHaveBeenCalled();
     expect(shell.left.preview.querySelector(".piece-preview-grid")).toBe(previewGrid);
   });
@@ -68,7 +70,11 @@ describe("HUD rendering", () => {
     );
 
     expect(shell.left.score.textContent).toBe("240");
-    expect(shell.left.meterFill.style.getPropertyValue("--meter-progress")).toBe("100%");
+    expect(
+      shell.left.meterSegments.filter((segment) =>
+        segment.classList.contains("is-filled")
+      ),
+    ).toHaveLength(7);
     expect(shell.left.meter.getAttribute("aria-valuenow")).toBe("7");
     expect(shell.left.statuses.textContent).toContain("Barrier");
   });
@@ -100,5 +106,46 @@ describe("HUD rendering", () => {
     });
 
     expect(primary?.dataset.displayShape).toBe("J");
+  });
+
+  it("shows Acid Rain as three Next drops instead of a timed status row", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+    updateHud(
+      shell.left,
+      "Player A",
+      snapshot({
+        statuses: [],
+        replacementMode: { kind: "acid-rain", remainingPieces: 3 },
+        nextFive: [
+          { source: "acid", shape: "acid" },
+          { source: "acid", shape: "acid" },
+          { source: "acid", shape: "acid" },
+          { source: "base", shape: "I" },
+          { source: "base", shape: "T" },
+        ],
+      }),
+      PREVIEW_OPTIONS,
+    );
+
+    expect(
+      shell.left.preview.querySelectorAll('[data-source="acid"]'),
+    ).toHaveLength(3);
+    expect(shell.left.statuses.textContent).not.toContain("Acid Rain");
+  });
+
+  it("shows Monomino Rush in the timed-effect rows", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+    updateHud(
+      shell.left,
+      "Player A",
+      snapshot({
+        statuses: [],
+        replacementMode: { kind: "monomino-rush", remainingTicks: 180 },
+      }),
+      PREVIEW_OPTIONS,
+    );
+
+    expect(shell.left.statuses.textContent).toContain("Monomino Rush");
+    expect(shell.left.statuses.textContent).toContain("3s");
   });
 });
