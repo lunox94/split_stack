@@ -659,6 +659,22 @@ async function realtimeSendCount(page: Page): Promise<number> {
   );
 }
 
+async function expectRecoveryStatusCentered(page: Page): Promise<void> {
+  const [box, viewport] = await Promise.all([
+    page.locator(".center-overlay-card").boundingBox(),
+    Promise.resolve(page.viewportSize()),
+  ]);
+  expect(box).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  if (box === null || viewport === null) return;
+  expect(
+    Math.abs(box.x + box.width / 2 - viewport.width / 2),
+  ).toBeLessThanOrEqual(2);
+  expect(
+    Math.abs(box.y + box.height / 2 - viewport.height / 2),
+  ).toBeLessThanOrEqual(2);
+}
+
 test("lobby keeps help opt-in and exposes the complete settings surface", async ({ page }) => {
   await openApp(page);
 
@@ -891,6 +907,7 @@ test("replaces a silent competitive channel without registering a second listene
   await expect(warning).toBeVisible();
   await expect(recoveryOverlay).toHaveAttribute("data-presentation", "banner");
   await expect(localPane).toHaveAttribute("aria-disabled", "false");
+  await expectRecoveryStatusCentered(seatA);
 
   const hardPause = seatA.getByText(
     "Connection interrupted — game paused…",
@@ -904,6 +921,7 @@ test("replaces a silent competitive channel without registering a second listene
   await expect(hardPause).toBeVisible();
   await expect(recoveryOverlay).toHaveAttribute("data-presentation", "status");
   await expect(localPane).toHaveAttribute("aria-disabled", "true");
+  await expectRecoveryStatusCentered(seatA);
 
   const reconnecting = seatA.getByText("Reconnecting…", { exact: true });
   await advanceMonotonicUntilVisible(
@@ -912,6 +930,7 @@ test("replaces a silent competitive channel without registering a second listene
     RULES.network.reconnectingMs,
   );
   await expect(reconnecting).toBeVisible();
+  await expectRecoveryStatusCentered(seatA);
 
   await expect
     .poll(
@@ -1005,6 +1024,7 @@ test("keeps a healthy realtime channel across a visibility restore", async ({
     "status",
   );
   await expect(seatA.locator(".center-overlay")).not.toContainText(/\d/);
+  await expectRecoveryStatusCentered(seatA);
 
   const recoveryLeadMs =
     (RULES.network.rollbackResumeCountdownTicks * 1_000) /
