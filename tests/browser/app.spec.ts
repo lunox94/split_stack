@@ -15,6 +15,11 @@ async function openApp(page: Page, identity = "Browser Tester"): Promise<void> {
   await page.waitForLoadState("networkidle");
 }
 
+async function openLobby(page: Page): Promise<void> {
+  await page.getByRole("button", { name: /^Lobby(?: ·|$)/ }).click();
+  await expect(page.getByRole("heading", { name: "Lobby", exact: true })).toBeVisible();
+}
+
 async function leaveThroughMatchMenu(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Match menu" }).click();
   await page.getByRole("button", { name: "Leave match" }).click();
@@ -318,7 +323,7 @@ async function readMarkedCellOrderDifference(page: Page): Promise<number> {
   });
 }
 
-async function seedCompletedMatch(page: Page): Promise<void> {
+async function seedLegacyCompletedMatch(page: Page): Promise<void> {
   const challengeId = "reload-challenge";
   const matchId = `${challengeId}:round:1`;
   const seed = "00112233445566778899aabbccddeeff";
@@ -422,6 +427,191 @@ async function seedCompletedMatch(page: Page): Promise<void> {
   }, updates);
 }
 
+async function seedOfflineOpenChallenge(page: Page): Promise<void> {
+  const alice = { id: "alice@example.test", displayName: "Alice" };
+  await page.addInitScript((records) => {
+    window.localStorage.setItem("__xdcUpdatesKey__", JSON.stringify(records));
+  }, [{
+    payload: {
+      schema: "split-stack/competition/v2",
+      kind: "challenge-created",
+      eventId: "offline-challenge-created",
+      logicalClock: 1,
+      actor: alice,
+      challengeId: "offline-challenge",
+      rulesHash: RULES_HASH,
+      vacancyId: "offline-vacancy",
+    },
+    serial: 1,
+    _sender: alice.id,
+  }]);
+}
+
+async function seedLobbyLayoutData(page: Page): Promise<void> {
+  const alice = {
+    id: "alice@example.test",
+    displayName: "Alice With A Deliberately Long Competitive Name",
+  };
+  const bob = { id: "bob@example.test", displayName: "Bob" };
+  const carol = { id: "carol@example.test", displayName: "Carol" };
+  const seriesId = "layout-series";
+  const pairingId = "layout-pairing";
+  const matchId = `${seriesId}:round:1`;
+  const startedEventId = "layout-match-started";
+  const seed = "0123456789abcdeffedcba9876543210";
+  const stats = (score: number, topOutTick?: number) => ({
+    score,
+    lines: 12,
+    garbageSent: 4,
+    powersActivated: 2,
+    tetrises: 1,
+    tSpinSingles: 0,
+    tSpinDoubles: 0,
+    tSpinTriples: 0,
+    ...(topOutTick === undefined ? {} : { topOutTick }),
+  });
+  const payloads = [
+    {
+      schema: "split-stack/competition/v2",
+      kind: "challenge-created",
+      eventId: "layout-series-created",
+      logicalClock: 1,
+      actor: alice,
+      challengeId: seriesId,
+      rulesHash: RULES_HASH,
+      vacancyId: "layout-series-vacancy",
+    },
+    {
+      schema: "split-stack/competition/v2",
+      kind: "challenge-claimed",
+      eventId: pairingId,
+      logicalClock: 2,
+      actor: bob,
+      challengeId: seriesId,
+      vacancyId: "layout-series-vacancy",
+    },
+    {
+      schema: "split-stack/competition/v2",
+      kind: "runtime-claimed",
+      eventId: "layout-runtime-alice",
+      logicalClock: 3,
+      actor: alice,
+      pairingId,
+      runtimeSessionId: "layout-session-alice",
+    },
+    {
+      schema: "split-stack/competition/v2",
+      kind: "runtime-claimed",
+      eventId: "layout-runtime-bob",
+      logicalClock: 4,
+      actor: bob,
+      pairingId,
+      runtimeSessionId: "layout-session-bob",
+    },
+    {
+      schema: "split-stack/competition/v2",
+      kind: "ready-changed",
+      eventId: "layout-ready-alice",
+      logicalClock: 5,
+      actor: alice,
+      pairingId,
+      runtimeSessionId: "layout-session-alice",
+      ready: true,
+    },
+    {
+      schema: "split-stack/competition/v2",
+      kind: "ready-changed",
+      eventId: "layout-ready-bob",
+      logicalClock: 6,
+      actor: bob,
+      pairingId,
+      runtimeSessionId: "layout-session-bob",
+      ready: true,
+    },
+    {
+      schema: "split-stack/competition/v2",
+      kind: "match-started",
+      eventId: startedEventId,
+      logicalClock: 7,
+      actor: alice,
+      pairingId,
+      seriesId,
+      round: 1,
+      matchId,
+      rulesHash: RULES_HASH,
+      configHash: hashCanonicalHex({
+        rulesVersion: RULES.rulesVersion,
+        rulesHash: RULES_HASH,
+        seed,
+        seatAPlayerId: alice.id,
+        seatBPlayerId: bob.id,
+      }),
+      seed,
+      seedHash: hashCanonicalHex({ seed }),
+      seatAPlayerId: alice.id,
+      seatBPlayerId: bob.id,
+      seatASessionId: "layout-session-alice",
+      seatBSessionId: "layout-session-bob",
+    },
+    {
+      schema: "split-stack/competition/v2",
+      kind: "match-finished",
+      eventId: "layout-match-finished",
+      logicalClock: 8,
+      actor: alice,
+      matchId,
+      startedEventId,
+      result: {
+        schema: "split-stack/result/v1",
+        matchId,
+        seedHash: hashCanonicalHex({ seed }),
+        players: [alice, bob],
+        outcome: "seat-a",
+        reason: "top-out",
+        durationTicks: 1_200,
+        finalLevel: 4,
+        statsByPlayer: {
+          [alice.id]: stats(12_400),
+          [bob.id]: stats(9_800, 1_200),
+        },
+        completedBy: alice.id,
+      },
+    },
+    ...[alice, bob].map((actor, index) => ({
+      schema: "split-stack/competition/v2",
+      kind: "practice-completed",
+      eventId: `layout-practice-${actor.id}`,
+      logicalClock: 9 + index,
+      actor,
+      rulesHash: RULES_HASH,
+      runId: `layout-run-${actor.id}`,
+      endReason: "top-out",
+      score: 20_000 - index * 2_500,
+      durationTicks: 1_200,
+      finalLevel: 4,
+      finalStats: stats(20_000 - index * 2_500, 1_200),
+    })),
+    {
+      schema: "split-stack/competition/v2",
+      kind: "challenge-created",
+      eventId: "layout-open-created",
+      logicalClock: 11,
+      actor: carol,
+      challengeId: "layout-open-challenge",
+      rulesHash: RULES_HASH,
+      vacancyId: "layout-open-vacancy",
+    },
+  ];
+  const updates = payloads.map((payload, index) => ({
+    payload,
+    serial: index + 1,
+    _sender: payload.actor.id,
+  }));
+  await page.addInitScript((records) => {
+    window.localStorage.setItem("__xdcUpdatesKey__", JSON.stringify(records));
+  }, updates);
+}
+
 function localScore(page: Page): Locator {
   return page
     .locator('[data-side="left"] .hud-stats .hud-stat-value')
@@ -447,11 +637,14 @@ async function openVersusPair(
 ): Promise<{ seatA: Page; seatB: Page }> {
   await openApp(seatAPage, "Alice");
   await seatAPage.getByRole("button", { name: "Create challenge" }).click();
-  await expect(seatAPage.getByRole("status")).toContainText(/waiting for an opponent/i);
+  await expect(seatAPage.locator(".home-waiting-message")).toContainText(
+    /waiting for an opponent/i,
+  );
 
   const seatBPage = await context.newPage();
   await openApp(seatBPage, "Bob");
-  const joinButton = seatBPage.getByRole("button", { name: "Join challenge" });
+  await openLobby(seatBPage);
+  const joinButton = seatBPage.getByRole("button", { name: "Join Alice", exact: true });
   await expect(joinButton).toBeEnabled();
   await joinButton.click();
 
@@ -463,6 +656,34 @@ async function openVersusPair(
     timeout: 15_000,
   });
   return { seatA: seatAPage, seatB: seatBPage };
+}
+
+async function openNamedVersusPair(
+  context: BrowserContext,
+  seatAName: string,
+  seatBName: string,
+): Promise<{ seatA: Page; seatB: Page }> {
+  const seatA = await context.newPage();
+  await openApp(seatA, seatAName);
+  await seatA.getByRole("button", { name: "Create challenge" }).click();
+  await expect(seatA.locator(".home-waiting-message")).toContainText(
+    /waiting for an opponent/i,
+  );
+
+  const seatB = await context.newPage();
+  await openApp(seatB, seatBName);
+  await openLobby(seatB);
+  await seatB.getByRole("button", {
+    name: `Join ${seatAName}`,
+    exact: true,
+  }).click();
+  await expect(
+    seatA.getByRole("button", { name: "Ready up", exact: true }),
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(
+    seatB.getByRole("button", { name: "Ready up", exact: true }),
+  ).toBeVisible({ timeout: 15_000 });
+  return { seatA, seatB };
 }
 
 interface ElementRect {
@@ -738,6 +959,264 @@ async function enforceSingleRealtimeListener(context: BrowserContext): Promise<v
   });
 }
 
+async function dropFirstPeerRuntimeClaimDelivery(
+  context: BrowserContext,
+): Promise<void> {
+  await context.addInitScript(() => {
+    let installedHost: WebxdcHost | undefined;
+    Object.defineProperty(window, "webxdc", {
+      configurable: true,
+      get: () => installedHost,
+      set: (host: WebxdcHost) => {
+        host.sendUpdateInterval = 0;
+        const setUpdateListener = host.setUpdateListener.bind(host);
+        let droppedPeerClaim = false;
+        (
+          window as unknown as {
+            __splitStackDroppedPeerRuntimeClaimCount: () => number;
+          }
+        ).__splitStackDroppedPeerRuntimeClaimCount = () =>
+          droppedPeerClaim ? 1 : 0;
+        host.setUpdateListener = (listener, serial) =>
+          setUpdateListener((update) => {
+            const payload = update.payload as {
+              readonly kind?: string;
+              readonly actor?: { readonly id?: string };
+            };
+            if (
+              !droppedPeerClaim &&
+              payload.kind === "runtime-claimed" &&
+              payload.actor?.id !== host.selfAddr
+            ) {
+              droppedPeerClaim = true;
+              return;
+            }
+            listener(update);
+          }, serial);
+        installedHost = host;
+      },
+    });
+  });
+}
+
+async function forceWebxdcIdentityOnRoute(
+  page: Page,
+  identity: string,
+): Promise<void> {
+  const slug = identity.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  await page.addInitScript(({ displayName, address }) => {
+    let installedHost: WebxdcHost | undefined;
+    Object.defineProperty(window, "webxdc", {
+      configurable: true,
+      get: () => installedHost,
+      set: (host: WebxdcHost) => {
+        Object.defineProperty(host, "selfName", {
+          configurable: true,
+          value: displayName,
+        });
+        Object.defineProperty(host, "selfAddr", {
+          configurable: true,
+          value: address,
+        });
+        installedHost = host;
+      },
+    });
+  }, {
+    displayName: identity,
+    address: `${slug}@example.test`,
+  });
+}
+
+async function forceIdentityWithSuppressedRealtimeInbound(
+  page: Page,
+  identity: string,
+): Promise<void> {
+  const slug = identity.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  await page.addInitScript(({ displayName, address }) => {
+    let installedHost: WebxdcHost | undefined;
+    Object.defineProperty(window, "webxdc", {
+      configurable: true,
+      get: () => installedHost,
+      set: (host: WebxdcHost) => {
+        Object.defineProperty(host, "selfName", {
+          configurable: true,
+          value: displayName,
+        });
+        Object.defineProperty(host, "selfAddr", {
+          configurable: true,
+          value: address,
+        });
+        const join = host.joinRealtimeChannel?.bind(host);
+        if (join !== undefined) {
+          host.joinRealtimeChannel = () => {
+            const channel = join();
+            return {
+              setListener: () => channel.setListener(() => {}),
+              send: (data) => channel.send(data),
+              leave: () => channel.leave?.(),
+            };
+          };
+        }
+        installedHost = host;
+      },
+    });
+  }, {
+    displayName: identity,
+    address: `${slug}@example.test`,
+  });
+}
+
+async function failFirstDurableUpdate(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    let installedHost: WebxdcHost | undefined;
+    Object.defineProperty(window, "webxdc", {
+      configurable: true,
+      get: () => installedHost,
+      set: (host: WebxdcHost) => {
+        const sendUpdate = host.sendUpdate.bind(host);
+        let failed = false;
+        host.sendUpdate = async (update, description) => {
+          if (!failed) {
+            failed = true;
+            throw new Error("simulated transient durable failure");
+          }
+          await sendUpdate(update, description);
+        };
+        installedHost = host;
+      },
+    });
+  });
+}
+
+async function dropOwnChallengeCreatedEchoes(
+  context: BrowserContext,
+  maximumDrops: number,
+): Promise<void> {
+  await context.addInitScript((dropLimit) => {
+    let installedHost: WebxdcHost | undefined;
+    Object.defineProperty(window, "webxdc", {
+      configurable: true,
+      get: () => installedHost,
+      set: (host: WebxdcHost) => {
+        host.sendUpdateInterval = 0;
+        const setUpdateListener = host.setUpdateListener.bind(host);
+        let dropped = 0;
+        (
+          window as unknown as {
+            __splitStackDroppedChallengeEchoes: () => number;
+          }
+        ).__splitStackDroppedChallengeEchoes = () => dropped;
+        host.setUpdateListener = (listener, serial) =>
+          setUpdateListener((update) => {
+            const payload = update.payload as {
+              readonly kind?: string;
+              readonly actor?: { readonly id?: string };
+            };
+            if (
+              dropped < dropLimit &&
+              payload.kind === "challenge-created" &&
+              payload.actor?.id === host.selfAddr
+            ) {
+              dropped += 1;
+              return;
+            }
+            listener(update);
+          }, serial);
+        installedHost = host;
+      },
+    });
+  }, maximumDrops);
+}
+
+async function failFirstChatFeedbackUpdate(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    let installedHost: WebxdcHost | undefined;
+    Object.defineProperty(window, "webxdc", {
+      configurable: true,
+      get: () => installedHost,
+      set: (host: WebxdcHost) => {
+        host.sendUpdateInterval = 0;
+        const sendUpdate = host.sendUpdate.bind(host);
+        host.sendUpdate = async (update, description) => {
+          const hasChatFeedback = update.info !== undefined ||
+            update.href !== undefined ||
+            update.summary !== undefined ||
+            update.notify !== undefined;
+          if (
+            hasChatFeedback &&
+            window.localStorage.getItem("__splitStackFailedChatFeedbackOnce__") === null
+          ) {
+            window.localStorage.setItem("__splitStackFailedChatFeedbackOnce__", "1");
+            throw new Error("simulated close before chat feedback retry");
+          }
+          await sendUpdate(update, description);
+        };
+        installedHost = host;
+      },
+    });
+  });
+}
+
+async function duplicateRawDuringFirstChatFeedbackFailure(
+  context: BrowserContext,
+): Promise<void> {
+  await context.addInitScript(() => {
+    let installedHost: WebxdcHost | undefined;
+    Object.defineProperty(window, "webxdc", {
+      configurable: true,
+      get: () => installedHost,
+      set: (host: WebxdcHost) => {
+        host.sendUpdateInterval = 0;
+        const sendUpdate = host.sendUpdate.bind(host);
+        let firstRaw: WebxdcUpdate | undefined;
+        let failedFeedback = false;
+        host.sendUpdate = async (update, description) => {
+          const hasChatFeedback = update.info !== undefined ||
+            update.href !== undefined ||
+            update.summary !== undefined ||
+            update.notify !== undefined;
+          if (!hasChatFeedback && firstRaw === undefined) {
+            firstRaw = update;
+          }
+          if (hasChatFeedback && !failedFeedback && firstRaw !== undefined) {
+            failedFeedback = true;
+            await sendUpdate(firstRaw, description);
+            throw new Error("simulated metadata failure after a delayed raw echo");
+          }
+          await sendUpdate(update, description);
+        };
+        installedHost = host;
+      },
+    });
+  });
+}
+
+async function failFirstRealtimeJoinOnFuturePages(
+  context: BrowserContext,
+): Promise<void> {
+  await context.addInitScript(() => {
+    let installedHost: WebxdcHost | undefined;
+    Object.defineProperty(window, "webxdc", {
+      configurable: true,
+      get: () => installedHost,
+      set: (host: WebxdcHost) => {
+        const join = host.joinRealtimeChannel?.bind(host);
+        let failed = false;
+        if (join !== undefined) {
+          host.joinRealtimeChannel = () => {
+            if (!failed) {
+              failed = true;
+              throw new Error("simulated first realtime join failure");
+            }
+            return join();
+          };
+        }
+        installedHost = host;
+      },
+    });
+  });
+}
+
 async function installControllableMonotonicClock(context: BrowserContext): Promise<void> {
   await context.addInitScript(() => {
     const realNow = performance.now.bind(performance);
@@ -871,7 +1350,536 @@ async function expectRecoveryStatusCentered(page: Page): Promise<void> {
   ).toBeLessThanOrEqual(2);
 }
 
-test("lobby keeps help opt-in and exposes the complete settings surface", async ({ page }) => {
+test("Home stays compact and opens the sectioned Lobby", async ({ page }) => {
+  await openApp(page);
+
+  const actions = page.locator(".home-actions button:visible");
+  await expect(actions).toHaveCount(3);
+  await expect(actions.nth(0)).toHaveAccessibleName("Create challenge");
+  await expect(actions.nth(1)).toHaveAccessibleName(/^Lobby ·/);
+  await expect(actions.nth(2)).toHaveAccessibleName("Practice");
+  await expect(page.getByRole("heading", { name: "Open challenges" })).toBeHidden();
+
+  await openLobby(page);
+  await expect(
+    page.getByRole("heading", { name: "Open challenges", exact: true }),
+  ).toBeVisible();
+  for (const heading of [
+    "Your activity",
+    "Starting soon",
+    "Live games",
+    "Recent results",
+    "Standings",
+    "Practice leaderboard",
+  ]) {
+    await expect(page.getByRole("heading", { name: heading, exact: true })).toBeHidden();
+  }
+
+  await page.getByRole("button", { name: "Home", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Split Stack" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Open challenges" })).toBeHidden();
+});
+
+test("Lobby actions and tables keep their responsive layout", async ({ page }) => {
+  await seedLobbyLayoutData(page);
+  await openApp(page, "Layout Viewer");
+  await openLobby(page);
+
+  const challenge = page.locator(".lobby-challenge-row").filter({ hasText: "Carol" });
+  const copy = challenge.locator(".lobby-row-copy");
+  const join = challenge.getByRole("button", { name: "Join Carol", exact: true });
+  await expect(join).toBeVisible();
+
+  const [challengeRect, copyRect, joinRect] = await Promise.all([
+    elementRect(challenge),
+    elementRect(copy),
+    elementRect(join),
+  ]);
+  const viewport = page.viewportSize();
+  expect(viewport).not.toBeNull();
+  if (viewport === null) return;
+
+  if (viewport.width <= 520) {
+    expect(joinRect.y).toBeGreaterThanOrEqual(rectBottom(copyRect) + 7);
+    expectNear(joinRect.x, copyRect.x, "portrait Join left edge");
+    expectNear(joinRect.width, copyRect.width, "portrait Join full width");
+  } else {
+    expect(joinRect.x).toBeGreaterThanOrEqual(rectRight(copyRect) + 7);
+    expectNear(
+      joinRect.y + joinRect.height / 2,
+      challengeRect.y + challengeRect.height / 2,
+      "desktop Join vertical centering",
+    );
+    expect(joinRect.width).toBeLessThan(challengeRect.width * 0.4);
+    expect(joinRect.height).toBeLessThan(challengeRect.height - 8);
+  }
+
+  for (const [label, table] of [
+    ["Standings", page.locator("table.standings-table")],
+    ["Practice leaderboard", page.locator("table.practice-table")],
+  ] as const) {
+    await expect(table).toBeVisible();
+    const section = table.locator("xpath=ancestor::section[1]");
+    const body = section.locator(".lobby-section-body");
+    const [sectionRect, bodyRect, tableRect] = await Promise.all([
+      elementRect(section),
+      elementRect(body),
+      elementRect(table),
+    ]);
+
+    expectNear(tableRect.x, bodyRect.x, `${label} table left edge`);
+    expectNear(tableRect.width, bodyRect.width, `${label} table full width`);
+    expect(tableRect.x).toBeGreaterThanOrEqual(sectionRect.x - 0.5);
+    expect(rectRight(tableRect)).toBeLessThanOrEqual(rectRight(sectionRect) + 0.5);
+    expect(
+      await section.evaluate((node) => node.scrollWidth - node.clientWidth),
+      `${label} card must not scroll horizontally`,
+    ).toBeLessThanOrEqual(1);
+
+    const headers = table.locator("thead th");
+    const firstRowCells = table.locator("tbody tr").first().locator("th, td");
+    const columnCount = await headers.count();
+    expect(await firstRowCells.count()).toBe(columnCount);
+    const [headerAlignments, bodyAlignments] = await Promise.all([
+      headers.evaluateAll((nodes) =>
+        nodes.map((node) => getComputedStyle(node).textAlign)
+      ),
+      firstRowCells.evaluateAll((nodes) =>
+        nodes.map((node) => getComputedStyle(node).textAlign)
+      ),
+    ]);
+    expect(bodyAlignments).toEqual(headerAlignments);
+    for (let index = 0; index < columnCount; index += 1) {
+      const [headerRect, cellRect] = await Promise.all([
+        elementRect(headers.nth(index)),
+        elementRect(firstRowCells.nth(index)),
+      ]);
+      expectNear(cellRect.x, headerRect.x, `${label} column ${index + 1} left edge`);
+      expectNear(cellRect.width, headerRect.width, `${label} column ${index + 1} width`);
+    }
+  }
+});
+
+test("a stale deeplink falls back once to a non-blocking Lobby notice", async ({
+  page,
+}) => {
+  await forceWebxdcIdentityOnRoute(page, "Alice");
+  await page.goto("/?deeplink=1#match/stale-match");
+
+  await expect(
+    page.getByRole("heading", { name: "Lobby", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("This link is no longer active.", { exact: true }),
+  ).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.location.hash)).toBe("");
+
+  await page.getByRole("button", { name: "Home", exact: true }).click();
+  await openLobby(page);
+  await expect(
+    page.getByText("This link is no longer active.", { exact: true }),
+  ).toBeHidden();
+});
+
+test("valid challenge, result, and leaderboard deeplinks open once after replay", async ({
+  page,
+}) => {
+  await seedLobbyLayoutData(page);
+  await forceWebxdcIdentityOnRoute(page, "Viewer");
+
+  await page.goto("/?deeplink=challenge#lobby/challenge/layout-open-challenge");
+  await expect(
+    page.getByRole("heading", { name: "Lobby", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.locator('[data-challenge-id="layout-open-challenge"]'),
+  ).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.location.hash)).toBe("");
+
+  await page.goto("/?deeplink=result#result/layout-series%3Around%3A1");
+  await expect(page.getByRole("heading", { name: "Alice With A Deliberately Long Competitive Name" }))
+    .toBeVisible();
+  await expect(page.locator('.results-summary[aria-label="Final scores"]')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.location.hash)).toBe("");
+
+  await page.goto(
+    `/?deeplink=practice#practice/leaderboard/${encodeURIComponent(RULES_HASH)}`,
+  );
+  await expect(
+    page.getByRole("heading", { name: "Lobby", exact: true }),
+  ).toBeVisible();
+  await expect(page.locator("table.practice-table")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.location.hash)).toBe("");
+});
+
+test("a creator can cancel a waiting challenge from Home", async ({ page }) => {
+  await openApp(page, "Alice");
+  await page.getByRole("button", { name: "Create challenge" }).click();
+
+  await expect(page.locator(".home-waiting-message")).toContainText(
+    /waiting for an opponent/i,
+  );
+  await expect(page.locator(".home-status")).toBeEmpty();
+  const waitingActions = page.locator(".home-actions button:visible");
+  await expect(waitingActions).toHaveCount(3);
+  await expect(waitingActions.nth(0)).toHaveAccessibleName("Cancel challenge");
+  await expect(waitingActions.nth(1)).toHaveAccessibleName(/^Lobby ·/);
+  await expect(waitingActions.nth(2)).toHaveAccessibleName("Practice");
+  const cancel = page.getByRole("button", { name: "Cancel challenge" });
+  await expect(cancel).toHaveClass(/destructive/);
+  await cancel.click();
+
+  await expect(page.getByRole("button", { name: "Create challenge" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Cancel challenge" })).toBeHidden();
+  await openLobby(page);
+  await expect(page.getByText("No one is waiting for an opponent.")).toBeVisible();
+});
+
+test("challenge creation announces once while cancellation stays silent", async ({ page }) => {
+  await openApp(page, "Alice");
+  const create = page.getByRole("button", { name: "Create challenge" });
+  await create.evaluate((button) => {
+    (button as HTMLButtonElement).click();
+    (button as HTMLButtonElement).click();
+  });
+  await expect(page.locator(".home-waiting-message")).toContainText(
+    /waiting for an opponent/i,
+  );
+
+  const feedbackCount = (kind: string) => page.evaluate((eventKind) => {
+    const raw = window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]";
+    const updates = JSON.parse(raw) as Array<{
+      payload?: { kind?: string; eventId?: string };
+      info?: string;
+    }>;
+    return {
+      eventIds: [...new Set(updates
+        .filter((update) => update.payload?.kind === eventKind)
+        .map((update) => update.payload?.eventId))],
+      infos: updates.filter((update) =>
+        update.payload?.kind === eventKind && typeof update.info === "string"
+      ).map((update) => update.info),
+    };
+  }, kind);
+
+  await expect.poll(() => feedbackCount("challenge-created"), { timeout: 10_000 })
+    .toEqual({
+      eventIds: [expect.any(String)],
+      infos: ["Alice is waiting for an opponent."],
+    });
+
+  const cancel = page.getByRole("button", { name: "Cancel challenge" });
+  await cancel.evaluate((button) => {
+    (button as HTMLButtonElement).click();
+    (button as HTMLButtonElement).click();
+  });
+  await expect(create).toBeVisible();
+  await expect.poll(
+    async () => (await feedbackCount("challenge-cancelled")).eventIds,
+    { timeout: 10_000 },
+  ).toEqual([expect.any(String)]);
+  const durableInterval = await page.evaluate(() =>
+    Math.max(0, window.webxdc?.sendUpdateInterval ?? 0)
+  );
+  await page.waitForTimeout(durableInterval + 500);
+  expect(await feedbackCount("challenge-cancelled")).toEqual({
+    eventIds: [expect.any(String)],
+    infos: [],
+  });
+});
+
+test("accepted challenge chat feedback recovers once after a reload before retry", async ({
+  context,
+  page,
+}) => {
+  await failFirstChatFeedbackUpdate(context);
+  await openApp(page, "Alice");
+  await page.getByRole("button", { name: "Create challenge" }).click();
+
+  await expect.poll(() => page.evaluate(() => ({
+    failed: window.localStorage.getItem("__splitStackFailedChatFeedbackOnce__"),
+    updates: (JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{ payload?: { kind?: string }; info?: string }>).filter(
+      (update) => update.payload?.kind === "challenge-created",
+    ).map((update) => update.info ?? null),
+  })), { timeout: 10_000 }).toEqual({
+    failed: "1",
+    updates: [null],
+  });
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Split Stack" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{ payload?: { kind?: string; eventId?: string }; info?: string }>;
+    const created = updates.filter(
+      (update) => update.payload?.kind === "challenge-created",
+    );
+    const feedbackJournal = Object.keys(window.localStorage)
+      .find((key) => key.startsWith("split-stack/pending-chat-feedback/v2:"));
+    return {
+      eventIds: [...new Set(created.map((update) => update.payload?.eventId))],
+      infos: created.flatMap((update) =>
+        update.info === undefined ? [] : [update.info]
+      ),
+      journal: feedbackJournal === undefined
+        ? []
+        : JSON.parse(window.localStorage.getItem(feedbackJournal) ?? "[]"),
+    };
+  }), { timeout: 10_000 }).toEqual({
+    eventIds: [expect.any(String)],
+    infos: ["Alice is waiting for an opponent."],
+    journal: [],
+  });
+});
+
+test("a delayed raw echo cannot acknowledge queued challenge feedback", async ({
+  context,
+  page,
+}) => {
+  await duplicateRawDuringFirstChatFeedbackFailure(context);
+  await openApp(page, "Alice");
+  await page.getByRole("button", { name: "Create challenge" }).click();
+
+  await expect.poll(() => page.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{ payload?: { kind?: string; eventId?: string }; info?: string }>;
+    const created = updates.filter(
+      (update) => update.payload?.kind === "challenge-created",
+    );
+    return {
+      eventIds: [...new Set(created.map((update) => update.payload?.eventId))],
+      rawCount: created.filter((update) => update.info === undefined).length,
+      infos: created.flatMap((update) =>
+        update.info === undefined ? [] : [update.info]
+      ),
+    };
+  }), { timeout: 10_000 }).toEqual({
+    eventIds: [expect.any(String)],
+    rawCount: 2,
+    infos: ["Alice is waiting for an opponent."],
+  });
+});
+
+test("a transient durable failure retries the challenge until its echo arrives", async ({
+  context,
+  page,
+}) => {
+  await failFirstDurableUpdate(context);
+  await openApp(page, "Alice");
+  await page.getByRole("button", { name: "Create challenge" }).click();
+
+  await expect(page.locator(".home-waiting-message")).toContainText(
+    /waiting for an opponent/i,
+    { timeout: 10_000 },
+  );
+  await openLobby(page);
+  await expect(
+    page.locator(".lobby-challenge-row").filter({ hasText: "Alice" }),
+  ).toBeVisible();
+});
+
+test("a dropped first self echo is repaired by one accepted-send retry", async ({
+  context,
+  page,
+}) => {
+  await dropOwnChallengeCreatedEchoes(context, 1);
+  await openApp(page, "Alice");
+  await page.getByRole("button", { name: "Create challenge" }).click();
+
+  await expect(page.locator(".home-waiting-message")).toContainText(
+    /waiting for an opponent/i,
+    { timeout: 10_000 },
+  );
+  await expect.poll(() => page.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{ payload?: { kind?: string }; info?: string }>;
+    return {
+      dropped: (
+        window as unknown as {
+          __splitStackDroppedChallengeEchoes: () => number;
+        }
+      ).__splitStackDroppedChallengeEchoes(),
+      rawCount: updates.filter((update) =>
+        update.payload?.kind === "challenge-created" && update.info === undefined
+      ).length,
+    };
+  }), { timeout: 10_000 }).toEqual({ dropped: 1, rawCount: 2 });
+});
+
+test("accepted durable sends stop retrying when every self echo is missing", async ({
+  context,
+  page,
+}) => {
+  await dropOwnChallengeCreatedEchoes(context, Number.MAX_SAFE_INTEGER);
+  await openApp(page, "Alice");
+  await page.getByRole("button", { name: "Create challenge" }).click();
+
+  const outboxState = () => page.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{
+      payload?: { kind?: string; eventId?: string };
+      info?: string;
+    }>;
+    const created = updates.filter((update) =>
+      update.payload?.kind === "challenge-created" && update.info === undefined
+    );
+    const feedbackKey = Object.keys(window.localStorage).find((key) =>
+      key.startsWith("split-stack/pending-chat-feedback/v2:")
+    );
+    const journal = feedbackKey === undefined
+      ? []
+      : JSON.parse(window.localStorage.getItem(feedbackKey) ?? "[]") as Array<{
+        resolved?: boolean;
+      }>;
+    return {
+      rawCount: created.length,
+      eventIds: [...new Set(created.map((update) => update.payload?.eventId))],
+      journalResolved: journal.map((entry) => entry.resolved),
+    };
+  });
+
+  await expect.poll(outboxState, { timeout: 10_000 }).toEqual({
+    rawCount: 2,
+    eventIds: [expect.any(String)],
+    journalResolved: [false],
+  });
+  await page.waitForTimeout(3_500);
+  expect(await outboxState()).toEqual({
+    rawCount: 2,
+    eventIds: [expect.any(String)],
+    journalResolved: [false],
+  });
+});
+
+test("an offline creator remains joinable and the joiner can withdraw", async ({ page }) => {
+  await seedOfflineOpenChallenge(page);
+  await openApp(page, "Bob");
+  await openLobby(page);
+
+  const challenge = page.locator(".lobby-challenge-row").filter({ hasText: "Alice" });
+  await expect(challenge.getByText("Creator offline · You can still join")).toBeVisible();
+  const join = challenge.getByRole("button", { name: "Join Alice", exact: true });
+  await expect(join).toBeEnabled();
+  await join.click();
+
+  const withdraw = page.getByRole("button", { name: "Withdraw", exact: true });
+  await expect(withdraw).toBeVisible({ timeout: 10_000 });
+  await expect(
+    page.getByRole("button", { name: "Retry connection", exact: true }),
+  ).toBeVisible();
+  await withdraw.click();
+
+  await openLobby(page);
+  const reopened = page.locator(".lobby-challenge-row").filter({ hasText: "Alice" });
+  await expect(
+    reopened.getByRole("button", { name: "Join Alice", exact: true }),
+  ).toBeEnabled({ timeout: 10_000 });
+});
+
+test("both players reach ready-up when each first peer runtime claim is lost", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(35_000);
+  await dropFirstPeerRuntimeClaimDelivery(context);
+
+  await openApp(page, "Alice");
+  await page.getByRole("button", { name: "Create challenge" }).click();
+  await expect(page.locator(".home-waiting-message")).toContainText(
+    /waiting for an opponent/i,
+  );
+  await page.close();
+
+  const seatB = await context.newPage();
+  await openApp(seatB, "Bob");
+  await openLobby(seatB);
+  await seatB.getByRole("button", { name: "Join Alice", exact: true }).click();
+  await expect.poll(() => seatB.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{
+      readonly payload?: {
+        readonly kind?: string;
+        readonly actor?: { readonly id?: string };
+      };
+    }>;
+    return updates.some((update) =>
+      update.payload?.kind === "runtime-claimed" &&
+      update.payload.actor?.id === "bob@example.test"
+    );
+  }), { timeout: 10_000 }).toBe(true);
+
+  const reopenedSeatA = await context.newPage();
+  await reopenedSeatA.goto("/#name=Alice&addr=alice%40example.test");
+  await expect(
+    reopenedSeatA.getByRole("main", { name: "Split Stack" }),
+  ).toBeVisible();
+  await reopenedSeatA.waitForLoadState("networkidle");
+  await expect.poll(async () => Promise.all(
+    [reopenedSeatA, seatB].map((candidate) =>
+      candidate.evaluate(() =>
+        (
+          window as unknown as {
+            __splitStackDroppedPeerRuntimeClaimCount: () => number;
+          }
+        ).__splitStackDroppedPeerRuntimeClaimCount()
+      )
+    ),
+  ), { timeout: 10_000 }).toEqual([1, 1]);
+
+  await expect(
+    reopenedSeatA.getByRole("button", { name: "Ready up", exact: true }),
+  ).toBeVisible({ timeout: 10_000 });
+  await expect(
+    seatB.getByRole("button", { name: "Ready up", exact: true }),
+  ).toBeVisible({ timeout: 10_000 });
+  await expect.poll(() => seatB.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{
+      readonly payload?: {
+        readonly kind?: string;
+        readonly eventId?: string;
+        readonly actor?: { readonly id?: string };
+      };
+      readonly info?: string;
+      readonly href?: string;
+      readonly summary?: string;
+      readonly notify?: Readonly<Record<string, string>>;
+    }>;
+    const claims = updates.filter(
+      (update) => update.payload?.kind === "runtime-claimed",
+    );
+    const idsFor = (actorId: string) => [...new Set(claims
+      .filter((update) => update.payload?.actor?.id === actorId)
+      .map((update) => update.payload?.eventId))];
+    return {
+      aliceEventIds: idsFor("alice@example.test"),
+      bobEventIds: idsFor("bob@example.test"),
+      metadataCount: claims.filter((update) =>
+        update.info !== undefined ||
+        update.href !== undefined ||
+        update.summary !== undefined ||
+        update.notify !== undefined
+      ).length,
+    };
+  })).toEqual({
+    aliceEventIds: [expect.any(String)],
+    bobEventIds: [expect.any(String)],
+    metadataCount: 0,
+  });
+
+  await reopenedSeatA.close();
+  await seatB.close();
+});
+
+test("Home keeps help opt-in and exposes the complete settings surface", async ({ page }) => {
   await openApp(page);
 
   await expect(page.getByRole("button", { name: "Practice", exact: true })).toBeVisible();
@@ -1454,11 +2462,19 @@ test("landscape PvP gameplay frame stays above the touch-button tray", async ({
 }) => {
   const viewport = { width: 640, height: 360 };
   await page.setViewportSize(viewport);
-  await openApp(page);
+  await openApp(page, "Alice");
   await page.getByRole("button", { name: "Settings" }).click();
   await page.getByLabel("Touch controls").selectOption("buttons");
   await page.getByRole("button", { name: "Back" }).click();
-  const { seatA, seatB } = await openVersusPair(context, page);
+  await page.getByRole("button", { name: "Create challenge" }).click();
+  const seatA = page;
+  const seatB = await context.newPage();
+  await openApp(seatB, "Bob");
+  await openLobby(seatB);
+  await seatB.getByRole("button", { name: "Join Alice", exact: true }).click();
+  await expect(seatA.getByRole("application", { name: "Your board" })).toBeVisible({
+    timeout: 15_000,
+  });
 
   const tray = seatA.locator(".touch-buttons");
   await expect(tray).toBeVisible();
@@ -1495,16 +2511,29 @@ test("landscape Practice gameplay frame and footer stay above the touch-button t
   ).toBeGreaterThanOrEqual(3.5);
 });
 
-test("a third participant joins an active challenge as a read-only spectator", async ({
+test("a third participant explicitly watches an active match as a read-only spectator", async ({
   context,
   page,
 }) => {
+  test.setTimeout(45_000);
   const { seatA, seatB } = await openVersusPair(context, page);
   await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
   await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
+  await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
+  const committedMatchId = () => seatA.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{ readonly payload?: { readonly kind?: string; readonly matchId?: string } }>;
+    return updates.find((update) => update.payload?.kind === "match-started")
+      ?.payload?.matchId ?? null;
+  });
+  await expect.poll(committedMatchId).not.toBeNull();
+  const matchId = await committedMatchId();
+  if (matchId === null) throw new Error("Expected a committed live match ID");
 
   const spectator = await context.newPage();
-  await spectator.goto("/#name=Charlie&addr=charlie%40example.test");
+  await forceWebxdcIdentityOnRoute(spectator, "Charlie");
+  await spectator.goto(`/?deeplink=live#match/${encodeURIComponent(matchId)}`);
   await expect(spectator.getByRole("application", { name: "Seat A board" })).toBeVisible({
     timeout: 15_000,
   });
@@ -1513,9 +2542,594 @@ test("a third participant joins an active challenge as a read-only spectator", a
     "aria-disabled",
     "true",
   );
+  await expect.poll(() => spectator.evaluate(() => window.location.hash)).toBe("");
+
+  await spectator.reload();
+  await expect(spectator.getByRole("heading", { name: "Split Stack" })).toBeVisible();
+  await expect(spectator.getByRole("button", { name: "Create challenge" })).toBeVisible();
+  await expect(spectator.getByRole("application", { name: "Seat A board" })).toBeHidden();
+  const playerScoreBefore = await numericText(localScore(seatA));
+  await seatA.keyboard.press("Space");
+  await expectScoreAbove(localScore(seatA), playerScoreBefore);
 
   await spectator.close();
   await seatB.close();
+});
+
+test("an owned orphan recovery continues while its participant watches another live route", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(70_000);
+  await installControllableMonotonicClock(context);
+  const own = await openVersusPair(context, page);
+  const unrelated = await openNamedVersusPair(context, "Charlie", "Dave");
+
+  for (const participant of [own.seatA, own.seatB, unrelated.seatA, unrelated.seatB]) {
+    await participant.getByRole("button", { name: "Ready up", exact: true }).click();
+  }
+  await advancePairMonotonic(own.seatA, own.seatB, 4_000, 500);
+  await advancePairMonotonic(unrelated.seatA, unrelated.seatB, 4_000, 500);
+  await expect(own.seatA.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
+  await expect(unrelated.seatA.locator(".center-overlay")).toBeHidden({
+    timeout: 5_000,
+  });
+
+  const committedMatchIds = () => unrelated.seatA.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{
+      readonly payload?: {
+        readonly kind?: string;
+        readonly matchId?: string;
+        readonly seatAPlayerId?: string;
+      };
+    }>;
+    const matchIdFor = (seatAPlayerId: string) => updates.find((update) =>
+      update.payload?.kind === "match-started" &&
+      update.payload.seatAPlayerId === seatAPlayerId
+    )?.payload?.matchId ?? null;
+    return {
+      own: matchIdFor("alice@example.test"),
+      unrelated: matchIdFor("charlie@example.test"),
+    };
+  });
+  await expect.poll(committedMatchIds).toEqual({
+    own: expect.any(String),
+    unrelated: expect.any(String),
+  });
+  const matchIds = await committedMatchIds();
+  if (matchIds.own === null || matchIds.unrelated === null) {
+    throw new Error("Expected both matches to be durably committed");
+  }
+
+  await Promise.all([own.seatA.close(), own.seatB.close()]);
+  const recreated = await context.newPage();
+  await forceWebxdcIdentityOnRoute(recreated, "Alice");
+  await recreated.goto(
+    `/?reopened=watch#match/${encodeURIComponent(matchIds.unrelated)}`,
+  );
+  await expect(
+    recreated.getByRole("application", { name: "Seat A board" }),
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(
+    recreated.getByRole("application", { name: "Seat B board" }),
+  ).toBeVisible();
+  await expect(recreated.locator('.player-pane[data-side="left"]')).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+  await expect.poll(() => recreated.evaluate(() => window.location.hash)).toBe("");
+
+  const connectionLossEventIds = () => recreated.evaluate((ownedMatchId) => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{
+      readonly payload?: {
+        readonly kind?: string;
+        readonly eventId?: string;
+        readonly matchId?: string;
+        readonly result?: { readonly reason?: string };
+      };
+    }>;
+    return [...new Set(updates.flatMap((update) =>
+      update.payload?.kind === "match-finished" &&
+        update.payload.matchId === ownedMatchId &&
+        update.payload.result?.reason === "connection-lost" &&
+        update.payload.eventId !== undefined
+        ? [update.payload.eventId]
+        : []
+    ))];
+  }, matchIds.own);
+  await advanceMonotonic(recreated, RULES.network.reconnectGraceMs + 1_000);
+  await recreated.waitForTimeout(1_000);
+  expect(await connectionLossEventIds()).toEqual([]);
+  await expect(
+    recreated.getByRole("application", { name: "Seat A board" }),
+  ).toBeVisible();
+  await expect(recreated.locator('.player-pane[data-side="left"]')).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+
+  await leaveThroughMatchMenu(recreated);
+  await expect(
+    recreated.getByRole("heading", { name: "Split Stack", exact: true }),
+  ).toBeVisible();
+  const endInterruptedMatch = recreated.getByRole("button", {
+    name: "End interrupted match",
+    exact: true,
+  });
+  await expect(endInterruptedMatch).toBeVisible();
+  await endInterruptedMatch.click();
+  await expect.poll(connectionLossEventIds, { timeout: 10_000 }).toEqual([
+    expect.any(String),
+  ]);
+
+  const unrelatedScore = await numericText(localScore(unrelated.seatA));
+  await unrelated.seatA.keyboard.press("Space");
+  await expectScoreAbove(localScore(unrelated.seatA), unrelatedScore);
+
+  await recreated.close();
+  await unrelated.seatA.close();
+  await unrelated.seatB.close();
+});
+
+test("an owned starting pairing consumes and outranks an unrelated live route", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(60_000);
+  await installControllableMonotonicClock(context);
+  const own = await openVersusPair(context, page);
+  const unrelated = await openNamedVersusPair(context, "Charlie", "Dave");
+  await unrelated.seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await unrelated.seatB.getByRole("button", { name: "Ready up", exact: true }).click();
+  await advancePairMonotonic(unrelated.seatA, unrelated.seatB, 4_000, 500);
+  await expect(unrelated.seatA.locator(".center-overlay")).toBeHidden({
+    timeout: 5_000,
+  });
+
+  const unrelatedMatchId = () => unrelated.seatA.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{
+      readonly payload?: {
+        readonly kind?: string;
+        readonly matchId?: string;
+        readonly seatAPlayerId?: string;
+      };
+    }>;
+    return updates.find((update) =>
+      update.payload?.kind === "match-started" &&
+      update.payload.seatAPlayerId === "charlie@example.test"
+    )?.payload?.matchId ?? null;
+  });
+  await expect.poll(unrelatedMatchId).not.toBeNull();
+  const matchId = await unrelatedMatchId();
+  if (matchId === null) throw new Error("Expected an unrelated committed match");
+
+  await own.seatA.close();
+  const recreated = await context.newPage();
+  await forceWebxdcIdentityOnRoute(recreated, "Alice");
+  await recreated.goto(`/?reopened=starting#match/${encodeURIComponent(matchId)}`);
+  await expect(
+    recreated.getByRole("button", { name: "Ready up", exact: true }),
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(
+    recreated.getByRole("application", { name: "Your board" }),
+  ).toBeVisible();
+  await expect(
+    recreated.getByRole("application", { name: "Seat A board" }),
+  ).toBeHidden();
+  await expect(
+    recreated.getByText("You are watching this challenge as a spectator.", {
+      exact: true,
+    }),
+  ).toBeHidden();
+  await expect.poll(() => recreated.evaluate(() => window.location.hash)).toBe("");
+
+  await recreated.close();
+  await own.seatB.close();
+  await unrelated.seatA.close();
+  await unrelated.seatB.close();
+});
+
+test("a live reload stays on navigable Home without resetting the committed match", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(45_000);
+  const { seatA, seatB } = await openVersusPair(context, page);
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
+  await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
+  await expect.poll(() => seatA.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{ readonly payload?: { readonly kind?: string } }>;
+    return updates.some((update) => update.payload?.kind === "match-started");
+  })).toBe(true);
+
+  const scoreBeforeReload = await numericText(localScore(seatA));
+  await seatA.keyboard.press("Space");
+  await expectScoreAbove(localScore(seatA), scoreBeforeReload);
+  const progressedScore = await numericText(localScore(seatA));
+
+  await seatB.reload();
+  await expect(seatB.getByRole("heading", {
+    name: "Split Stack",
+    exact: true,
+  })).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(seatB.getByText(
+    /game (?:active in another session|interrupted · waiting for reconnection)/i,
+  )).toBeVisible({ timeout: 15_000 });
+  for (const boardName of [
+    "Your board",
+    "Opponent board",
+    "Seat A board",
+    "Seat B board",
+  ]) {
+    await expect(
+      seatB.getByRole("application", { name: boardName }),
+    ).toBeHidden();
+  }
+  await expect(seatB.getByText(/bound to another game session/i)).toBeHidden();
+  await expect(
+    seatB.getByRole("button", { name: /^Lobby(?: ·|$)/ }),
+  ).toBeEnabled();
+  await expect(seatA.getByText("Reconnecting…", { exact: true })).toBeVisible({
+    timeout: 15_000,
+  });
+  expect(await numericText(localScore(seatA))).toBeGreaterThanOrEqual(progressedScore);
+  await seatB.close();
+});
+
+test("a recreated live player consumes a stale match link without entering the arena", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(45_000);
+  const { seatA, seatB } = await openVersusPair(context, page);
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
+  await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
+
+  await forceWebxdcIdentityOnRoute(seatB, "Bob");
+  await seatB.goto("/?reopened=1#match/stale-unrelated-match");
+  await expect(seatB.getByRole("main", { name: "Split Stack" })).toBeVisible();
+  await seatB.waitForLoadState("networkidle");
+
+  await expect.poll(async () => ({
+    lobby: await seatB.getByRole("heading", {
+      name: "Lobby",
+      exact: true,
+    }).isVisible(),
+    ownSeatWatching: await seatB.getByText(
+      /bound to another game session.*watching only/i,
+    ).isVisible(),
+  }), { timeout: 10_000 }).toEqual({
+    lobby: true,
+    ownSeatWatching: false,
+  });
+  await expect(
+    seatB.getByText("This link is no longer active.", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    seatB.getByRole("application", { name: "Seat A board" }),
+  ).toBeHidden();
+  await expect(
+    seatB.getByRole("application", { name: "Seat B board" }),
+  ).toBeHidden();
+  await expect.poll(() => seatB.evaluate(() => window.location.hash)).toBe("");
+
+  await seatB.getByRole("button", { name: "Home", exact: true }).click();
+  await expect(
+    seatB.getByRole("heading", { name: "Split Stack", exact: true }),
+  ).toBeVisible();
+  await expect(seatB.getByText(
+    /game (?:active in another session|interrupted · waiting for reconnection)/i,
+  )).toBeVisible();
+
+  await seatB.close();
+  await seatA.close();
+});
+
+test("an orphaned live match waits for explicit neutral release", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(55_000);
+  await installControllableMonotonicClock(context);
+  const { seatA, seatB } = await openVersusPair(context, page);
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
+  await advancePairMonotonic(seatA, seatB, 4_000, 500);
+  await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
+  await expect.poll(() => seatA.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{ readonly payload?: { readonly kind?: string } }>;
+    return updates.some((update) => update.payload?.kind === "match-started");
+  })).toBe(true);
+
+  await Promise.all([seatA.close(), seatB.close()]);
+  await failFirstRealtimeJoinOnFuturePages(context);
+
+  const reopenedSeatA = await context.newPage();
+  await reopenedSeatA.goto("/#name=Alice&addr=alice%40example.test");
+  await expect(
+    reopenedSeatA.getByRole("main", { name: "Split Stack" }),
+  ).toBeVisible();
+  await reopenedSeatA.waitForLoadState("networkidle");
+
+  await advanceMonotonic(
+    reopenedSeatA,
+    RULES.network.reconnectGraceMs + 1_000,
+  );
+  await reopenedSeatA.waitForTimeout(1_000);
+
+  const connectionLossFinishes = () => reopenedSeatA.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{
+      readonly payload?: {
+        readonly kind?: string;
+        readonly eventId?: string;
+        readonly result?: {
+          readonly outcome?: string;
+          readonly reason?: string;
+        };
+      };
+    }>;
+    return [...new Map(updates.flatMap((update) =>
+      update.payload?.kind === "match-finished" &&
+        update.payload.result?.reason === "connection-lost" &&
+        update.payload.eventId !== undefined
+        ? [[update.payload.eventId, {
+            eventId: update.payload.eventId,
+            outcome: update.payload.result.outcome,
+            reason: update.payload.result.reason,
+          }] as const]
+        : []
+    )).values()];
+  });
+  expect(await connectionLossFinishes()).toEqual([]);
+
+  const create = reopenedSeatA.getByRole("button", {
+    name: "Create challenge",
+    exact: true,
+  });
+  await expect(create).toBeVisible({ timeout: 10_000 });
+  await expect(create).toBeDisabled();
+  const endInterruptedMatch = reopenedSeatA.getByRole("button", {
+    name: "End interrupted match",
+    exact: true,
+  });
+  await expect(endInterruptedMatch).toBeVisible();
+  await expect(endInterruptedMatch).toBeEnabled();
+  await endInterruptedMatch.click();
+
+  await expect.poll(connectionLossFinishes, { timeout: 10_000 }).toEqual([
+    {
+      eventId: expect.any(String),
+      outcome: "desync",
+      reason: "connection-lost",
+    },
+  ]);
+  await expect(create).toBeEnabled();
+  await openLobby(reopenedSeatA);
+  await expect(reopenedSeatA.locator(".lobby-summary")).toContainText("0 live");
+  const result = reopenedSeatA.locator(".lobby-result-row");
+  await expect(result).toHaveCount(1);
+  await expect(result).toContainText(/connection lost/i);
+
+  await expect.poll(() => reopenedSeatA.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{ readonly info?: string }>;
+    return updates.flatMap((update) =>
+      update.info !== undefined && /connection lost/i.test(update.info)
+        ? [update.info]
+        : []
+    );
+  }), { timeout: 10_000 }).toEqual([
+    "Match ended · connection lost · no result",
+  ]);
+
+  await reopenedSeatA.close();
+});
+
+test("a deaf duplicate cannot end a match whose committed controllers are live", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(55_000);
+  await installControllableMonotonicClock(context);
+  const { seatA, seatB } = await openVersusPair(context, page);
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
+  await advancePairMonotonic(seatA, seatB, 4_000, 500);
+  await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
+
+  const committedMatchId = () => seatA.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{
+      readonly payload?: {
+        readonly kind?: string;
+        readonly matchId?: string;
+        readonly seatAPlayerId?: string;
+      };
+    }>;
+    return updates.find((update) =>
+      update.payload?.kind === "match-started" &&
+      update.payload.seatAPlayerId === "alice@example.test"
+    )?.payload?.matchId ?? null;
+  });
+  await expect.poll(committedMatchId).not.toBeNull();
+  const matchId = await committedMatchId();
+  if (matchId === null) throw new Error("Expected a committed live match");
+
+  const duplicate = await context.newPage();
+  await forceIdentityWithSuppressedRealtimeInbound(duplicate, "Alice");
+  await duplicate.goto("/?duplicate=deaf");
+  await expect(
+    duplicate.getByRole("heading", { name: "Split Stack", exact: true }),
+  ).toBeVisible();
+  await expect(duplicate.getByText(
+    /game (?:active in another session|interrupted · waiting for reconnection)/i,
+  )).toBeVisible({ timeout: 15_000 });
+
+  await advanceMonotonic(duplicate, RULES.network.reconnectGraceMs + 1_000);
+  await duplicate.waitForTimeout(1_000);
+  const connectionLossEventIds = () => duplicate.evaluate((ownedMatchId) => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{
+      readonly payload?: {
+        readonly kind?: string;
+        readonly eventId?: string;
+        readonly matchId?: string;
+        readonly result?: { readonly reason?: string };
+      };
+    }>;
+    return [...new Set(updates.flatMap((update) =>
+      update.payload?.kind === "match-finished" &&
+        update.payload.matchId === ownedMatchId &&
+        update.payload.result?.reason === "connection-lost" &&
+        update.payload.eventId !== undefined
+        ? [update.payload.eventId]
+        : []
+    ))];
+  }, matchId);
+  expect(await connectionLossEventIds()).toEqual([]);
+
+  const seatAScore = await numericText(localScore(seatA));
+  const seatBScore = await numericText(localScore(seatB));
+  await seatA.keyboard.press("Space");
+  await seatB.keyboard.press("Space");
+  await expectScoreAbove(localScore(seatA), seatAScore);
+  await expectScoreAbove(localScore(seatB), seatBScore);
+
+  await duplicate.close();
+  await seatB.close();
+});
+
+test("a hidden recreated participant gets a fresh recovery window on return", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(55_000);
+  await installControllableMonotonicClock(context);
+  const { seatA, seatB } = await openVersusPair(context, page);
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
+  await advancePairMonotonic(seatA, seatB, 4_000, 500);
+  await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
+  await expect.poll(() => seatA.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{ readonly payload?: { readonly kind?: string } }>;
+    return updates.some((update) => update.payload?.kind === "match-started");
+  })).toBe(true);
+  await Promise.all([seatA.close(), seatB.close()]);
+
+  const reopenedSeatA = await context.newPage();
+  await reopenedSeatA.goto("/#name=Alice&addr=alice%40example.test");
+  await expect(
+    reopenedSeatA.getByRole("main", { name: "Split Stack" }),
+  ).toBeVisible();
+  await setVisibilityState(reopenedSeatA, "hidden");
+
+  const connectionLossEventIds = () => reopenedSeatA.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{
+      readonly payload?: {
+        readonly kind?: string;
+        readonly eventId?: string;
+        readonly result?: { readonly reason?: string };
+      };
+    }>;
+    return [...new Set(updates.flatMap((update) =>
+      update.payload?.kind === "match-finished" &&
+        update.payload.result?.reason === "connection-lost" &&
+        update.payload.eventId !== undefined
+        ? [update.payload.eventId]
+        : []
+    ))];
+  });
+
+  await advanceMonotonic(
+    reopenedSeatA,
+    RULES.network.reconnectGraceMs + 10_000,
+  );
+  await reopenedSeatA.waitForTimeout(750);
+  expect(await connectionLossEventIds()).toEqual([]);
+
+  await setVisibilityState(reopenedSeatA, "visible");
+  await advanceMonotonic(
+    reopenedSeatA,
+    RULES.network.reconnectGraceMs - 5_000,
+  );
+  await reopenedSeatA.waitForTimeout(750);
+  expect(await connectionLossEventIds()).toEqual([]);
+
+  await reopenedSeatA.close();
+});
+
+test("a spectating challenge creator keeps watching behind the pairing prompt", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(55_000);
+  const { seatA, seatB } = await openVersusPair(context, page);
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
+  await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
+
+  const spectator = await context.newPage();
+  await openApp(spectator, "Charlie");
+  await spectator.getByRole("button", { name: "Create challenge" }).click();
+  await openLobby(spectator);
+  await spectator.getByRole("button", {
+    name: "Watch Alice vs Bob",
+    exact: true,
+  }).click();
+  await expect(spectator.getByRole("application", { name: "Seat A board" })).toBeVisible({
+    timeout: 15_000,
+  });
+
+  const joiner = await context.newPage();
+  await openApp(joiner, "Dave");
+  await openLobby(joiner);
+  await joiner.getByRole("button", { name: "Join Charlie", exact: true }).click();
+
+  const interruption = spectator.getByRole("dialog", { name: "Opponent found" });
+  await expect(interruption).toBeVisible({ timeout: 15_000 });
+  await expect(spectator.getByRole("application", { name: "Seat A board" })).toBeVisible();
+  await expect(spectator.getByRole("application", { name: "Seat B board" })).toBeVisible();
+  const watchedScoreBefore = await numericText(localScore(spectator));
+  await seatA.keyboard.press("Space");
+  await expectScoreAbove(localScore(spectator), watchedScoreBefore);
+
+  await expect(joiner.getByRole("application", { name: "Your board" })).toBeVisible({
+    timeout: 15_000,
+  });
+  await leaveThroughMatchMenu(joiner);
+  await expect(interruption).toBeHidden({ timeout: 10_000 });
+  await expect(spectator.getByRole("application", { name: "Seat A board" })).toBeVisible();
+  await expect(spectator.getByRole("application", { name: "Seat B board" })).toBeVisible();
+
+  await spectator.close();
+  const scoreBefore = await numericText(localScore(seatA));
+  await seatA.keyboard.press("Space");
+  await expectScoreAbove(localScore(seatA), scoreBefore);
+  await seatB.close();
+  await joiner.close();
 });
 
 test("leaving an active match records a forfeit before releasing the seat", async ({
@@ -1534,13 +3148,180 @@ test("leaving an active match records a forfeit before releasing the seat", asyn
   await expect(seatA.getByRole("heading", { name: "Victory" })).toBeVisible({
     timeout: 10_000,
   });
-  await expect(seatA.getByRole("button", { name: "Rematch" })).toBeHidden();
+  await expect(
+    seatA.getByRole("button", { name: "Request rematch", exact: true }),
+  ).toBeVisible();
   await expect(seatB.getByRole("heading", { name: "Split Stack" })).toBeVisible();
 
   await seatB.close();
 });
 
-test("leaving during a failed realtime join closes the challenge and cancels its retry", async ({
+test("Seat B durably releases a match when Seat A's channel disappears", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(50_000);
+  await installControllableMonotonicClock(context);
+  await enforceSingleRealtimeListener(context);
+  const { seatA, seatB } = await openVersusPair(context, page);
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
+  await advancePairMonotonic(seatA, seatB, 4_000, 500);
+  await expect(seatB.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
+
+  await setRealtimeSendBlocked(seatA, true);
+  const connectionLost = seatB.getByRole("heading", { name: "Connection lost" });
+  await advancePairMonotonic(
+    seatA,
+    seatB,
+    RULES.network.missingPeerMs,
+    250,
+  );
+  await advancePairMonotonic(
+    seatA,
+    seatB,
+    RULES.network.reconnectGraceMs - RULES.network.missingPeerMs + 1_000,
+    500,
+  );
+  await expect(connectionLost).toBeVisible({ timeout: 5_000 });
+  await expect(seatB.getByText("Standings unchanged.", { exact: true })).toBeVisible();
+
+  await seatB.getByRole("button", { name: "Home", exact: true }).click();
+  await seatB.waitForTimeout(1_500);
+  await openLobby(seatB);
+  await expect(seatB.locator(".lobby-summary")).toContainText("0 live", {
+    timeout: 10_000,
+  });
+  await expect(seatB.getByText(/Connection lost · neutral result/i)).toBeVisible();
+  await seatA.close();
+  await seatB.close();
+});
+
+test("a rematch starts only after the opponent explicitly accepts", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(45_000);
+  const { seatA, seatB } = await openVersusPair(context, page);
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
+  await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
+
+  await seatA.evaluate(() => {
+    for (let index = 0; index < 240; index += 1) {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: " " }));
+      window.dispatchEvent(new KeyboardEvent("keyup", { key: " " }));
+    }
+  });
+  await expect(seatA.getByRole("heading", { name: "Defeat" })).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(seatB.getByRole("heading", { name: "Victory" })).toBeVisible({
+    timeout: 15_000,
+  });
+
+  await seatA.getByRole("button", { name: "Request rematch", exact: true }).click();
+  await expect(
+    seatA.getByRole("button", { name: "Rematch requested", exact: true }),
+  ).toBeDisabled();
+  await seatB.getByRole("button", { name: "Home", exact: true }).click();
+  await openLobby(seatB);
+  const accept = seatB.getByRole("button", { name: "Accept rematch", exact: true });
+  await expect(accept).toBeVisible({ timeout: 10_000 });
+  await accept.click();
+
+  await expect(
+    seatA.getByRole("button", { name: "Ready up", exact: true }),
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(
+    seatB.getByRole("button", { name: "Ready up", exact: true }),
+  ).toBeVisible({ timeout: 15_000 });
+  await seatB.close();
+});
+
+test("Practice pauses for an opponent-found prompt and resumes when pairing is cancelled", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(40_000);
+  await openApp(page, "Alice");
+  await page.getByRole("button", { name: "Create challenge" }).click();
+  await page.getByRole("button", { name: "Practice", exact: true }).click();
+  const score = localScore(page);
+
+  const seatB = await context.newPage();
+  await openApp(seatB, "Bob");
+  await openLobby(seatB);
+  await seatB.getByRole("button", { name: "Join Alice", exact: true }).click();
+
+  const interruption = page.getByRole("dialog", { name: "Opponent found" });
+  await expect(interruption).toBeVisible({ timeout: 15_000 });
+  await expect(interruption.getByText(/Bob joined your challenge/i)).toBeVisible();
+  const pausedScore = await numericText(score);
+  await page.evaluate(() => {
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    window.dispatchEvent(new KeyboardEvent("keyup", { key: " ", bubbles: true }));
+  });
+  await page.waitForTimeout(150);
+  expect(await numericText(score)).toBe(pausedScore);
+
+  await interruption.getByRole("button", { name: "Cancel pairing" }).click();
+  await expect(interruption).toBeHidden({ timeout: 10_000 });
+  await page.keyboard.press("Space");
+  await expectScoreAbove(score, pausedScore);
+  await expect(seatB.getByRole("heading", { name: "Split Stack" })).toBeVisible({
+    timeout: 10_000,
+  });
+  const durableInterval = await page.evaluate(() =>
+    Math.max(0, window.webxdc?.sendUpdateInterval ?? 0)
+  );
+  await page.waitForTimeout(durableInterval + 500);
+  expect(await page.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{
+      readonly payload?: { readonly kind?: string };
+      readonly info?: string;
+    }>;
+    return updates.flatMap((update) =>
+      update.payload?.kind === "pairing-left" && update.info !== undefined
+        ? [update.info]
+        : []
+    );
+  })).toEqual([]);
+  await seatB.close();
+});
+
+test("Practice can hand off directly from the opponent-found prompt to ready-up", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(35_000);
+  await openApp(page, "Alice");
+  await page.getByRole("button", { name: "Create challenge" }).click();
+  await page.getByRole("button", { name: "Practice", exact: true }).click();
+
+  const seatB = await context.newPage();
+  await openApp(seatB, "Bob");
+  await openLobby(seatB);
+  await seatB.getByRole("button", { name: "Join Alice", exact: true }).click();
+
+  const interruption = page.getByRole("dialog", { name: "Opponent found" });
+  await expect(interruption).toBeVisible({ timeout: 15_000 });
+  await interruption.getByRole("button", { name: "Go to match" }).click();
+  await expect(interruption).toBeHidden();
+  await expect(page.getByRole("button", { name: "Ready up", exact: true })).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(seatB.getByRole("button", { name: "Ready up", exact: true })).toBeVisible({
+    timeout: 15_000,
+  });
+
+  await leaveThroughMatchMenu(page);
+  await seatB.close();
+});
+
+test("leaving a pre-match pairing closes it without replacing the shared realtime subscription", async ({
   context,
   page,
 }) => {
@@ -1551,31 +3332,21 @@ test("leaving during a failed realtime join closes the challenge and cancels its
 
   await openApp(page, "Alice");
   await page.getByRole("button", { name: "Create challenge" }).click();
-  await expect(page.getByRole("status")).toContainText(/waiting for an opponent/i);
+  await expect(page.locator(".home-waiting-message")).toContainText(
+    /waiting for an opponent/i,
+  );
 
   const seatB = await context.newPage();
   await openApp(seatB, "Bob");
-  const joinButton = seatB.getByRole("button", { name: "Join challenge" });
+  await openLobby(seatB);
+  const joinButton = seatB.getByRole("button", { name: "Join Alice", exact: true });
   await expect(joinButton).toBeEnabled();
-  await page.evaluate(() => {
-    (
-      window as unknown as {
-        __splitStackFailNextRealtimeJoin: () => void;
-      }
-    ).__splitStackFailNextRealtimeJoin();
-  });
   await joinButton.click();
 
-  await expect(
-    page.getByText("Live play is unavailable here. You can still use Practice."),
-  ).toBeVisible({ timeout: 15_000 });
-  await leaveThroughMatchMenu(page);
-  await expect(page.getByRole("heading", { name: "Split Stack" })).toBeVisible();
-  await expect(seatB.getByRole("heading", { name: "Split Stack" })).toBeVisible({
+  await expect(page.getByRole("application", { name: "Your board" })).toBeVisible({
     timeout: 15_000,
   });
-
-  const joinsAfterLeave = await page.evaluate(
+  const joinsBeforeLeave = await page.evaluate(
     () =>
       (
         window as unknown as {
@@ -1583,6 +3354,12 @@ test("leaving during a failed realtime join closes the challenge and cancels its
         }
       ).__splitStackRealtimeLifecycle.joins,
   );
+  await leaveThroughMatchMenu(page);
+  await expect(page.getByRole("heading", { name: "Split Stack" })).toBeVisible();
+  await expect(seatB.getByRole("heading", { name: "Split Stack" })).toBeVisible({
+    timeout: 15_000,
+  });
+
   await page.waitForTimeout(RULES.network.reconnectingMs + 500);
   expect(
     await page.evaluate(
@@ -1591,15 +3368,15 @@ test("leaving during a failed realtime join closes the challenge and cancels its
           window as unknown as {
             __splitStackRealtimeLifecycle: { joins: number };
           }
-        ).__splitStackRealtimeLifecycle.joins,
+      ).__splitStackRealtimeLifecycle.joins,
     ),
-  ).toBe(joinsAfterLeave);
+  ).toBe(joinsBeforeLeave);
   expect(pageErrors).toEqual([]);
 
   await seatB.close();
 });
 
-test("a durably confirmed newer runtime replaces a duplicate and a seat release returns the peer to lobby", async ({
+test("a newer pre-match runtime takes control while the older runtime stays on Home", async ({
   context,
   page,
 }) => {
@@ -1608,13 +3385,6 @@ test("a durably confirmed newer runtime replaces a duplicate and a seat release 
   const { seatA, seatB: olderSeatB } = await openVersusPair(context, page);
   const olderSeatBErrors: string[] = [];
   olderSeatB.on("pageerror", (error) => olderSeatBErrors.push(error.message));
-  await olderSeatB.evaluate(() => {
-    (
-      window as unknown as {
-        __splitStackFailNextRealtimeJoin: () => void;
-      }
-    ).__splitStackFailNextRealtimeJoin();
-  });
   const newerSeatB = await context.newPage();
   await newerSeatB.goto("/#name=Bob&addr=bob%40example.test");
   await expect(newerSeatB.getByRole("main", { name: "Split Stack" })).toBeVisible();
@@ -1622,53 +3392,77 @@ test("a durably confirmed newer runtime replaces a duplicate and a seat release 
   await expect(
     newerSeatB.getByRole("application", { name: "Your board" }),
   ).toBeVisible({ timeout: 15_000 });
-  await expect(olderSeatB.getByText(/newer open Split Stack session/i)).toBeVisible({
+  await expect(olderSeatB.getByRole("heading", {
+    name: "Split Stack",
+    exact: true,
+  })).toBeVisible({
     timeout: 15_000,
   });
-  await expect
-    .poll(
+  await expect(
+    olderSeatB.getByText("Game active in another session", { exact: true }),
+  ).toBeVisible();
+  await expect(olderSeatB.getByText(/bound to another game session/i)).toBeHidden();
+  for (const boardName of [
+    "Your board",
+    "Opponent board",
+    "Seat A board",
+    "Seat B board",
+  ]) {
+    await expect(
+      olderSeatB.getByRole("application", { name: boardName }),
+    ).toBeHidden();
+  }
+  await expect(
+    olderSeatB.getByRole("button", { name: "Create challenge", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    olderSeatB.getByRole("button", { name: /^Lobby(?: ·|$)/ }),
+  ).toBeEnabled();
+  expect(
+    await olderSeatB.evaluate(
       () =>
-        olderSeatB.evaluate(
-          () =>
-            (
-              window as unknown as {
-                __splitStackRealtimeLifecycle: { joins: number };
-              }
-            ).__splitStackRealtimeLifecycle.joins,
-        ),
-      { timeout: 10_000 },
-    )
-    .toBe(3);
+        (
+          window as unknown as {
+            __splitStackRealtimeLifecycle: { joins: number };
+          }
+        ).__splitStackRealtimeLifecycle.joins,
+    ),
+  ).toBe(1);
 
   await leaveThroughMatchMenu(newerSeatB);
   await expect(seatA.getByRole("heading", { name: "Split Stack" })).toBeVisible({
     timeout: 15_000,
   });
-  await expect(seatA.getByRole("status")).toContainText(/waiting for an opponent/i);
+  await expect(seatA.locator(".home-waiting-message")).toContainText(
+    /waiting for an opponent/i,
+  );
   expect(olderSeatBErrors).toEqual([]);
 
   await olderSeatB.close();
   await newerSeatB.close();
 });
 
-test("a completed competitive match reloads into results and keeps rematch available", async ({ page }) => {
-  await seedCompletedMatch(page);
-  await page.goto("/#name=Alice&addr=alice%40example.test");
-  await expect(page.getByRole("main", { name: "Split Stack" })).toBeVisible();
+test("the v2 clean reset ignores legacy competitive and rematch state", async ({ page }) => {
+  await seedLegacyCompletedMatch(page);
+  await page.addInitScript(() => {
+    window.localStorage.setItem("split-stack/practice-high-score/v1", "999999");
+  });
+  await openApp(page, "Alice");
 
-  const victory = page.getByRole("heading", { name: "Victory" });
-  const rematch = page.getByRole("button", { name: "Rematch" });
-  await expect(victory).toBeVisible({ timeout: 15_000 });
-  await expect(rematch).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create challenge" })).toBeVisible();
+  await expect(page.locator(".home-practice-record").first()).toHaveText("Your best: 0");
+  await expect(page.getByRole("heading", { name: "Victory" })).toBeHidden();
+  await expect(page.getByRole("button", { name: "Request rematch" })).toBeHidden();
+
+  await openLobby(page);
+  await expect(page.locator(".lobby-result-row")).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "Recent results", exact: true }),
+  ).toBeHidden();
 
   await page.reload();
-
-  await expect(victory).toBeVisible({ timeout: 15_000 });
-  await expect(rematch).toBeVisible();
-  await rematch.click();
-  await expect(page.getByRole("application", { name: "Your board" })).toBeVisible({
-    timeout: 15_000,
-  });
+  await expect(page.getByRole("heading", { name: "Split Stack" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create challenge" })).toBeVisible();
 });
 
 test("reduced-effects preference is applied immediately and persists", async ({ page }) => {

@@ -98,6 +98,8 @@ export interface CompetitiveSessionOptions {
   transport: CompetitiveRealtimeTransport;
   createSeed?: () => string;
   onPhaseChange?: (phase: CompetitivePhase) => void;
+  /** Fires once when the initial synchronized countdown is committed. */
+  onStartCommitted?: () => void;
   onForfeitWin?: (forfeitingPlayerId: PlayerId) => void;
   onRemoteBlackout?: (ownerPlayerId: PlayerId, eventId: string) => void;
   onIncomingGarbage?: (rows: number, eventId: string) => void;
@@ -309,6 +311,7 @@ export class CompetitiveSession {
   private configAckLastSentMs: number | null = null;
   private configAckDeadlineMs: number | null = null;
   private startScheduled = false;
+  private initialStartCommitted = false;
   private pendingLocalStart: PendingLocalStart | null = null;
   private pendingRemoteStart: PendingRemoteStart | null = null;
   private pauseEpoch = 0;
@@ -1274,6 +1277,10 @@ export class CompetitiveSession {
     this.configAckLastSentMs = null;
     this.configAckDeadlineMs = null;
     this.snapshotScheduler.reset();
+    if (payload.epoch === 0 && !this.initialStartCommitted) {
+      this.initialStartCommitted = true;
+      this.options.onStartCommitted?.();
+    }
     this.setPhase("countdown");
   }
 

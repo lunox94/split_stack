@@ -76,8 +76,11 @@ clear participant state and messages between independent test runs.
 
 Keep both players in the two embedded instances on the same simulator page.
 Opening an instance in an additional browser tab starts another Split Stack
-runtime for that participant; the runtime-session election deliberately leaves
-the duplicate as an observer instead of allowing two controllers for one seat.
+runtime for that participant. A pre-match runtime can reclaim its seat, but an
+already-started match keeps its original controller identity. The additional
+runtime stays on navigable Home recovery UI instead of taking the seat or
+automatically watching its own match; Lobby, Practice, and explicit watching
+of other matches remain available.
 
 The simulator also forwards a diagnostic copy of every realtime frame to its
 frontend. A long, snapshot-heavy match can therefore stress the simulator page

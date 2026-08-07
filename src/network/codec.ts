@@ -386,13 +386,11 @@ export function decodeEnvelope(
     return { ok: false, error: "invalid-json" };
   }
 
-  const maxDepth = options.maxDepth ?? RULES.network.maxMessageDepth;
-  if (exceedsDepth(parsed, 0, maxDepth)) return { ok: false, error: "too-deep" };
-  if (!isBoundedJson(parsed, 0, maxDepth) || !isValidEnvelope(parsed)) {
+  // Realtime channels are chat-wide. Reject a bounded foreign header before
+  // walking or validating its potentially large snapshot payload so each
+  // concurrent match pays only the JSON parse plus a constant-time route check.
+  if (!isRecord(parsed) || !isBoundedId(parsed.matchId) || !isBoundedId(parsed.senderId)) {
     return { ok: false, error: "invalid-envelope" };
-  }
-  if (parsed.kind === "SNAPSHOT" && data.byteLength > RULES.network.maxSnapshotBytes) {
-    return { ok: false, error: "too-large" };
   }
   if (options.expectedMatchId !== undefined && parsed.matchId !== options.expectedMatchId) {
     return { ok: false, error: "foreign-match" };
@@ -402,6 +400,15 @@ export function decodeEnvelope(
     !options.allowedSenderIds.has(parsed.senderId)
   ) {
     return { ok: false, error: "foreign-sender" };
+  }
+
+  const maxDepth = options.maxDepth ?? RULES.network.maxMessageDepth;
+  if (exceedsDepth(parsed, 0, maxDepth)) return { ok: false, error: "too-deep" };
+  if (!isBoundedJson(parsed, 0, maxDepth) || !isValidEnvelope(parsed)) {
+    return { ok: false, error: "invalid-envelope" };
+  }
+  if (parsed.kind === "SNAPSHOT" && data.byteLength > RULES.network.maxSnapshotBytes) {
+    return { ok: false, error: "too-large" };
   }
   return { ok: true, value: parsed };
 }

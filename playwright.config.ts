@@ -8,7 +8,10 @@ const executablePath = process.platform === "darwin" && existsSync(macChrome)
 
 export default defineConfig({
   testDir: "./tests/browser",
-  fullyParallel: true,
+  // Multi-page Webxdc cases share an origin-scoped localStorage transport.
+  // Keep tests within each file sequential so concurrent read/append cycles
+  // cannot overwrite the browser stub's update log.
+  fullyParallel: false,
   reporter: "list",
   use: {
     baseURL: "http://127.0.0.1:3000",

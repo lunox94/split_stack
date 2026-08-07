@@ -3,7 +3,7 @@ import type { AudioCue } from "../audio/cues";
 import type { MusicIntensity } from "../audio/music";
 import { RULES } from "../config/rules";
 import { RULES_HASH } from "../config/rules-hash";
-import { hashCanonicalHex } from "../domain/hashing";
+import { canonicalize, hashCanonicalHex } from "../domain/hashing";
 import {
   createSimulation,
   type Simulation,
@@ -25,7 +25,6 @@ import { transformScrambledAction } from "../input/scramble-transform";
 import { TouchButtonInput } from "../input/touch-buttons";
 import {
   CompetitiveSession,
-  type CompetitiveRealtimeTransport,
   type CompetitiveSessionView,
   type CompetitiveTerminalState,
 } from "../match/competitive-session";
@@ -33,17 +32,20 @@ import { decodeEnvelope } from "../network/codec";
 import { NetworkDiagnostics } from "../network/diagnostics";
 import { RemoteSnapshotStore, type PlayerSnapshotV1 } from "../network/snapshots";
 import { parseSnapshotProfile } from "../network/snapshot-profile";
+import { RealtimeHub } from "../network/realtime-hub";
 import {
   DurableLamportClock,
-  MAX_DURABLE_LOGICAL_CLOCK,
   WebxdcDurableLog,
-  isLobbyEvent,
-  materializeChallenge,
+  type DurableOutboundUpdate,
+  type DurableReceivedUpdate,
   type LobbyActor,
-  type LobbyEventV1,
   type MaterializedChallenge,
 } from "../network/webxdc-durable";
-import { HistoryMaterializer, isMatchResultV1 } from "../persistence/history";
+import {
+  AdvisoryPresenceTracker,
+  PRESENCE_SCHEMA_V2,
+  encodePresenceFrame,
+} from "../network/presence";
 import { createPowerTipTracker } from "../persistence/power-tips";
 import {
   loadPreferences,
@@ -95,27 +97,49 @@ import {
 import { hapticDurationForSimulationEffect } from "./haptic-policy";
 import { PresentationRouter } from "./presentation-router";
 import {
-  appendBoundedUnique,
   createRuntimeId,
   formatDuration,
-  isSameRuntimeRoster,
   shouldGameplayMusicRun,
   shouldUseStaticMarkedCells,
   type AppRuntimeMode,
-  type RuntimeRoster,
 } from "./runtime-helpers";
-import { materializeRematchRound, type RematchProposalV1 } from "./rematch";
 import {
-  announcementMatchesChallenge,
-  isMatchAnnouncementV1,
-  resultMatchesAnnouncement,
-  type MatchAnnouncementV1,
-} from "./match-announcement";
+  COMPETITION_EVENT_SCHEMA_V2,
+  CompetitionLedgerV2,
+  isCompetitionEventV2,
+  type CompetitionActor,
+  type CompetitionEventV2,
+  type CompetitionLedgerView,
+  type CompetitionResultView,
+  type LiveMatchView,
+  type PendingRematchView,
+  type PracticeCompletedV2,
+  type StartingPairingView,
+} from "./competition-ledger-v2";
 import {
-  isSessionClaim,
-  RuntimeSessionElection,
-  type SessionClaimV1,
-} from "./runtime-election";
+  challengeCancelledFeedback,
+  challengeJoinedFeedback,
+  challengeOpenedFeedback,
+  matchResultFeedback,
+  matchStartedFeedback,
+  practiceRecordFeedback,
+  projectChatUpdate,
+  rematchRequestedFeedback,
+  tournamentSummary,
+  type ChatActivityCounts,
+  type ChatUpdateMetadata,
+} from "./chat-feedback";
+import { presentCompetition } from "./competition-presenter";
+import { isRecognizedAppRouteHash, parseAppRoute } from "./routes";
+import {
+  connectionLossFallbackFor,
+  liveControllerRecoveryStatus,
+} from "./live-session-recovery";
+import {
+  PendingChatFeedbackStoreV2,
+  type PendingChatFeedbackResolverV2,
+  type PendingChatFeedbackV2,
+} from "./pending-chat-feedback";
 import { STRINGS, formatString, type StringKey } from "./strings";
 import {
   PresentationTimeline,
@@ -127,25 +151,24 @@ import {
 } from "./presentation-cadence";
 import { recoveryPresentationFor } from "./recovery-presentation";
 
-const PRACTICE_HIGH_SCORE_KEY = "split-stack/practice-high-score/v1";
+const PRACTICE_HIGH_SCORE_KEY = `split-stack/practice-high-score/v2:${RULES_HASH}`;
 const FIXED_TICK_MS = 1_000 / RULES.timing.ticksPerSecond;
-const MAX_LOBBY_EVENTS = 4_096;
-const MAX_REMATCH_EVENTS = 2_048;
-const MAX_ANNOUNCEMENTS = 1_024;
-const MAX_SESSION_CLAIMS = 2_048;
-const MAX_PENDING_RESULTS = 512;
+const PRESENCE_HEARTBEAT_MS = 5_000;
+const DURABLE_RETRY_MIN_MS = 1_000;
+const DURABLE_RETRY_MAX_MS = 10_000;
+const DURABLE_SUCCESS_SEND_LIMIT = 2;
+const LIVE_RECOVERY_TICK_MS = 1_000;
+const STALE_ROUTE_NOTICE_MS = 5_000;
 const SNAPSHOT_PROFILE = parseSnapshotProfile(
   import.meta.env.VITE_SPLIT_STACK_SNAPSHOT_HZ,
 );
 
-type DurablePayload =
-  | LobbyEventV1
-  | RematchProposalV1
-  | MatchAnnouncementV1
-  | SessionClaimV1
-  | MatchResultV1;
+type DurablePayload = CompetitionEventV2;
 
 interface ActiveMatch {
+  pairingId: string;
+  seriesId: string;
+  source: "challenge" | "rematch";
   challenge: MaterializedChallenge;
   round: number;
   matchId: string;
@@ -153,6 +176,9 @@ interface ActiveMatch {
   seatASessionId: string;
   seatBSessionId: string;
   duplicateRuntime: boolean;
+  startedEventId?: string;
+  committedSeed?: string;
+  committedConfigHash?: string;
 }
 
 interface SpectatorRuntime {
@@ -166,34 +192,6 @@ interface RemoteRenderCache {
   snapshot: PlayerSnapshotV1;
   board: BoardRenderModel;
   concealed: boolean;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isRematch(value: unknown): value is RematchProposalV1 {
-  if (!isRecord(value) || !isRecord(value.actor)) return false;
-  return (
-    value.schema === "split-stack/rematch/v1" &&
-    typeof value.eventId === "string" &&
-    value.eventId.length > 0 &&
-    value.eventId.length <= 256 &&
-    Number.isSafeInteger(value.logicalClock) &&
-    (value.logicalClock as number) > 0 &&
-    (value.logicalClock as number) <= MAX_DURABLE_LOGICAL_CLOCK &&
-    typeof value.challengeId === "string" &&
-    value.challengeId.length > 0 &&
-    value.challengeId.length <= 256 &&
-    Number.isSafeInteger(value.round) &&
-    (value.round as number) > 1 &&
-    (value.round as number) < 10_000 &&
-    typeof value.actor.id === "string" &&
-    value.actor.id.length > 0 &&
-    value.actor.id.length <= 256 &&
-    typeof value.actor.displayName === "string" &&
-    value.actor.displayName.length <= 128
-  );
 }
 
 function wait(window: Window, milliseconds: number): Promise<void> {
@@ -212,14 +210,6 @@ function safeStorage(window: Window): StoragePort {
       },
     };
   }
-}
-
-function makeRealtimeTransport(channel: WebxdcRealtimeChannel): CompetitiveRealtimeTransport {
-  return {
-    setListener: (listener) => channel.setListener(listener),
-    send: (data) => channel.send(data),
-    leave: () => channel.leave?.(),
-  };
 }
 
 type DisplayPowerKind = PowerKind | "blackout" | "barrier";
@@ -445,16 +435,48 @@ export async function bootstrap(): Promise<void> {
   let latestLayout: RendererLayout | null = null;
   let mode: AppRuntimeMode = "lobby";
   let practice: Simulation | null = null;
+  let practiceRunId: string | null = null;
   let practicePaused = false;
+  const practicePauseReasons = new Set<"menu" | "visibility" | "webgl" | "pairing">();
   let practiceAccumulator = 0;
   let competitive: CompetitiveSession | null = null;
   let competitivePumpTimer: number | null = null;
   let spectator: SpectatorRuntime | null = null;
   let activeMatch: ActiveMatch | null = null;
+  let interruptedPairing: StartingPairingView | LiveMatchView | null = null;
+  let pendingPairingExitId: string | null = null;
+  let displayedResult: CompetitionResultView | null = null;
+  let pendingCommittedStart: {
+    match: ActiveMatch;
+    configHash: string;
+    seed: string;
+  } | null = null;
   let lastFrameMs = performance.now();
   let announcedConfigHash: string | null = null;
   let lastScrambleActive = false;
   let resultShownFor: string | null = null;
+  const neutralFinishFallbackTimers = new Map<string, number>();
+  interface PassiveLiveRecovery {
+    readonly matchId: string;
+    readonly startedEventId: string;
+    readonly seatAPlayerId: string;
+    readonly seatBPlayerId: string;
+    readonly seatASessionId: string;
+    readonly seatBSessionId: string;
+    readonly allowedSenderIds: ReadonlySet<string>;
+    observedAtMs: number;
+    seatASeenAtMs: number | null;
+    seatBSeenAtMs: number | null;
+    tickTimer: number | null;
+    finishQueued: boolean;
+    hubRetryAttempts: number;
+  }
+  let passiveLiveRecovery: PassiveLiveRecovery | null = null;
+  let confirmingPairing: {
+    pairingId: string;
+    startedAtMs: number;
+    actionTimer: number | null;
+  } | null = null;
   let leaveInProgress = false;
   let lastCountdownSecond = 0;
   let lastCompetitiveInputsEnabled: boolean | null = null;
@@ -594,20 +616,94 @@ export async function bootstrap(): Promise<void> {
     displayName: host?.selfName?.slice(0, 128) || STRINGS["common.playerFallback"],
   };
   const realtimeAvailable = typeof host?.joinRealtimeChannel === "function";
+  let realtimeHub: RealtimeHub | null = null;
+  let connectHubServices: (hub: RealtimeHub) => void = () => undefined;
+  const ensureRealtimeHub = (): RealtimeHub | null => {
+    if (realtimeHub !== null) return realtimeHub;
+    try {
+      const channel = host?.joinRealtimeChannel?.();
+      if (channel === undefined) return null;
+      realtimeHub = new RealtimeHub(channel);
+      connectHubServices(realtimeHub);
+      return realtimeHub;
+    } catch {
+      return null;
+    }
+  };
   const runtimeId = createRuntimeId();
   const lamport = new DurableLamportClock();
-  const lobbyEvents: LobbyEventV1[] = [];
-  const eventSerials = new Map<string, number>();
-  const rematches: RematchProposalV1[] = [];
-  const announcements: MatchAnnouncementV1[] = [];
-  const sessionClaims: SessionClaimV1[] = [];
-  const localSessionClaims = new Map<string, SessionClaimV1>();
-  const pendingResults: Array<{ serial: number; payload: MatchResultV1 }> = [];
-  const history = new HistoryMaterializer();
+  const competition = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+  type RuntimeClaimEvent = Extract<CompetitionEventV2, { kind: "runtime-claimed" }>;
+  const localRuntimeClaims = new Map<string, RuntimeClaimEvent>();
+  const observedPeerRuntimeByPairing = new Map<string, string>();
+  interface RuntimeClaimRetryState {
+    readonly pairingId: string;
+    readonly claim: RuntimeClaimEvent;
+    attempts: number;
+    sending: boolean;
+    retryTimer: number | null;
+  }
+  const runtimeClaimRetries = new Map<string, RuntimeClaimRetryState>();
+  const pendingJoinClaims = new Map<string, {
+    payload: Extract<CompetitionEventV2, { kind: "challenge-claimed" }>;
+    creatorId: string;
+  }>();
+  type PendingAcceptedFeedback =
+    | {
+        kind: "challenge-created";
+        payload: Extract<CompetitionEventV2, { kind: "challenge-created" }>;
+      }
+    | {
+        kind: "challenge-cancelled";
+        payload: Extract<CompetitionEventV2, { kind: "challenge-cancelled" }>;
+      }
+    | {
+        kind: "practice-record";
+        payload: PracticeCompletedV2;
+      };
+  const pendingAcceptedFeedback = new Map<string, PendingAcceptedFeedback>();
+  interface PendingMaterializedFeedback {
+    readonly payload: CompetitionEventV2;
+    readonly mayDefer: boolean;
+    readonly metadata: (view: CompetitionLedgerView) => ChatUpdateMetadata | null;
+    readonly onSettled?: () => void;
+    echoed: boolean;
+  }
+  const pendingMaterializedFeedback = new Map<string, PendingMaterializedFeedback>();
+  let pendingPairingExitEventId: string | null = null;
+  const presence = new AdvisoryPresenceTracker({ clock: { now: () => performance.now() } });
+  let presenceUnsubscribe: (() => void) | null = null;
+  let controllerTrafficUnsubscribe: (() => void) | null = null;
+  let receivePassiveControllerTraffic: (data: Uint8Array) => void = () => undefined;
   const durable = host === undefined ? null : new WebxdcDurableLog<unknown>(host);
+  const pendingChatFeedback = new PendingChatFeedbackStoreV2(
+    storage,
+    RULES_HASH,
+    selfActor.id,
+  );
+  const rememberFeedbackIntent = (
+    payload: CompetitionEventV2,
+    resolver: PendingChatFeedbackResolverV2,
+  ): void => {
+    if (durable !== null) pendingChatFeedback.add(payload, resolver);
+  };
   let durableReplayReady = durable === null;
   let appendChain = Promise.resolve();
   let lastAppendMs = -Infinity;
+  let renderCompetitionState: () => void = () => undefined;
+
+  connectHubServices = (hub): void => {
+    presenceUnsubscribe?.();
+    controllerTrafficUnsubscribe?.();
+    presenceUnsubscribe = hub.subscribe((data) => {
+      const decoded = presence.receive(data);
+      if (decoded.ok) renderCompetitionState();
+    });
+    controllerTrafficUnsubscribe = hub.subscribe((data) => {
+      receivePassiveControllerTraffic(data);
+    });
+  };
+  if (realtimeAvailable) ensureRealtimeHub();
 
   const stopCompetitivePump = (): void => {
     if (competitivePumpTimer === null) return;
@@ -628,9 +724,11 @@ export async function bootstrap(): Promise<void> {
     let recovered = false;
     try {
       session.disconnect();
-      const channel = host?.joinRealtimeChannel?.();
-      if (channel !== undefined) {
-        session.attachTransport(makeRealtimeTransport(channel));
+      realtimeHub?.close();
+      realtimeHub = null;
+      const hub = ensureRealtimeHub();
+      if (hub !== null) {
+        session.attachTransport(hub.transport());
         recovered = true;
       }
     } catch {
@@ -713,6 +811,7 @@ export async function bootstrap(): Promise<void> {
         audio.pauseMusic();
         shell.unsupported.hidden = true;
         if (mode === "practice") {
+          practicePauseReasons.add("webgl");
           practicePaused = true;
           practice?.setPaused(true);
           shell.overlay.hidden = false;
@@ -734,7 +833,10 @@ export async function bootstrap(): Promise<void> {
           // setHidden(false) drives the centralized recovery presentation.
           // Do not hide its pause/resynchronization status out from under it.
           resumeCompetitiveTransportAfterHostRestore();
-        } else if (mode !== "practice") {
+        } else if (mode === "practice") {
+          practicePauseReasons.delete("webgl");
+          setPracticePaused(practicePauseReasons.size > 0);
+        } else {
           shell.overlay.hidden = true;
         }
       },
@@ -747,98 +849,560 @@ export async function bootstrap(): Promise<void> {
   }
   applyPreferences();
 
-  const appendDurable = async (payload: DurablePayload): Promise<void> => {
+  const sendDurableOnce = async (
+    update: DurableOutboundUpdate<DurablePayload>,
+  ): Promise<void> => {
     if (durable === null) return;
     const pending = appendChain.catch(() => undefined).then(async () => {
       const interval = Math.max(0, host?.sendUpdateInterval ?? 0);
       await wait(window, lastAppendMs + interval - performance.now());
-      await durable.append({ payload });
+      await durable.append(update);
       lastAppendMs = performance.now();
     });
     appendChain = pending.catch(() => undefined);
+    await pending;
+  };
+
+  interface DurableOutboxEntry {
+    readonly update: DurableOutboundUpdate<DurablePayload>;
+    attempts: number;
+    successfulSends: number;
+    metadataDelivered: boolean;
+    sending: boolean;
+    retryTimer: number | null;
+  }
+  const durableOutbox = new Map<string, DurableOutboxEntry>();
+
+  const acknowledgeDurableEvent = (
+    payload: CompetitionEventV2,
+    received: DurableReceivedUpdate<unknown>,
+  ): boolean => {
+    const entry = durableOutbox.get(payload.eventId);
+    if (
+      entry === undefined ||
+      canonicalize(entry.update.payload) !== canonicalize(payload)
+    ) {
+      return false;
+    }
+    const expectsMetadata = entry.update.info !== undefined ||
+      entry.update.href !== undefined ||
+      entry.update.summary !== undefined ||
+      entry.update.notify !== undefined;
+    if (expectsMetadata) {
+      let notificationsMatch = false;
+      try {
+        notificationsMatch = canonicalize(entry.update.notify ?? null) ===
+          canonicalize(received.notify ?? null);
+      } catch {
+        return false;
+      }
+      if (
+        entry.update.info !== received.info ||
+        entry.update.href !== received.href ||
+        entry.update.summary !== received.summary ||
+        !notificationsMatch
+      ) {
+        return false;
+      }
+    }
+    if (entry?.retryTimer !== null && entry?.retryTimer !== undefined) {
+      window.clearTimeout(entry.retryTimer);
+    }
+    durableOutbox.delete(payload.eventId);
+    return true;
+  };
+
+  const flushDurableEntry = async (
+    eventId: string,
+    entry: DurableOutboxEntry,
+  ): Promise<void> => {
+    if (entry.sending || durableOutbox.get(eventId) !== entry) return;
+    entry.sending = true;
+    let delayMs = DURABLE_RETRY_MIN_MS;
     try {
-      await pending;
+      await sendDurableOnce(
+        entry.metadataDelivered
+          ? { payload: entry.update.payload }
+          : entry.update,
+      );
+      entry.metadataDelivered = true;
+      entry.attempts = 0;
+      entry.successfulSends += 1;
+      delayMs = Math.max(
+        DURABLE_RETRY_MIN_MS,
+        (host?.sendUpdateInterval ?? 0) + DURABLE_RETRY_MIN_MS,
+      );
     } catch {
+      entry.attempts += 1;
+      delayMs = Math.min(
+        DURABLE_RETRY_MAX_MS,
+        DURABLE_RETRY_MIN_MS * 2 ** Math.min(entry.attempts - 1, 4),
+      );
       shell.lobbyStatus.textContent = STRINGS["lobby.challengeError"];
+    } finally {
+      entry.sending = false;
+    }
+    if (durableOutbox.get(eventId) !== entry) return;
+    if (entry.successfulSends >= DURABLE_SUCCESS_SEND_LIMIT) {
+      // A successful host append with no listener echo is ambiguous. One
+      // payload-only confirmation retry repairs an isolated dropped echo,
+      // while the persisted feedback journal handles reload recovery without
+      // creating an unbounded physical durable log.
+      durableOutbox.delete(eventId);
+      return;
+    }
+    entry.retryTimer = window.setTimeout(() => {
+      entry.retryTimer = null;
+      void flushDurableEntry(eventId, entry);
+    }, delayMs);
+  };
+
+  const enqueueDurable = (
+    update: DurableOutboundUpdate<DurablePayload>,
+  ): void => {
+    if (durable === null) return;
+    const eventId = update.payload.eventId;
+    const previous = durableOutbox.get(eventId);
+    if (previous?.retryTimer !== null && previous?.retryTimer !== undefined) {
+      window.clearTimeout(previous.retryTimer);
+    }
+    const entry: DurableOutboxEntry = {
+      update,
+      attempts: 0,
+      successfulSends: 0,
+      metadataDelivered: false,
+      sending: false,
+      retryTimer: null,
+    };
+    durableOutbox.set(eventId, entry);
+    void flushDurableEntry(eventId, entry);
+  };
+
+  const eventBase = (
+    purpose: string,
+    actor: CompetitionActor = selfActor,
+  ): Pick<CompetitionEventV2, "schema" | "eventId" | "logicalClock" | "actor"> => {
+    const logicalClock = lamport.next();
+    return {
+      schema: COMPETITION_EVENT_SCHEMA_V2,
+      eventId: `${runtimeId}:${logicalClock}:${purpose}`,
+      logicalClock,
+      actor: { ...actor },
+    };
+  };
+
+  const chatActivity = (
+    overrides: Partial<ChatActivityCounts> = {},
+  ): ChatActivityCounts => {
+    const counts = competition.view().counts;
+    return {
+      waiting: overrides.waiting ?? counts.waiting,
+      live: overrides.live ?? counts.live,
+    };
+  };
+
+  const queueResolvedFeedback = (
+    payload: CompetitionEventV2,
+    metadata: ChatUpdateMetadata | null,
+  ): void => {
+    pendingChatFeedback.resolve(payload.eventId, metadata);
+    if (metadata !== null && durableReplayReady) {
+      enqueueDurable(projectChatUpdate(payload, metadata));
     }
   };
 
-  const eventId = (purpose: string): string => `${runtimeId}:${lamport.next()}:${purpose}`;
-
-  const currentRoundFor = (challenge: MaterializedChallenge): number => {
-    return materializeRematchRound(challenge, rematches);
-  };
-
-  const allChallenges = (): MaterializedChallenge[] => {
-    const ids = new Set(
-      lobbyEvents
-        .filter((event) => event.kind === "challenge-created")
-        .map((event) => event.challengeId),
-    );
-    return [...ids]
-      .map((id) => materializeChallenge(lobbyEvents, id))
-      .filter((challenge): challenge is MaterializedChallenge => challenge !== undefined)
-      .sort((left, right) => {
-        const leftSerial = Math.max(
-          ...lobbyEvents
-            .filter((event) => event.challengeId === left.challengeId)
-            .map((event) => eventSerials.get(event.eventId) ?? 0),
-        );
-        const rightSerial = Math.max(
-          ...lobbyEvents
-            .filter((event) => event.challengeId === right.challengeId)
-            .map((event) => eventSerials.get(event.eventId) ?? 0),
-        );
-        return rightSerial - leftSerial;
+  const materializedMetadataForPersistedFeedback = (
+    entry: PendingChatFeedbackV2,
+    view: CompetitionLedgerView,
+  ): ChatUpdateMetadata | null => {
+    const { payload, resolver } = entry;
+    if (resolver.kind === "match-started" && payload.kind === "match-started") {
+      return matchStartedFeedback({
+        seatAName: resolver.seatAName,
+        seatBName: resolver.seatBName,
+        matchId: payload.matchId,
+        activity: {
+          waiting: view.counts.waiting,
+          live: view.counts.live,
+        },
       });
-  };
-
-  const sessionClaimKey = (
-    challengeId: string,
-    occupancyEventId: string,
-    actorId: string,
-  ): string => `${challengeId.length}:${challengeId}${occupancyEventId.length}:${occupancyEventId}${actorId}`;
-
-  const electionFor = (
-    challengeId: string,
-    occupant: MaterializedChallenge["seatA"],
-  ): RuntimeSessionElection => {
-    const election = new RuntimeSessionElection({
-      challengeId,
-      occupancyEventId: occupant.occupancyEventId,
-      actorId: occupant.playerId,
-    });
-    for (const claim of sessionClaims) election.apply(claim);
-    return election;
-  };
-
-  const ensureLocalSessionClaim = (
-    challenge: MaterializedChallenge,
-    occupant: MaterializedChallenge["seatA"],
-  ): SessionClaimV1 | undefined => {
-    if (!durableReplayReady || durable === null) return undefined;
-    const key = sessionClaimKey(
-      challenge.challengeId,
-      occupant.occupancyEventId,
-      occupant.playerId,
-    );
-    let localClaim = localSessionClaims.get(key);
-    if (localClaim === undefined) {
-      const logicalClock = lamport.next();
-      localClaim = {
-        schema: "split-stack/session-claim/v1",
-        kind: "session-claim",
-        challengeId: challenge.challengeId,
-        occupancyEventId: occupant.occupancyEventId,
-        runtimeSessionId: runtimeId,
-        actor: selfActor,
-        logicalClock,
-        eventId: `${runtimeId}:${logicalClock}:session-claim`,
-      };
-      localSessionClaims.set(key, localClaim);
-      void appendDurable(localClaim);
     }
-    return localClaim;
+    if (resolver.kind === "match-result" && payload.kind === "match-finished") {
+      const seatA = payload.result.players[0];
+      const seatB = payload.result.players[1];
+      if (seatA === undefined || seatB === undefined) return null;
+      const tally = view.headToHead.find((entry) =>
+        entry.playerIds.includes(seatA.id) && entry.playerIds.includes(seatB.id)
+      );
+      return matchResultFeedback({
+        matchId: payload.result.matchId,
+        seatA: {
+          ...seatA,
+          score: payload.result.statsByPlayer[seatA.id]?.score ?? 0,
+        },
+        seatB: {
+          ...seatB,
+          score: payload.result.statsByPlayer[seatB.id]?.score ?? 0,
+        },
+        outcome: payload.result.outcome === "seat-a"
+          ? "seat-a"
+          : payload.result.outcome === "seat-b"
+            ? "seat-b"
+            : payload.result.outcome === "draw"
+              ? "draw"
+              : "neutral",
+        ...(payload.result.reason === "connection-lost"
+          ? { reason: "connection-lost" as const }
+          : {}),
+        headToHead: {
+          seatAWins: tally?.winsByPlayer[seatA.id] ?? 0,
+          seatBWins: tally?.winsByPlayer[seatB.id] ?? 0,
+        },
+        activity: {
+          waiting: view.counts.waiting,
+          live: view.counts.live,
+        },
+      });
+    }
+    if (resolver.kind === "pairing-left" && payload.kind === "pairing-left") {
+      if (resolver.source !== "challenge") return null;
+      return resolver.seatALeft
+        ? challengeCancelledFeedback({
+            actorName: resolver.actorName,
+            challengeId: resolver.challengeId,
+            activity: {
+              waiting: view.counts.waiting,
+              live: view.counts.live,
+            },
+          })
+        : {
+            summary: tournamentSummary({
+              waiting: view.counts.waiting,
+              live: view.counts.live,
+            }),
+          };
+    }
+    if (resolver.kind === "rematch-requested" && payload.kind === "rematch-requested") {
+      return rematchRequestedFeedback({
+        requesterName: payload.actor.displayName,
+        opponentId: resolver.opponentId,
+        matchId: payload.afterMatchId,
+        activity: {
+          waiting: view.counts.waiting,
+          live: view.counts.live,
+        },
+      });
+    }
+    return null;
+  };
+
+  const installPersistedFeedback = (entry: PendingChatFeedbackV2): void => {
+    if (entry.resolved) return;
+    const { payload, resolver } = entry;
+    if (resolver.kind === "challenge-created" && payload.kind === "challenge-created") {
+      pendingAcceptedFeedback.set(payload.eventId, { kind: resolver.kind, payload });
+      return;
+    }
+    if (
+      resolver.kind === "challenge-cancelled" &&
+      payload.kind === "challenge-cancelled"
+    ) {
+      pendingAcceptedFeedback.set(payload.eventId, { kind: resolver.kind, payload });
+      return;
+    }
+    if (resolver.kind === "practice-record" && payload.kind === "practice-completed") {
+      pendingAcceptedFeedback.set(payload.eventId, { kind: resolver.kind, payload });
+      return;
+    }
+    if (resolver.kind === "challenge-joined" && payload.kind === "challenge-claimed") {
+      pendingJoinClaims.set(payload.eventId, {
+        payload,
+        creatorId: resolver.creatorId,
+      });
+      return;
+    }
+    pendingMaterializedFeedback.set(payload.eventId, {
+      payload,
+      mayDefer: resolver.kind === "match-started" || resolver.kind === "match-result",
+      metadata: (view) => materializedMetadataForPersistedFeedback(entry, view),
+      echoed: false,
+    });
+  };
+
+  const forgetRuntimeFeedback = (eventId: string): void => {
+    pendingAcceptedFeedback.delete(eventId);
+    pendingJoinClaims.delete(eventId);
+    const materialized = pendingMaterializedFeedback.get(eventId);
+    pendingMaterializedFeedback.delete(eventId);
+    materialized?.onSettled?.();
+  };
+
+  const appendCompetition = (payload: DurablePayload): void => {
+    enqueueDurable({ payload });
+  };
+
+  const appendAfterMaterialization = (
+    payload: CompetitionEventV2,
+    resolver: PendingChatFeedbackResolverV2,
+    metadata: (view: CompetitionLedgerView) => ChatUpdateMetadata | null,
+    options: {
+      mayDefer?: boolean;
+      onSettled?: () => void;
+    } = {},
+  ): void => {
+    rememberFeedbackIntent(payload, resolver);
+    pendingMaterializedFeedback.set(payload.eventId, {
+      payload,
+      metadata,
+      mayDefer: options.mayDefer ?? false,
+      echoed: false,
+      ...(options.onSettled === undefined ? {} : { onSettled: options.onSettled }),
+    });
+    appendCompetition(payload);
+  };
+
+  type PairingView = StartingPairingView | LiveMatchView;
+
+  const activeMatchFrom = (
+    pairing: PairingView,
+    forceSpectator = false,
+  ): ActiveMatch | null => {
+    const committedStart = "start" in pairing
+      ? (pairing as LiveMatchView).start
+      : undefined;
+    const seatASessionId = committedStart?.seatASessionId ??
+      pairing.runtimeSessionByPlayer[pairing.seatA.id];
+    const seatBSessionId = committedStart?.seatBSessionId ??
+      pairing.runtimeSessionByPlayer[pairing.seatB.id];
+    if (seatASessionId === undefined || seatBSessionId === undefined) return null;
+    const assignedRole = pairing.seatA.id === selfActor.id
+      ? "a"
+      : pairing.seatB.id === selfActor.id
+        ? "b"
+        : "spectator";
+    const duplicateRuntime = assignedRole === "a"
+      ? seatASessionId !== runtimeId
+      : assignedRole === "b"
+        ? seatBSessionId !== runtimeId
+        : false;
+    const readOnlyRuntime = duplicateRuntime ||
+      (forceSpectator && assignedRole !== "spectator");
+    const role = forceSpectator || duplicateRuntime ? "spectator" : assignedRole;
+    const challenge: MaterializedChallenge = {
+      challengeId: pairing.seriesId,
+      rulesHash: RULES_HASH,
+      coordinatorPlayerId: pairing.seatA.id,
+      seatA: {
+        playerId: pairing.seatA.id,
+        displayName: pairing.seatA.displayName,
+        occupancyEventId: `${pairing.pairingId}:seat-a`,
+      },
+      seatB: {
+        playerId: pairing.seatB.id,
+        displayName: pairing.seatB.displayName,
+        occupancyEventId: `${pairing.pairingId}:seat-b`,
+      },
+      currentSeatBVacancyId: `${pairing.pairingId}:closed`,
+      closed: false,
+    };
+    return {
+      pairingId: pairing.pairingId,
+      seriesId: pairing.seriesId,
+      source: pairing.source,
+      challenge,
+      round: pairing.round,
+      matchId: pairing.matchId,
+      role,
+      seatASessionId,
+      seatBSessionId,
+      duplicateRuntime: readOnlyRuntime,
+      ...(committedStart === undefined
+        ? {}
+        : {
+            startedEventId: committedStart.eventId,
+            committedSeed: committedStart.seed,
+            committedConfigHash: committedStart.configHash,
+          }),
+    };
+  };
+
+  const ensureLocalRuntimeClaim = (pairing: PairingView): RuntimeClaimEvent | undefined => {
+    if (
+      !durableReplayReady ||
+      durable === null ||
+      (pairing.seatA.id !== selfActor.id && pairing.seatB.id !== selfActor.id)
+    ) {
+      return undefined;
+    }
+    const existing = localRuntimeClaims.get(pairing.pairingId);
+    if (existing !== undefined) return existing;
+    const claim: CompetitionEventV2 = {
+      ...eventBase("runtime-claimed"),
+      kind: "runtime-claimed",
+      pairingId: pairing.pairingId,
+      runtimeSessionId: runtimeId,
+    };
+    localRuntimeClaims.set(pairing.pairingId, claim);
+    appendCompetition(claim);
+    return claim;
+  };
+
+  const stopRuntimeClaimRetry = (pairingId: string): void => {
+    const retry = runtimeClaimRetries.get(pairingId);
+    if (retry === undefined) return;
+    if (retry.retryTimer !== null) window.clearTimeout(retry.retryTimer);
+    runtimeClaimRetries.delete(pairingId);
+  };
+
+  const stopAllRuntimeClaimRetries = (): void => {
+    for (const pairingId of [...runtimeClaimRetries.keys()]) {
+      stopRuntimeClaimRetry(pairingId);
+    }
+  };
+
+  const runtimeClaimRetryIsNeeded = (retry: RuntimeClaimRetryState): boolean => {
+    if (
+      localRuntimeClaims.get(retry.pairingId)?.eventId !== retry.claim.eventId ||
+      retry.claim.runtimeSessionId !== runtimeId
+    ) {
+      return false;
+    }
+    const pairing = competition.view(selfActor.id).startingPairings.find(
+      (candidate) =>
+        candidate.pairingId === retry.pairingId &&
+        (candidate.seatA.id === selfActor.id || candidate.seatB.id === selfActor.id),
+    );
+    if (pairing === undefined) return false;
+    const peer = pairing.seatA.id === selfActor.id ? pairing.seatB : pairing.seatA;
+    return pairing.runtimeSessionByPlayer[selfActor.id] === runtimeId &&
+      pairing.runtimeSessionByPlayer[peer.id] === undefined;
+  };
+
+  const runtimeClaimRetryDelay = (attempts: number): number => Math.max(
+    Math.max(0, host?.sendUpdateInterval ?? 0),
+    Math.min(
+      DURABLE_RETRY_MAX_MS,
+      DURABLE_RETRY_MIN_MS * 2 ** Math.min(attempts, 4),
+    ),
+  );
+
+  const scheduleRuntimeClaimRetry = (
+    retry: RuntimeClaimRetryState,
+    immediate = false,
+  ): void => {
+    if (
+      retry.sending ||
+      retry.retryTimer !== null ||
+      runtimeClaimRetries.get(retry.pairingId) !== retry
+    ) {
+      return;
+    }
+    retry.retryTimer = window.setTimeout(() => {
+      retry.retryTimer = null;
+      if (!runtimeClaimRetryIsNeeded(retry)) {
+        stopRuntimeClaimRetry(retry.pairingId);
+        return;
+      }
+      retry.sending = true;
+      void sendDurableOnce({ payload: retry.claim })
+        .catch(() => undefined)
+        .finally(() => {
+          retry.sending = false;
+          if (
+            runtimeClaimRetries.get(retry.pairingId) !== retry ||
+            !runtimeClaimRetryIsNeeded(retry)
+          ) {
+            stopRuntimeClaimRetry(retry.pairingId);
+            return;
+          }
+          retry.attempts += 1;
+          scheduleRuntimeClaimRetry(retry);
+        });
+    }, immediate ? 0 : runtimeClaimRetryDelay(retry.attempts));
+  };
+
+  const syncRuntimeClaimRetry = (
+    pairing: StartingPairingView | undefined,
+    claim: RuntimeClaimEvent | undefined,
+  ): void => {
+    for (const pairingId of [...runtimeClaimRetries.keys()]) {
+      if (pairingId !== pairing?.pairingId) stopRuntimeClaimRetry(pairingId);
+    }
+    if (pairing === undefined || claim === undefined) return;
+    const peer = pairing.seatA.id === selfActor.id ? pairing.seatB : pairing.seatA;
+    if (
+      pairing.runtimeSessionByPlayer[selfActor.id] !== runtimeId ||
+      pairing.runtimeSessionByPlayer[peer.id] !== undefined
+    ) {
+      stopRuntimeClaimRetry(pairing.pairingId);
+      return;
+    }
+    const existing = runtimeClaimRetries.get(pairing.pairingId);
+    if (existing !== undefined) return;
+    const retry: RuntimeClaimRetryState = {
+      pairingId: pairing.pairingId,
+      claim,
+      attempts: 0,
+      sending: false,
+      retryTimer: null,
+    };
+    runtimeClaimRetries.set(pairing.pairingId, retry);
+    scheduleRuntimeClaimRetry(retry);
+  };
+
+  const retryRuntimeClaimsImmediately = (): void => {
+    for (const retry of [...runtimeClaimRetries.values()]) {
+      if (!runtimeClaimRetryIsNeeded(retry)) {
+        stopRuntimeClaimRetry(retry.pairingId);
+        continue;
+      }
+      if (retry.retryTimer !== null) {
+        window.clearTimeout(retry.retryTimer);
+        retry.retryTimer = null;
+      }
+      scheduleRuntimeClaimRetry(retry, true);
+    }
+  };
+
+  const publishCommittedStartWhenReady = (): void => {
+    const pending = pendingCommittedStart;
+    if (pending === null || announcedConfigHash !== null) return;
+    const seatB = pending.match.challenge.seatB;
+    if (seatB === null) return;
+    announcedConfigHash = pending.configHash;
+    const started: Extract<CompetitionEventV2, { kind: "match-started" }> = {
+      ...eventBase("match-started"),
+      kind: "match-started",
+      pairingId: pending.match.pairingId,
+      seriesId: pending.match.seriesId,
+      round: pending.match.round,
+      matchId: pending.match.matchId,
+      rulesHash: RULES_HASH,
+      configHash: pending.configHash,
+      seed: pending.seed,
+      seedHash: hashCanonicalHex({ seed: pending.seed }),
+      seatAPlayerId: pending.match.challenge.seatA.playerId,
+      seatBPlayerId: seatB.playerId,
+      seatASessionId: pending.match.seatASessionId,
+      seatBSessionId: pending.match.seatBSessionId,
+    };
+    pending.match.startedEventId = started.eventId;
+    pendingCommittedStart = null;
+    appendAfterMaterialization(
+      started,
+      {
+        kind: "match-started",
+        seatAName: pending.match.challenge.seatA.displayName,
+        seatBName: seatB.displayName,
+      },
+      () => matchStartedFeedback({
+        seatAName: pending.match.challenge.seatA.displayName,
+        seatBName: seatB.displayName,
+        matchId: pending.match.matchId,
+        activity: chatActivity(),
+      }),
+      { mayDefer: true },
+    );
   };
 
   const leaveRuntime = (): void => {
@@ -853,7 +1417,10 @@ export async function bootstrap(): Promise<void> {
     spectator?.channel.leave?.();
     spectator = null;
     activeMatch = null;
+    interruptedPairing = null;
+    practicePauseReasons.delete("pairing");
     practice = null;
+    practiceRunId = null;
     latestLeftBoard = null;
     latestRightBoard = null;
     competitiveRemoteCache = null;
@@ -862,10 +1429,27 @@ export async function bootstrap(): Promise<void> {
     lastScrambleActive = false;
     shell.setScrambled(false);
     announcedConfigHash = null;
+    pendingCommittedStart = null;
     shell.overlay.hidden = true;
     hidePowerTip();
     matchMenuOpen = false;
     setMatchMenu(shell, "competitive", false);
+    shell.setPairingInterruption(null);
+  };
+
+  const showHome = (): void => {
+    leaveRuntime();
+    mode = "lobby";
+    if (shell.lobbyStatus.textContent === STRINGS["lobby.staleLink"]) {
+      shell.lobbyStatus.textContent = "";
+    }
+    shell.show("home");
+    shell.readinessPanel.hidden = true;
+    shell.matchMenuButton.hidden = true;
+    shell.touchButtons.hidden = true;
+    shell.unsupported.hidden = renderer !== null;
+    shell.setPairingInterruption(null);
+    renderCompetitionState();
   };
 
   const showLobby = (): void => {
@@ -876,10 +1460,77 @@ export async function bootstrap(): Promise<void> {
     shell.matchMenuButton.hidden = true;
     shell.touchButtons.hidden = true;
     shell.unsupported.hidden = renderer !== null;
-    renderHistory();
+    shell.setPairingInterruption(null);
+    renderCompetitionState();
   };
 
-  const showResult = (result: MatchResultV1, localPlayerId: string | null): void => {
+  const rematchForResult = (
+    resultView: CompetitionResultView,
+    view = competition.view(selfActor.id),
+  ): PendingRematchView | undefined => view.pendingRematches.find(
+    (candidate) => candidate.afterMatchId === resultView.matchId,
+  );
+
+  const updateRematchAction = (): void => {
+    const resultView = displayedResult;
+    const view = competition.view(selfActor.id);
+    shell.newChallengeButton.disabled = view.activity.kind !== "idle";
+    if (resultView === null || !resultView.result.players.some((player) => player.id === selfActor.id)) {
+      shell.setRematchAction("hidden");
+      return;
+    }
+    if (view.activity.kind !== "idle") {
+      shell.setRematchAction("hidden");
+      return;
+    }
+    const pending = rematchForResult(resultView, view);
+    if (pending === undefined) {
+      shell.setRematchAction("request");
+      return;
+    }
+    shell.setRematchAction(
+      pending.requestedByPlayerIds.includes(selfActor.id) ? "pending" : "accept",
+    );
+  };
+
+  const renderCompetitiveResultSummary = (
+    result: MatchResultV1,
+    resultContext: CompetitionResultView | null,
+  ): void => {
+    const seatA = result.players[0];
+    const seatB = result.players[1];
+    if (seatA === undefined || seatB === undefined) {
+      shell.setCompetitiveResult(null);
+      return;
+    }
+    const view = competition.view(selfActor.id);
+    const headToHead = view.headToHead.find((entry) =>
+      entry.playerIds.includes(seatA.id) && entry.playerIds.includes(seatB.id)
+    );
+    const series = resultContext === null
+      ? undefined
+      : view.seriesScores.find((entry) => entry.seriesId === resultContext.seriesId);
+    shell.setCompetitiveResult({
+      round: resultContext?.round ?? activeMatch?.round ?? 1,
+      scores: [
+        { playerName: seatA.displayName, score: result.statsByPlayer[seatA.id]?.score ?? 0 },
+        { playerName: seatB.displayName, score: result.statsByPlayer[seatB.id]?.score ?? 0 },
+      ],
+      seriesScore: `${series?.winsByPlayer[seatA.id] ?? 0}–${series?.winsByPlayer[seatB.id] ?? 0}`,
+      headToHeadScore: headToHead === undefined
+        ? "0–0"
+        : `${headToHead.winsByPlayer[seatA.id] ?? 0}–${headToHead.winsByPlayer[seatB.id] ?? 0}`,
+      ...(result.outcome === "desync"
+        ? { notice: STRINGS["results.standingsUnchanged"] }
+        : {}),
+    });
+  };
+
+  const showResult = (
+    result: MatchResultV1,
+    localPlayerId: string | null,
+    resultContext?: CompetitionResultView,
+  ): void => {
     if (resultShownFor === result.matchId && mode === "results") return;
     stopCompetitivePump();
     stopGlitchPreview();
@@ -888,10 +1539,26 @@ export async function bootstrap(): Promise<void> {
     setInputsEnabled(false);
     resultShownFor = result.matchId;
     mode = "results";
+    shell.setResultsMode("competitive");
     lastScrambleActive = false;
     shell.setScrambled(false);
     const seatA = result.players[0];
     const seatB = result.players[1];
+    const inferredContext = competition.view().recentResults.find(
+      (candidate) => candidate.matchId === result.matchId,
+    );
+    displayedResult = resultContext ?? inferredContext ?? (
+      activeMatch === null
+        ? null
+        : {
+            matchId: result.matchId,
+            seriesId: activeMatch.seriesId,
+            round: activeMatch.round,
+            result,
+            conflicted: false,
+            variantCount: 1,
+          }
+    );
     const localSeat = localPlayerId === seatA?.id ? "seat-a" : localPlayerId === seatB?.id ? "seat-b" : null;
     if (result.reason === "connection-lost") {
       shell.resultsHeading.textContent = STRINGS["results.connectionLost"];
@@ -901,6 +1568,7 @@ export async function bootstrap(): Promise<void> {
     else shell.resultsHeading.textContent = result.outcome === localSeat ? STRINGS["results.victory"] : STRINGS["results.defeat"];
     const localStats = localPlayerId === null ? undefined : result.statsByPlayer[localPlayerId];
     const stats = localStats ?? (seatA === undefined ? undefined : result.statsByPlayer[seatA.id]);
+    renderCompetitiveResultSummary(result, displayedResult);
     setDefinitionList(shell, [
       [STRINGS["results.duration"], formatDuration(result.durationTicks)],
       [STRINGS["results.score"], stats?.score ?? 0],
@@ -910,7 +1578,7 @@ export async function bootstrap(): Promise<void> {
       [STRINGS["results.tSpins"], (stats?.tSpinSingles ?? 0) + (stats?.tSpinDoubles ?? 0) + (stats?.tSpinTriples ?? 0)],
       [STRINGS["results.powersActivated"], stats?.powersActivated ?? 0],
     ]);
-    shell.rematchButton.hidden = activeMatch?.role === "spectator" || activeMatch === null;
+    updateRematchAction();
     shell.show("results");
     audio.play(
       result.outcome === "draw" || result.reason === "connection-lost"
@@ -929,7 +1597,36 @@ export async function bootstrap(): Promise<void> {
     } catch {
       // Practice score is a non-authoritative convenience cache.
     }
+    const completion: PracticeCompletedV2 = {
+      ...eventBase("practice-completed"),
+      kind: "practice-completed",
+      rulesHash: RULES_HASH,
+      runId: practiceRunId ?? `practice:${runtimeId}:${createRuntimeId()}`,
+      endReason: "top-out",
+      score: snapshot.player.score,
+      durationTicks: snapshot.tick,
+      finalLevel: snapshot.level,
+      finalStats: {
+        score: snapshot.player.score,
+        lines: snapshot.player.lines,
+        garbageSent: snapshot.player.stats.garbageSent,
+        powersActivated: snapshot.player.stats.powersActivated,
+        tetrises: snapshot.player.stats.tetrises,
+        tSpinSingles: snapshot.player.stats.tSpinSingles,
+        tSpinDoubles: snapshot.player.stats.tSpinDoubles,
+        tSpinTriples: snapshot.player.stats.tSpinTriples,
+        topOutTick: snapshot.tick,
+      },
+    };
+    rememberFeedbackIntent(completion, { kind: "practice-record" });
+    pendingAcceptedFeedback.set(completion.eventId, {
+      kind: "practice-record",
+      payload: completion,
+    });
+    appendCompetition(completion);
     mode = "results";
+    shell.setResultsMode("practice");
+    shell.setCompetitiveResult(null);
     lastScrambleActive = false;
     shell.setScrambled(false);
     setInputsEnabled(false);
@@ -948,7 +1645,6 @@ export async function bootstrap(): Promise<void> {
       [STRINGS["results.tSpins"], snapshot.player.stats.tSpinSingles + snapshot.player.stats.tSpinDoubles + snapshot.player.stats.tSpinTriples],
       [STRINGS["results.powersActivated"], snapshot.player.stats.powersActivated],
     ]);
-    shell.rematchButton.hidden = false;
     shell.show("results");
     audio.play("defeat");
   };
@@ -1077,10 +1773,14 @@ export async function bootstrap(): Promise<void> {
     spectator = null;
     practice = null;
     activeMatch = match;
+    interruptedPairing = null;
+    shell.setPairingInterruption(null);
+    practicePauseReasons.delete("pairing");
     lastScrambleActive = false;
     shell.setScrambled(false);
     announcedConfigHash = null;
     shell.readinessPanel.hidden = true;
+    shell.setPairingExitMode(match.source === "rematch" ? "withdraw" : "leave");
     shell.matchMenuButton.hidden = true;
     matchMenuOpen = false;
     setMatchMenu(shell, "competitive", false);
@@ -1094,6 +1794,7 @@ export async function bootstrap(): Promise<void> {
     leaveRuntime();
     resultShownFor = null;
     mode = "practice";
+    practicePauseReasons.clear();
     practicePaused = false;
     practiceAccumulator = 0;
     lastLocalLevel = 1;
@@ -1102,6 +1803,7 @@ export async function bootstrap(): Promise<void> {
     spectatorLeftCache = null;
     spectatorRightCache = null;
     const practiceSeed = createRuntimeId();
+    practiceRunId = `practice:${runtimeId}:${practiceSeed}`;
     practice = createSimulation({
       seed: practiceSeed,
       playerId: selfActor.id,
@@ -1125,13 +1827,9 @@ export async function bootstrap(): Promise<void> {
   const spectatorRuntime = (match: ActiveMatch): SpectatorRuntime | null => {
     const seatB = match.challenge.seatB;
     if (seatB === null) return null;
-    let channel: WebxdcRealtimeChannel | undefined;
-    try {
-      channel = host?.joinRealtimeChannel?.();
-    } catch {
-      return null;
-    }
-    if (channel === undefined) return null;
+    const hub = ensureRealtimeHub();
+    if (hub === null) return null;
+    const channel = hub.transport();
     const snapshots = new RemoteSnapshotStore();
     snapshots.bind(match.challenge.seatA.playerId, match.seatASessionId);
     snapshots.bind(seatB.playerId, match.seatBSessionId);
@@ -1180,7 +1878,279 @@ export async function bootstrap(): Promise<void> {
     return presentation;
   };
 
+  const appendMatchFinished = (
+    finished: Extract<CompetitionEventV2, { kind: "match-finished" }>,
+  ): void => {
+    const result = finished.result;
+    const seatA = result.players[0];
+    const seatB = result.players[1];
+    if (seatA === undefined || seatB === undefined) {
+      appendCompetition(finished);
+      return;
+    }
+    appendAfterMaterialization(
+      finished,
+      { kind: "match-result" },
+      (materialized) => {
+        const tally = materialized.headToHead.find((entry) =>
+          entry.playerIds.includes(seatA.id) && entry.playerIds.includes(seatB.id)
+        );
+        return matchResultFeedback({
+          matchId: result.matchId,
+          seatA: {
+            ...seatA,
+            score: result.statsByPlayer[seatA.id]?.score ?? 0,
+          },
+          seatB: {
+            ...seatB,
+            score: result.statsByPlayer[seatB.id]?.score ?? 0,
+          },
+          outcome: result.outcome === "seat-a"
+            ? "seat-a"
+            : result.outcome === "seat-b"
+              ? "seat-b"
+              : result.outcome === "draw"
+                ? "draw"
+                : "neutral",
+          ...(result.reason === "connection-lost"
+            ? { reason: "connection-lost" as const }
+            : {}),
+          headToHead: {
+            seatAWins: tally?.winsByPlayer[seatA.id] ?? 0,
+            seatBWins: tally?.winsByPlayer[seatB.id] ?? 0,
+          },
+          activity: {
+            waiting: materialized.counts.waiting,
+            live: materialized.counts.live,
+          },
+        });
+      },
+      { mayDefer: true },
+    );
+  };
+
+  const publishMatchResult = (
+    match: ActiveMatch,
+    result: MatchResultV1,
+  ): void => {
+    const view = competition.view();
+    if (view.recentResults.some((candidate) => candidate.matchId === result.matchId)) {
+      return;
+    }
+    const live = view.liveMatches.find(
+      (candidate) => candidate.matchId === result.matchId,
+    );
+    const startedEventId = match.startedEventId ?? live?.startedEventId;
+    if (startedEventId === undefined) return;
+    appendMatchFinished({
+      ...eventBase("match-finished"),
+      kind: "match-finished",
+      matchId: result.matchId,
+      startedEventId,
+      result,
+    });
+  };
+
+  const clearPassiveLiveRecovery = (): void => {
+    const recovery = passiveLiveRecovery;
+    if (recovery?.tickTimer !== null && recovery?.tickTimer !== undefined) {
+      window.clearTimeout(recovery.tickTimer);
+    }
+    passiveLiveRecovery = null;
+    shell.setHomeRecovery(null);
+  };
+
+  const passiveRecoveryStatus = (recovery: PassiveLiveRecovery) =>
+    liveControllerRecoveryStatus({
+      observedAtMs: recovery.observedAtMs,
+      controllerSeenAtMs: [
+        recovery.seatASeenAtMs,
+        recovery.seatBSeenAtMs,
+      ],
+      nowMs: performance.now(),
+    });
+
+  const publishPassiveConnectionLoss = (
+    recovery: PassiveLiveRecovery,
+  ): void => {
+    if (
+      passiveLiveRecovery !== recovery ||
+      recovery.finishQueued ||
+      !durableReplayReady ||
+      document.visibilityState === "hidden" ||
+      realtimeHub === null ||
+      passiveRecoveryStatus(recovery).kind !== "expired"
+    ) {
+      return;
+    }
+    const view = competition.view(selfActor.id);
+    if (view.recentResults.some((entry) => entry.matchId === recovery.matchId)) {
+      clearPassiveLiveRecovery();
+      return;
+    }
+    const live = view.liveMatches.find((entry) =>
+      entry.matchId === recovery.matchId &&
+      entry.startedEventId === recovery.startedEventId &&
+      (entry.seatA.id === selfActor.id || entry.seatB.id === selfActor.id)
+    );
+    if (live === undefined) {
+      clearPassiveLiveRecovery();
+      return;
+    }
+    const committedSessionId = live.seatA.id === selfActor.id
+      ? live.start.seatASessionId
+      : live.start.seatBSessionId;
+    if (committedSessionId === runtimeId) {
+      clearPassiveLiveRecovery();
+      return;
+    }
+    const finished = connectionLossFallbackFor(live, selfActor);
+    recovery.finishQueued = true;
+    if (pendingChatFeedback.get(finished.eventId) !== undefined) return;
+    appendMatchFinished(finished);
+  };
+
+  const refreshPassiveLiveRecovery = (): void => {
+    const recovery = passiveLiveRecovery;
+    if (recovery === null) return;
+    if (recovery.tickTimer !== null) {
+      window.clearTimeout(recovery.tickTimer);
+    }
+    recovery.tickTimer = null;
+    if (document.visibilityState === "hidden") {
+      return;
+    }
+    if (realtimeHub === null) {
+      const restoredHub = ensureRealtimeHub();
+      if (restoredHub === null) {
+        shell.setHomeRecovery({ kind: "active-elsewhere" });
+        const retryDelay = Math.min(
+          DURABLE_RETRY_MAX_MS,
+          DURABLE_RETRY_MIN_MS * 2 ** Math.min(recovery.hubRetryAttempts, 4),
+        );
+        recovery.hubRetryAttempts += 1;
+        recovery.tickTimer = window.setTimeout(
+          refreshPassiveLiveRecovery,
+          retryDelay,
+        );
+        return;
+      }
+      // Time spent without a receive path cannot count as proof that either
+      // committed controller was absent. Start a fresh observation window.
+      recovery.observedAtMs = performance.now();
+      recovery.seatASeenAtMs = null;
+      recovery.seatBSeenAtMs = null;
+      recovery.hubRetryAttempts = 0;
+      if (
+        mode === "spectator" &&
+        activeMatch?.role === "spectator" &&
+        activeMatch.matchId !== recovery.matchId &&
+        spectator === null
+      ) {
+        spectator = spectatorRuntime(activeMatch);
+      }
+    }
+    const live = competition.view(selfActor.id).liveMatches.find((entry) =>
+      entry.matchId === recovery.matchId &&
+      entry.startedEventId === recovery.startedEventId
+    );
+    if (live === undefined) {
+      clearPassiveLiveRecovery();
+      return;
+    }
+    const status = passiveRecoveryStatus(recovery);
+    if (status.kind === "active-elsewhere") {
+      shell.setHomeRecovery({ kind: "active-elsewhere" });
+    } else if (status.kind === "interrupted") {
+      shell.setHomeRecovery(status);
+    } else {
+      shell.setHomeRecovery({ kind: "interrupted", remainingSeconds: 0 });
+      shell.endInterruptedMatchButton.disabled = recovery.finishQueued;
+    }
+    if (passiveLiveRecovery === recovery && recovery.tickTimer === null) {
+      recovery.tickTimer = window.setTimeout(
+        refreshPassiveLiveRecovery,
+        LIVE_RECOVERY_TICK_MS,
+      );
+    }
+  };
+
+  const syncPassiveLiveRecovery = (match: LiveMatchView | undefined): boolean => {
+    if (match === undefined) {
+      clearPassiveLiveRecovery();
+      return false;
+    }
+    const committedSessionId = match.seatA.id === selfActor.id
+      ? match.start.seatASessionId
+      : match.seatB.id === selfActor.id
+        ? match.start.seatBSessionId
+        : undefined;
+    if (committedSessionId === undefined || committedSessionId === runtimeId) {
+      clearPassiveLiveRecovery();
+      return false;
+    }
+    if (
+      passiveLiveRecovery?.matchId !== match.matchId ||
+      passiveLiveRecovery.startedEventId !== match.startedEventId
+    ) {
+      clearPassiveLiveRecovery();
+      passiveLiveRecovery = {
+        matchId: match.matchId,
+        startedEventId: match.startedEventId,
+        seatAPlayerId: match.seatA.id,
+        seatBPlayerId: match.seatB.id,
+        seatASessionId: match.start.seatASessionId,
+        seatBSessionId: match.start.seatBSessionId,
+        allowedSenderIds: new Set([match.seatA.id, match.seatB.id]),
+        observedAtMs: performance.now(),
+        seatASeenAtMs: null,
+        seatBSeenAtMs: null,
+        tickTimer: null,
+        finishQueued: false,
+        hubRetryAttempts: 0,
+      };
+    }
+    refreshPassiveLiveRecovery();
+    return true;
+  };
+
+  receivePassiveControllerTraffic = (data): void => {
+    const recovery = passiveLiveRecovery;
+    if (recovery === null) return;
+    const decoded = decodeEnvelope(data, {
+      expectedMatchId: recovery.matchId,
+      allowedSenderIds: recovery.allowedSenderIds,
+    });
+    if (!decoded.ok) return;
+    const envelope = decoded.value;
+    if (
+      envelope.kind === "KEEPALIVE" &&
+      envelope.payload.activeSessionId !== envelope.sessionId
+    ) {
+      return;
+    }
+    const now = performance.now();
+    if (
+      envelope.senderId === recovery.seatAPlayerId &&
+      envelope.sessionId === recovery.seatASessionId
+    ) {
+      recovery.seatASeenAtMs = now;
+    } else if (
+      envelope.senderId === recovery.seatBPlayerId &&
+      envelope.sessionId === recovery.seatBSessionId
+    ) {
+      recovery.seatBSeenAtMs = now;
+    } else {
+      return;
+    }
+    refreshPassiveLiveRecovery();
+  };
+
   const startActiveMatch = (match: ActiveMatch): void => {
+    const preserveOwnedLiveRecovery = match.role === "spectator" &&
+      passiveLiveRecovery !== null &&
+      passiveLiveRecovery.matchId !== match.matchId;
+    if (!preserveOwnedLiveRecovery) clearPassiveLiveRecovery();
     stopCompetitivePump();
     stopGlitchPreview();
     audio.stopMusic();
@@ -1191,9 +2161,11 @@ export async function bootstrap(): Promise<void> {
     competitive = null;
     spectator = null;
     practice = null;
+    practiceRunId = null;
     lastScrambleActive = false;
     shell.setScrambled(false);
     announcedConfigHash = null;
+    pendingCommittedStart = null;
     lastCountdownSecond = 0;
     lastCompetitiveInputsEnabled = null;
     lastLocalLevel = 1;
@@ -1213,9 +2185,12 @@ export async function bootstrap(): Promise<void> {
     } catch {
       // A failed leave is followed by a contained join attempt below.
     }
+    interruptedPairing = null;
+    practicePauseReasons.delete("pairing");
+    shell.setPairingInterruption(null);
     activeMatch = match;
     resultShownFor = null;
-    announcedConfigHash = null;
+    announcedConfigHash = match.committedConfigHash ?? null;
     shell.arena.dataset.mode = "versus";
     shell.matchMenuButton.hidden = false;
     matchMenuOpen = false;
@@ -1269,18 +2244,14 @@ export async function bootstrap(): Promise<void> {
       shell.setOverlayMessage(STRINGS["lobby.realtimeUnavailable"]);
       return;
     }
-    let channel: WebxdcRealtimeChannel | undefined;
-    try {
-      channel = host?.joinRealtimeChannel?.();
-    } catch {
-      channel = undefined;
-    }
-    if (channel === undefined) {
+    const hub = ensureRealtimeHub();
+    if (hub === null) {
       shell.overlay.hidden = false;
       shell.setOverlayMessage(STRINGS["lobby.realtimeUnavailable"]);
       retryActiveMatch();
       return;
     }
+    const channel = hub.transport();
     shell.left.pane.classList.add("is-local");
     shell.right.pane.classList.add("is-remote");
     const local = match.role === "a" ? match.challenge.seatA : seatB;
@@ -1302,8 +2273,34 @@ export async function bootstrap(): Promise<void> {
         rulesHash: RULES_HASH,
         snapshotIntervalTicks: SNAPSHOT_PROFILE.intervalTicks,
         clock: { now: () => performance.now() },
-        transport: makeRealtimeTransport(channel),
+        transport: channel,
+        ...(match.committedSeed === undefined
+          ? {}
+          : { createSeed: () => match.committedSeed! }),
         diagnostics: networkDiagnostics,
+        onStartCommitted: () => {
+          if (
+            match.role !== "a" ||
+            match.startedEventId !== undefined ||
+            announcedConfigHash !== null
+          ) {
+            return;
+          }
+          const view = competitive?.view();
+          if (
+            view?.configHash === undefined ||
+            view.seed === undefined ||
+            match.challenge.seatB === null
+          ) {
+            return;
+          }
+          pendingCommittedStart = {
+            match,
+            configHash: view.configHash,
+            seed: view.seed,
+          };
+          publishCommittedStartWhenReady();
+        },
         onPhaseChange: (phase) => {
           const view = competitive?.view();
           if (phase === "countdown" || phase === "playing") {
@@ -1342,8 +2339,28 @@ export async function bootstrap(): Promise<void> {
           setInputsEnabled(false);
         },
         onResultConfirmed: (result) => {
-          void appendDurable(result);
-          showResult(result, selfActor.id);
+          const seatAId = result.players[0]?.id;
+          if (result.outcome !== "desync" || seatAId === selfActor.id) {
+            publishMatchResult(match, result);
+          } else if (!neutralFinishFallbackTimers.has(result.matchId)) {
+            const fallbackDelay = Math.max(
+              DURABLE_RETRY_MIN_MS,
+              (host?.sendUpdateInterval ?? 0) + DURABLE_RETRY_MIN_MS,
+            );
+            const timer = window.setTimeout(() => {
+              neutralFinishFallbackTimers.delete(result.matchId);
+              publishMatchResult(match, result);
+            }, fallbackDelay);
+            neutralFinishFallbackTimers.set(result.matchId, timer);
+          }
+          showResult(result, selfActor.id, {
+            matchId: result.matchId,
+            seriesId: match.seriesId,
+            round: match.round,
+            result,
+            conflicted: false,
+            variantCount: 1,
+          });
         },
         onDesynchronization: () => {
           shell.overlay.hidden = false;
@@ -1351,6 +2368,7 @@ export async function bootstrap(): Promise<void> {
         },
       });
       competitive.start();
+      if (match.startedEventId !== undefined) competitive.setReady(true);
     } catch {
       try {
         if (competitive === null) channel.leave?.();
@@ -1367,222 +2385,382 @@ export async function bootstrap(): Promise<void> {
     startCompetitivePump();
     setInputsEnabled(false);
     shell.overlay.hidden = false;
-    shell.setReadiness(false, false);
+    const initialView = competitive.view();
+    shell.setReadiness(initialView.localReady, initialView.peerReady, {
+      localName: local.displayName,
+      opponentName: peer.displayName,
+    });
+    applyCompetitivePresentation(initialView);
+  };
+
+  const clearConfirmingPairing = (): void => {
+    if (confirmingPairing?.actionTimer !== null && confirmingPairing !== null) {
+      window.clearTimeout(confirmingPairing.actionTimer);
+    }
+    confirmingPairing = null;
+    if (shell.homeRecovery.dataset.kind === "confirming") {
+      shell.setHomeRecovery(null);
+    }
+    if (shell.homeStatus.textContent === STRINGS["lobby.confirmingSession"]) {
+      shell.homeStatus.textContent = "";
+    }
+  };
+
+  const showConfirmingPairing = (pairing: StartingPairingView): void => {
+    if (confirmingPairing?.pairingId !== pairing.pairingId) {
+      clearConfirmingPairing();
+      confirmingPairing = {
+        pairingId: pairing.pairingId,
+        startedAtMs: performance.now(),
+        actionTimer: null,
+      };
+    }
+    const state = confirmingPairing;
+    const elapsedMs = state === null
+      ? 0
+      : performance.now() - state.startedAtMs;
+    if (
+      state !== null &&
+      state.actionTimer === null &&
+      elapsedMs < RULES.network.missingPeerMs
+    ) {
+      const remaining = RULES.network.missingPeerMs - elapsedMs;
+      state.actionTimer = window.setTimeout(() => {
+        if (confirmingPairing === state) state.actionTimer = null;
+        reconcileLobby();
+      }, remaining);
+    }
+    if (
+      state !== null &&
+      elapsedMs >= RULES.network.missingPeerMs
+    ) {
+      shell.homeStatus.textContent = "";
+      shell.setHomeRecovery({
+        kind: "confirming",
+        exit: pairing.seatB.id === selfActor.id ? "withdraw" : "cancel",
+      });
+    } else {
+      shell.homeStatus.textContent = STRINGS["lobby.confirmingSession"];
+    }
+    mode = "lobby";
+    shell.show("home");
   };
 
   const reconcileLobby = (): void => {
-    const challenges = allChallenges().filter((challenge) => !challenge.closed);
-    const activeChallenge = activeMatch === null
+    publishCommittedStartWhenReady();
+    const view = competition.view(selfActor.id);
+    const ownedStarting = view.startingPairings.find((pairing) =>
+      pairing.seatA.id === selfActor.id || pairing.seatB.id === selfActor.id
+    );
+    const ownedLive = view.liveMatches.find((pairing) =>
+      pairing.seatA.id === selfActor.id || pairing.seatB.id === selfActor.id
+    );
+    const localRuntimeClaim = ownedStarting === undefined
       ? undefined
-      : challenges.find(
-          (challenge) => challenge.challengeId === activeMatch?.challenge.challengeId,
-        );
+      : ensureLocalRuntimeClaim(ownedStarting);
+    syncRuntimeClaimRetry(ownedStarting, localRuntimeClaim);
+    const completed = activeMatch === null
+      ? undefined
+      : view.recentResults.find((entry) => entry.matchId === activeMatch?.matchId);
     if (
-      activeMatch !== null &&
-      (activeChallenge === undefined || activeChallenge.seatB === null)
+      completed !== undefined &&
+      mode !== "results" &&
+      interruptedPairing === null
     ) {
-      if (mode === "results") {
-        shell.rematchButton.hidden = true;
+      restoreCompletedMatch(activeMatch!, completed.result);
+      displayedResult = completed;
+      return;
+    }
+
+    if (ownedStarting === undefined && ownedLive === undefined) {
+      clearConfirmingPairing();
+      clearPassiveLiveRecovery();
+      const hadInterruption = interruptedPairing !== null;
+      pendingPairingExitId = null;
+      interruptedPairing = null;
+      shell.setPairingInterruption(null);
+      if (hadInterruption && mode === "practice") {
+        practicePauseReasons.delete("pairing");
+        setPracticePaused(practicePauseReasons.size > 0);
+      }
+      if (
+        activeMatch !== null &&
+        activeMatch.role !== "spectator" &&
+        mode === "competitive"
+      ) {
+        showHome();
+      }
+      return;
+    }
+
+    if (ownedStarting === undefined && ownedLive !== undefined) {
+      clearConfirmingPairing();
+      if (syncPassiveLiveRecovery(ownedLive)) {
+        interruptedPairing = null;
+        shell.setPairingInterruption(null);
+        if (
+          mode === "competitive" ||
+          (mode === "spectator" && activeMatch?.pairingId === ownedLive.pairingId)
+        ) {
+          showHome();
+          refreshPassiveLiveRecovery();
+        }
         return;
       }
-      // A durable close/release invalidates the realtime binding immediately.
-      // The open challenge may become playable again after a fresh seat claim.
-      showLobby();
-    }
-    const owned = challenges.find(
-      (challenge) => challenge.seatA.playerId === selfActor.id || challenge.seatB?.playerId === selfActor.id,
-    );
-    const full = owned?.seatB !== null && owned?.seatB !== undefined
-      ? owned
-      : challenges.find((challenge) => challenge.seatB !== null);
-    const selected = owned ?? full;
-
-    const joinable = challenges.find(
-      (challenge) => challenge.seatB === null && challenge.seatA.playerId !== selfActor.id,
-    );
-    shell.joinButton.disabled = !realtimeAvailable || joinable === undefined;
-    shell.createButton.disabled = !realtimeAvailable || owned !== undefined;
-    if (!realtimeAvailable) shell.lobbyStatus.textContent = STRINGS["lobby.realtimeUnavailable"];
-    else if (owned !== undefined && owned.seatB === null) shell.lobbyStatus.textContent = STRINGS["lobby.waitingForOpponent"];
-    else shell.lobbyStatus.textContent = "";
-
-    if (selected === undefined || selected.seatB === null) return;
-    const round = currentRoundFor(selected);
-    const assignedRole = selected.seatA.playerId === selfActor.id
-      ? "a"
-      : selected.seatB.playerId === selfActor.id
-        ? "b"
-        : "spectator";
-    const localClaim = assignedRole === "a"
-      ? ensureLocalSessionClaim(selected, selected.seatA)
-      : assignedRole === "b"
-        ? ensureLocalSessionClaim(selected, selected.seatB)
-        : undefined;
-    if (
-      assignedRole !== "spectator" &&
-      (localClaim === undefined ||
-        !sessionClaims.some(
-          (claim) =>
-            claim.eventId === localClaim.eventId &&
-            claim.runtimeSessionId === localClaim.runtimeSessionId,
-        ))
-    ) {
-      shell.lobbyStatus.textContent = STRINGS["lobby.confirmingSession"];
-      return;
+    } else {
+      clearPassiveLiveRecovery();
     }
 
-    const seatAWinner = electionFor(selected.challengeId, selected.seatA).winner();
-    const seatBWinner = electionFor(selected.challengeId, selected.seatB).winner();
-    if (seatAWinner === undefined || seatBWinner === undefined) {
-      shell.lobbyStatus.textContent = STRINGS["lobby.confirmingSession"];
-      return;
-    }
-    const duplicateRuntime =
-      (assignedRole === "a" && seatAWinner.runtimeSessionId !== runtimeId) ||
-      (assignedRole === "b" && seatBWinner.runtimeSessionId !== runtimeId);
-    const role = duplicateRuntime ? "spectator" : assignedRole;
-    const next: ActiveMatch = {
-      challenge: selected,
-      round,
-      matchId: `${selected.challengeId}:round:${round}`,
-      role,
-      seatASessionId: seatAWinner.runtimeSessionId,
-      seatBSessionId: seatBWinner.runtimeSessionId,
-      duplicateRuntime,
-    };
-    const completed = history.findByMatchId(next.matchId);
-    if (completed !== undefined) {
-      restoreCompletedMatch(next, completed.result);
-      return;
-    }
-    const nextRoster: RuntimeRoster = {
-      matchId: next.matchId,
-      role: next.role,
-      seatAOccupancyEventId: selected.seatA.occupancyEventId,
-      seatBOccupancyEventId: selected.seatB.occupancyEventId,
-      seatASessionId: next.seatASessionId,
-      seatBSessionId: next.seatBSessionId,
-    };
-    const currentRoster: RuntimeRoster | null = activeMatch?.challenge.seatB === null || activeMatch === null
-      ? null
-      : {
-          matchId: activeMatch.matchId,
-          role: activeMatch.role,
-          seatAOccupancyEventId: activeMatch.challenge.seatA.occupancyEventId,
-          seatBOccupancyEventId: activeMatch.challenge.seatB.occupancyEventId,
-          seatASessionId: activeMatch.seatASessionId,
-          seatBSessionId: activeMatch.seatBSessionId,
-        };
-    if (currentRoster === null || !isSameRuntimeRoster(currentRoster, nextRoster)) {
-      startActiveMatch(next);
-    }
-  };
-
-  function renderHistory(): void {
-    const document = shell.history.ownerDocument;
-    shell.history.replaceChildren();
-    const view = history.view();
-    if (view.latest.length === 0) {
-      const empty = document.createElement("li");
-      empty.className = "muted";
-      const highScore = Number.parseInt(storage.getItem(PRACTICE_HIGH_SCORE_KEY) ?? "0", 10) || 0;
-      empty.textContent = highScore > 0
-        ? formatString("lobby.practiceHighScore", { score: highScore })
-        : STRINGS["lobby.noMatches"];
-      shell.history.append(empty);
-      return;
-    }
-    for (const item of view.latest) {
-      const row = document.createElement("li");
-      row.className = "history-item";
-      const players = item.result.players.map((player) => player.displayName).join(" · ");
-      const outcome = item.result.reason === "connection-lost"
-        ? STRINGS["results.connectionLostHistory"]
-        : item.conflicted
-          ? STRINGS["results.desync"]
-        : item.result.outcome === "draw"
-          ? STRINGS["results.draw"]
-          : item.result.players[item.result.outcome === "seat-a" ? 0 : 1]?.displayName ?? STRINGS["results.desync"];
-      row.textContent = formatString("lobby.historyResult", { players, outcome });
-      shell.history.append(row);
-    }
-    for (const tally of view.tallies) {
-      const relevant = view.latest.find((item) => item.result.players.some((player) => player.id === tally.playerIds[0]));
-      const names = tally.playerIds.map((id) => relevant?.result.players.find((player) => player.id === id)?.displayName ?? STRINGS["common.playerFallback"]);
-      const score = `${tally.winsByPlayer[tally.playerIds[0]] ?? 0}–${tally.winsByPlayer[tally.playerIds[1]] ?? 0}`;
-      const row = document.createElement("li");
-      row.className = "history-item tally";
-      row.textContent = formatString("lobby.tallyResult", { players: names.join(" · "), score });
-      shell.history.append(row);
-    }
-  }
-
-  const applyAuthenticatedResult = (
-    payload: MatchResultV1,
-    serial: number,
-  ): boolean => {
-    const announcement = announcements.find(
-      (candidate) => candidate.matchId === payload.matchId,
-    );
-    if (announcement === undefined || !resultMatchesAnnouncement(payload, announcement)) {
-      return false;
-    }
-    history.apply({ serial, payload });
-    renderHistory();
-    const completed = history.findByMatchId(payload.matchId);
-    if (activeMatch?.matchId === payload.matchId && completed !== undefined) {
-      restoreCompletedMatch(activeMatch, completed.result);
-    }
-    return true;
-  };
-
-  const replayPendingResults = (matchId: string): void => {
-    for (let index = pendingResults.length - 1; index >= 0; index -= 1) {
-      const pending = pendingResults[index];
-      if (pending === undefined || pending.payload.matchId !== matchId) continue;
-      if (applyAuthenticatedResult(pending.payload, pending.serial)) {
-        pendingResults.splice(index, 1);
-      }
-    }
-  };
-
-  const receiveDurable = (payload: unknown, serial: number): void => {
-    if (isLobbyEvent(payload)) {
-      if (appendBoundedUnique(lobbyEvents, payload, MAX_LOBBY_EVENTS)) {
-        eventSerials.set(payload.eventId, serial);
-      }
-      lamport.observe(payload.logicalClock);
-      reconcileLobby();
-    } else if (isRematch(payload)) {
-      appendBoundedUnique(rematches, payload, MAX_REMATCH_EVENTS);
-      lamport.observe(payload.logicalClock);
-      reconcileLobby();
-    } else if (isMatchAnnouncementV1(payload, RULES_HASH)) {
-      const challenge = materializeChallenge(lobbyEvents, payload.challengeId);
-      if (!announcementMatchesChallenge(payload, challenge)) return;
-      appendBoundedUnique(announcements, payload, MAX_ANNOUNCEMENTS);
-      lamport.observe(payload.logicalClock);
-      replayPendingResults(payload.matchId);
-    } else if (isSessionClaim(payload)) {
-      appendBoundedUnique(sessionClaims, payload, MAX_SESSION_CLAIMS);
-      lamport.observe(payload.logicalClock);
-      reconcileLobby();
-    } else if (isMatchResultV1(payload)) {
-      if (!applyAuthenticatedResult(payload, serial)) {
-        const variantsForMatch = pendingResults.filter(
-          (pending) => pending.payload.matchId === payload.matchId,
-        ).length;
-        if (pendingResults.length < MAX_PENDING_RESULTS && variantsForMatch < 2) {
-          pendingResults.push({ serial, payload });
+    const ownedPairing = ownedStarting ?? ownedLive!;
+    if (ownedStarting !== undefined && localRuntimeClaim !== undefined) {
+      const peer = ownedStarting.seatA.id === selfActor.id
+        ? ownedStarting.seatB
+        : ownedStarting.seatA;
+      const peerRuntime = ownedStarting.runtimeSessionByPlayer[peer.id];
+      const previousPeerRuntime = observedPeerRuntimeByPairing.get(
+        ownedStarting.pairingId,
+      );
+      if (peerRuntime !== undefined && peerRuntime !== previousPeerRuntime) {
+        observedPeerRuntimeByPairing.set(ownedStarting.pairingId, peerRuntime);
+        if (
+          ownedStarting.runtimeSessionByPlayer[selfActor.id] === runtimeId &&
+          !durableOutbox.has(localRuntimeClaim.eventId)
+        ) {
+          enqueueDurable({ payload: localRuntimeClaim });
         }
       }
     }
+
+    if (
+      ownedStarting !== undefined &&
+      pendingPairingExitId === ownedStarting.pairingId
+    ) {
+      leaveStartingPairing(ownedStarting.pairingId);
+      return;
+    }
+
+    const preservingActivity = ownedStarting !== undefined && (
+      mode === "practice" ||
+      (mode === "spectator" && activeMatch?.pairingId !== ownedStarting.pairingId)
+    );
+    if (preservingActivity && ownedStarting !== undefined) {
+      interruptedPairing = ownedStarting;
+      if (mode === "practice") {
+        practicePauseReasons.add("pairing");
+        setPracticePaused(true);
+      }
+      const opponent = ownedStarting.seatA.id === selfActor.id
+        ? ownedStarting.seatB
+        : ownedStarting.seatA;
+      shell.setPairingInterruption({
+        kind: ownedStarting.source === "rematch" ? "rematch" : "pairing",
+        opponentName: opponent.displayName,
+      });
+      return;
+    }
+
+    const localSessionId = ownedPairing.runtimeSessionByPlayer[selfActor.id];
+    if (
+      ownedStarting !== undefined &&
+      localSessionId !== undefined &&
+      localSessionId !== runtimeId &&
+      (localRuntimeClaim === undefined || !durableOutbox.has(localRuntimeClaim.eventId))
+    ) {
+      clearConfirmingPairing();
+      if (mode === "competitive" || mode === "spectator") showHome();
+      shell.setHomeRecovery({ kind: "active-elsewhere" });
+      return;
+    }
+    if (ownedStarting !== undefined && localSessionId !== runtimeId) {
+      showConfirmingPairing(ownedStarting);
+      return;
+    }
+
+    const next = activeMatchFrom(ownedPairing);
+    if (next === null) {
+      if (ownedStarting !== undefined) showConfirmingPairing(ownedStarting);
+      return;
+    }
+    clearConfirmingPairing();
+
+    if (
+      activeMatch !== null &&
+      activeMatch.pairingId === next.pairingId &&
+      activeMatch.role === next.role &&
+      activeMatch.seatASessionId === next.seatASessionId &&
+      activeMatch.seatBSessionId === next.seatBSessionId
+    ) {
+      if (next.startedEventId !== undefined) {
+        activeMatch.startedEventId = next.startedEventId;
+      }
+      return;
+    }
+
+    startActiveMatch(next);
+  };
+
+  const receiveDurable = (update: DurableReceivedUpdate<unknown>): void => {
+    const { payload, serial } = update;
+    if (
+      !Number.isSafeInteger(serial) ||
+      serial < 1 ||
+      !isCompetitionEventV2(payload)
+    ) {
+      return;
+    }
+    const beforeView = competition.view(selfActor.id);
+    lamport.observe(payload.logicalClock);
+    competition.apply({ serial, payload });
+    acknowledgeDurableEvent(payload, update);
+    const afterView = competition.view(selfActor.id);
+    const canonicalDelivery = competition.hasCanonicalEvent(payload);
+    const matchesDelivery = (expected: CompetitionEventV2): boolean =>
+      canonicalDelivery && canonicalize(expected) === canonicalize(payload);
+    const persisted = pendingChatFeedback.get(payload.eventId);
+    const feedbackReceipt = update.info !== undefined ||
+      update.href !== undefined ||
+      update.summary !== undefined ||
+      update.notify !== undefined;
+    if (
+      feedbackReceipt &&
+      persisted !== undefined &&
+      matchesDelivery(persisted.payload)
+    ) {
+      pendingChatFeedback.acknowledge(payload.eventId);
+      forgetRuntimeFeedback(payload.eventId);
+    }
+    const acceptedFeedback = pendingAcceptedFeedback.get(payload.eventId);
+    if (acceptedFeedback !== undefined) {
+      pendingAcceptedFeedback.delete(payload.eventId);
+      let metadata: ReturnType<typeof challengeOpenedFeedback> | null = null;
+      const canonicalEcho = matchesDelivery(acceptedFeedback.payload);
+      if (
+        canonicalEcho &&
+        acceptedFeedback.kind === "challenge-created" &&
+        !beforeView.openChallenges.some((entry) =>
+          entry.challengeId === acceptedFeedback.payload.challengeId
+        ) &&
+        afterView.openChallenges.some((entry) =>
+          entry.challengeId === acceptedFeedback.payload.challengeId
+        )
+      ) {
+        metadata = challengeOpenedFeedback({
+          actorName: acceptedFeedback.payload.actor.displayName,
+          challengeId: acceptedFeedback.payload.challengeId,
+          activity: chatActivity(),
+        });
+      } else if (
+        canonicalEcho &&
+        acceptedFeedback.kind === "challenge-cancelled" &&
+        competition.isEventEffective(acceptedFeedback.payload.eventId)
+      ) {
+        metadata = challengeCancelledFeedback({
+          actorName: acceptedFeedback.payload.actor.displayName,
+          challengeId: acceptedFeedback.payload.challengeId,
+          activity: chatActivity(),
+        });
+      } else if (
+        canonicalEcho &&
+        acceptedFeedback.kind === "practice-record" &&
+        acceptedFeedback.payload.score > (beforeView.practice.record?.score ?? 0) &&
+        afterView.practice.record?.player.id === acceptedFeedback.payload.actor.id &&
+        afterView.practice.record.score === acceptedFeedback.payload.score
+      ) {
+        metadata = practiceRecordFeedback({
+          playerName: acceptedFeedback.payload.actor.displayName,
+          score: acceptedFeedback.payload.score,
+          previousChatRecord: beforeView.practice.record?.score ?? 0,
+          rulesHash: acceptedFeedback.payload.rulesHash,
+          activity: chatActivity(),
+        });
+      }
+      queueResolvedFeedback(acceptedFeedback.payload, metadata);
+    }
+    const pendingClaim = pendingJoinClaims.get(payload.eventId);
+    if (pendingClaim !== undefined) {
+      pendingJoinClaims.delete(payload.eventId);
+      const canonicalEcho = matchesDelivery(pendingClaim.payload);
+      const rejected = afterView.rejectedClaims.some(
+        (candidate) => candidate.claimEventId === pendingClaim.payload.eventId,
+      );
+      if (
+        canonicalEcho &&
+        afterView.activity.kind === "starting" &&
+        afterView.activity.pairingId === pendingClaim.payload.eventId
+      ) {
+        queueResolvedFeedback(
+          pendingClaim.payload,
+          challengeJoinedFeedback({
+            joinerName: selfActor.displayName,
+            creatorId: pendingClaim.creatorId,
+            challengeId: pendingClaim.payload.challengeId,
+            activity: chatActivity(),
+          }),
+        );
+      } else if (rejected || !canonicalEcho) {
+        queueResolvedFeedback(pendingClaim.payload, null);
+        shell.lobbyStatus.textContent = STRINGS["lobby.claimLost"];
+      }
+    }
+    const echoedFeedback = pendingMaterializedFeedback.get(payload.eventId);
+    if (echoedFeedback !== undefined) {
+      const canonicalEcho = matchesDelivery(echoedFeedback.payload);
+      echoedFeedback.echoed = true;
+      if (!canonicalEcho) {
+        pendingMaterializedFeedback.delete(payload.eventId);
+        queueResolvedFeedback(echoedFeedback.payload, null);
+        echoedFeedback.onSettled?.();
+      }
+    }
+    for (const [eventId, feedback] of pendingMaterializedFeedback) {
+      if (!feedback.echoed) continue;
+      const status = competition.eventStatus(eventId);
+      if (status === "effective") {
+        pendingMaterializedFeedback.delete(eventId);
+        const metadata = feedback.metadata(afterView);
+        queueResolvedFeedback(feedback.payload, metadata);
+        feedback.onSettled?.();
+      } else if (status === "rejected" || (!feedback.mayDefer && status !== "unknown")) {
+        pendingMaterializedFeedback.delete(eventId);
+        queueResolvedFeedback(feedback.payload, null);
+        feedback.onSettled?.();
+      }
+    }
+    for (const [matchId, fallbackTimer] of neutralFinishFallbackTimers) {
+      if (afterView.recentResults.some((result) => result.matchId === matchId)) {
+        window.clearTimeout(fallbackTimer);
+        neutralFinishFallbackTimers.delete(matchId);
+      }
+    }
+    renderCompetitionState();
+    reconcileLobby();
   };
 
   shell.practiceButton.addEventListener("click", startPractice);
+  shell.lobbyButton.addEventListener("click", showLobby);
+  shell.viewLobbyButton.addEventListener("click", showLobby);
+  shell.lobbyBackButton.addEventListener("click", showHome);
+  shell.retryConnectionButton.addEventListener("click", () => {
+    retryRuntimeClaimsImmediately();
+    reconcileLobby();
+  });
+  shell.endInterruptedMatchButton.addEventListener("click", () => {
+    const recovery = passiveLiveRecovery;
+    if (recovery !== null && passiveRecoveryStatus(recovery).kind === "expired") {
+      publishPassiveConnectionLoss(recovery);
+      shell.endInterruptedMatchButton.disabled = recovery.finishQueued;
+    }
+  });
+  shell.exitSetupButton.addEventListener("click", () => {
+    const pairing = competition.view(selfActor.id).startingPairings.find(
+      (candidate) =>
+        candidate.seatA.id === selfActor.id || candidate.seatB.id === selfActor.id,
+    );
+    if (pairing !== undefined) leaveStartingPairing(pairing.pairingId);
+  });
   shell.helpButton.addEventListener("click", () => showHelp(shell, "how"));
   shell.controlsHelpButton.addEventListener("click", () => showHelp(shell, "controls"));
-  shell.helpBack.addEventListener("click", () => shell.show("lobby"));
+  shell.helpBack.addEventListener("click", () => shell.show("home"));
   shell.settingsButton.addEventListener("click", () => shell.show("settings"));
   shell.diagnosticsCopyButton.addEventListener("click", () => {
     const copy = async (): Promise<boolean> => {
@@ -1638,7 +2816,7 @@ export async function bootstrap(): Promise<void> {
     };
     savePreferences(storage, preferences);
     applyPreferences();
-    shell.show("lobby");
+    shell.show("home");
   });
   for (const input of Object.values(shell.settingsInputs)) {
     input.addEventListener("change", () => {
@@ -1647,40 +2825,261 @@ export async function bootstrap(): Promise<void> {
     });
   }
 
-  shell.createButton.addEventListener("click", () => {
-    const challengeId = createRuntimeId();
-    const createdId = eventId("challenge-created");
-    shell.lobbyStatus.textContent = STRINGS["lobby.challengeCreated"];
-    void appendDurable({
-      schema: "split-stack/lobby/v1",
-      kind: "challenge-created",
-      eventId: createdId,
-      logicalClock: lamport.next(),
-      challengeId,
-      actor: selfActor,
-      seatBVacancyId: `${createdId}:vacancy-b`,
-      rulesHash: RULES_HASH,
-    });
-  });
-
-  shell.joinButton.addEventListener("click", () => {
-    const challenge = allChallenges().find(
-      (candidate) => !candidate.closed && candidate.seatB === null && candidate.seatA.playerId !== selfActor.id,
+  const createChallenge = (): void => {
+    const before = competition.view(selfActor.id);
+    const creationPending = [...pendingAcceptedFeedback.values()].some(
+      (entry) => entry.kind === "challenge-created",
     );
-    if (challenge === undefined) {
+    if (
+      !realtimeAvailable ||
+      before.activity.kind !== "idle" ||
+      creationPending ||
+      pendingJoinClaims.size > 0
+    ) {
+      return;
+    }
+    const challengeId = createRuntimeId();
+    const base = eventBase("challenge-created");
+    const created: Extract<CompetitionEventV2, { kind: "challenge-created" }> = {
+      ...base,
+      kind: "challenge-created",
+      challengeId,
+      rulesHash: RULES_HASH,
+      vacancyId: `${base.eventId}:vacancy`,
+    };
+    shell.lobbyStatus.textContent = STRINGS["lobby.challengeCreated"];
+    rememberFeedbackIntent(created, { kind: "challenge-created" });
+    pendingAcceptedFeedback.set(created.eventId, {
+      kind: "challenge-created",
+      payload: created,
+    });
+    appendCompetition(created);
+  };
+
+  const cancelOwnedChallenge = (): void => {
+    const before = competition.view(selfActor.id);
+    const cancellationPending = [...pendingAcceptedFeedback.values()].some(
+      (entry) => entry.kind === "challenge-cancelled",
+    );
+    if (before.activity.kind !== "waiting" || cancellationPending) return;
+    const ownedChallengeId = before.activity.challengeId;
+    const challenge = before.openChallenges.find(
+      (candidate) => candidate.challengeId === ownedChallengeId,
+    );
+    if (challenge === undefined) return;
+    const cancelled: Extract<CompetitionEventV2, { kind: "challenge-cancelled" }> = {
+      ...eventBase("challenge-cancelled"),
+      kind: "challenge-cancelled",
+      challengeId: challenge.challengeId,
+    };
+    rememberFeedbackIntent(cancelled, { kind: "challenge-cancelled" });
+    pendingAcceptedFeedback.set(cancelled.eventId, {
+      kind: "challenge-cancelled",
+      payload: cancelled,
+    });
+    appendCompetition(cancelled);
+  };
+
+  const joinChallenge = (challengeId: string): void => {
+    const before = competition.view(selfActor.id);
+    const creationPending = [...pendingAcceptedFeedback.values()].some(
+      (entry) => entry.kind === "challenge-created",
+    );
+    if (
+      !realtimeAvailable ||
+      before.activity.kind !== "idle" ||
+      pendingJoinClaims.size > 0 ||
+      creationPending
+    ) {
+      return;
+    }
+    const challenge = before.openChallenges.find(
+      (candidate) => candidate.challengeId === challengeId,
+    );
+    if (challenge === undefined || challenge.creator.id === selfActor.id) {
       shell.lobbyStatus.textContent = STRINGS["lobby.noOpenChallenge"];
       return;
     }
-    shell.lobbyStatus.textContent = STRINGS["lobby.challengeJoined"];
-    void appendDurable({
-      schema: "split-stack/lobby/v1",
-      kind: "seat-claimed",
-      eventId: eventId("seat-claimed"),
-      logicalClock: lamport.next(),
+    const claimed: CompetitionEventV2 = {
+      ...eventBase("challenge-claimed"),
+      kind: "challenge-claimed",
       challengeId: challenge.challengeId,
-      actor: selfActor,
-      vacancyId: challenge.currentSeatBVacancyId,
+      vacancyId: challenge.vacancyId,
+    };
+    rememberFeedbackIntent(claimed, {
+      kind: "challenge-joined",
+      creatorId: challenge.creator.id,
     });
+    pendingJoinClaims.set(claimed.eventId, {
+      payload: claimed,
+      creatorId: challenge.creator.id,
+    });
+    shell.lobbyStatus.textContent = STRINGS["lobby.challengeJoined"];
+    appendCompetition(claimed);
+  };
+
+  function leaveStartingPairing(pairingId: string): void {
+    if (pendingPairingExitEventId !== null) return;
+    pendingPairingExitId = pairingId;
+    const before = competition.view(selfActor.id);
+    const pairing = before.startingPairings.find(
+      (candidate) => candidate.pairingId === pairingId &&
+        (candidate.seatA.id === selfActor.id || candidate.seatB.id === selfActor.id),
+    );
+    if (pairing === undefined) {
+      pendingPairingExitId = null;
+      return;
+    }
+    if (pairing.runtimeSessionByPlayer[selfActor.id] !== runtimeId) {
+      return;
+    }
+    const left: Extract<CompetitionEventV2, { kind: "pairing-left" }> = {
+      ...eventBase("pairing-left"),
+      kind: "pairing-left",
+      pairingId: pairing.pairingId,
+      runtimeSessionId: runtimeId,
+    };
+    pendingPairingExitEventId = left.eventId;
+    appendAfterMaterialization(
+      left,
+      {
+        kind: "pairing-left",
+        source: pairing.source,
+        seatALeft: pairing.seatA.id === selfActor.id,
+        challengeId: pairing.seriesId,
+        actorName: selfActor.displayName,
+      },
+      () => pairing.source !== "challenge"
+        ? null
+        : pairing.seatA.id === selfActor.id
+          ? challengeCancelledFeedback({
+              actorName: selfActor.displayName,
+              challengeId: pairing.seriesId,
+              activity: chatActivity(),
+            })
+          : { summary: tournamentSummary(chatActivity()) },
+      {
+        onSettled: () => {
+          if (pendingPairingExitEventId === left.eventId) {
+            pendingPairingExitEventId = null;
+            pendingPairingExitId = null;
+          }
+        },
+      },
+    );
+  }
+
+  const acceptPendingRematch = (afterMatchId: string): void => {
+    const view = competition.view(selfActor.id);
+    if (view.activity.kind !== "idle") return;
+    const pending = view.pendingRematches.find((candidate) =>
+      candidate.afterMatchId === afterMatchId &&
+      !candidate.requestedByPlayerIds.includes(selfActor.id) &&
+      (candidate.seatA.id === selfActor.id || candidate.seatB.id === selfActor.id)
+    );
+    if (pending === undefined) return;
+    const opponent = pending.seatA.id === selfActor.id ? pending.seatB : pending.seatA;
+    const requestedEventId = pending.requestEventIdByPlayer[opponent.id];
+    if (requestedEventId === undefined) return;
+    appendCompetition({
+      ...eventBase("rematch-accepted"),
+      kind: "rematch-accepted",
+      seriesId: pending.seriesId,
+      afterMatchId: pending.afterMatchId,
+      round: pending.round,
+      requestedEventId,
+    });
+    shell.setRematchAction("pending");
+  };
+
+  const watchMatch = (matchId: string): void => {
+    const view = competition.view(selfActor.id);
+    if (view.activity.kind === "starting") return;
+    if (view.activity.kind === "live" && view.activity.matchId === matchId) return;
+    const match = view.liveMatches.find((candidate) => candidate.matchId === matchId);
+    if (match === undefined) return;
+    const next = activeMatchFrom(match, true);
+    if (next !== null) startActiveMatch(next);
+  };
+
+  renderCompetitionState = (): void => {
+    const view = competition.view(selfActor.id);
+    presentCompetition({
+      shell,
+      view,
+      self: selfActor,
+      realtimeAvailable,
+      isOnline: (actorId, challengeId) => presence.isOnline(actorId, challengeId),
+      onJoinChallenge: joinChallenge,
+      onWatchMatch: watchMatch,
+      onLeavePairing: leaveStartingPairing,
+      onAcceptRematch: acceptPendingRematch,
+    });
+    const localPracticeBest = Number.parseInt(
+      storage.getItem(PRACTICE_HIGH_SCORE_KEY) ?? "0",
+      10,
+    ) || 0;
+    shell.setPracticeRecords({
+      personalBest: Math.max(
+        localPracticeBest,
+        view.practice.personalBest?.score ?? 0,
+      ),
+      ...(view.practice.record === null
+        ? {}
+        : {
+            chatRecord: {
+              score: view.practice.record.score,
+              playerName: view.practice.record.player.displayName,
+            },
+          }),
+    });
+    if (!realtimeAvailable) {
+      shell.homeStatus.textContent = STRINGS["lobby.realtimeUnavailable"];
+    } else if (shell.homeStatus.textContent === STRINGS["lobby.waitingForOpponent"]) {
+      shell.homeStatus.textContent = "";
+    }
+    if (mode === "results") {
+      if (displayedResult !== null) {
+        displayedResult = view.recentResults.find(
+          (entry) => entry.matchId === displayedResult?.matchId,
+        ) ?? displayedResult;
+        renderCompetitiveResultSummary(displayedResult.result, displayedResult);
+      }
+      updateRematchAction();
+    }
+  };
+
+  const publishWaitingPresence = (): void => {
+    const view = competition.view(selfActor.id);
+    if (view.activity.kind !== "waiting") return;
+    const ownedChallengeId = view.activity.challengeId;
+    const challenge = view.openChallenges.find(
+      (candidate) => candidate.challengeId === ownedChallengeId,
+    );
+    const hub = ensureRealtimeHub();
+    if (challenge === undefined || hub === null) return;
+    const frame = {
+      schema: PRESENCE_SCHEMA_V2,
+      actor: { ...selfActor },
+      challengeId: challenge.challengeId,
+      runtimeId,
+    } as const;
+    try {
+      presence.observe(frame);
+      hub.send(encodePresenceFrame(frame));
+    } catch {
+      // Presence is advisory and never changes durable matchmaking authority.
+    }
+  };
+
+  shell.createButton.addEventListener("click", createChallenge);
+  shell.cancelChallengeButton.addEventListener("click", cancelOwnedChallenge);
+
+  shell.joinButton.addEventListener("click", () => {
+    const challenge = competition.view(selfActor.id).openChallenges.find(
+      (candidate) => candidate.creator.id !== selfActor.id,
+    );
+    if (challenge !== undefined) joinChallenge(challenge.challengeId);
   });
 
   shell.readyButton.addEventListener("click", () => {
@@ -1688,7 +3087,24 @@ export async function bootstrap(): Promise<void> {
     if (session === null) return;
     session.setReady(true);
     const view = session.view();
-    shell.setReadiness(view.localReady, view.peerReady);
+    if (activeMatch !== null) {
+      appendCompetition({
+        ...eventBase("ready-changed"),
+        kind: "ready-changed",
+        pairingId: activeMatch.pairingId,
+        runtimeSessionId: runtimeId,
+        ready: true,
+      });
+      const seatB = activeMatch.challenge.seatB;
+      shell.setReadiness(view.localReady, view.peerReady, {
+        localName: activeMatch.role === "a"
+          ? activeMatch.challenge.seatA.displayName
+          : seatB?.displayName ?? selfActor.displayName,
+        opponentName: activeMatch.role === "a"
+          ? seatB?.displayName ?? STRINGS["common.playerFallback"]
+          : activeMatch.challenge.seatA.displayName,
+      });
+    }
   });
 
   shell.cancelReadyButton.addEventListener("click", () => {
@@ -1696,7 +3112,24 @@ export async function bootstrap(): Promise<void> {
     if (session === null) return;
     session.setReady(false);
     const view = session.view();
-    shell.setReadiness(view.localReady, view.peerReady);
+    if (activeMatch !== null) {
+      appendCompetition({
+        ...eventBase("ready-changed"),
+        kind: "ready-changed",
+        pairingId: activeMatch.pairingId,
+        runtimeSessionId: runtimeId,
+        ready: false,
+      });
+      const seatB = activeMatch.challenge.seatB;
+      shell.setReadiness(view.localReady, view.peerReady, {
+        localName: activeMatch.role === "a"
+          ? activeMatch.challenge.seatA.displayName
+          : seatB?.displayName ?? selfActor.displayName,
+        opponentName: activeMatch.role === "a"
+          ? seatB?.displayName ?? STRINGS["common.playerFallback"]
+          : activeMatch.challenge.seatA.displayName,
+      });
+    }
   });
 
   const setPracticePaused = (paused: boolean): void => {
@@ -1708,6 +3141,15 @@ export async function bootstrap(): Promise<void> {
     setInputsEnabled(!paused);
   };
 
+  const setPracticePauseReason = (
+    reason: "menu" | "visibility" | "webgl" | "pairing",
+    active: boolean,
+  ): void => {
+    if (active) practicePauseReasons.add(reason);
+    else practicePauseReasons.delete(reason);
+    setPracticePaused(practicePauseReasons.size > 0);
+  };
+
   const openMatchMenu = (): void => {
     if (matchMenuOpen || (mode !== "practice" && mode !== "competitive" && mode !== "spectator")) {
       return;
@@ -1715,7 +3157,7 @@ export async function bootstrap(): Promise<void> {
     matchMenuOpen = true;
     hidePowerTip();
     if (mode === "practice") {
-      setPracticePaused(true);
+      setPracticePauseReason("menu", true);
       shell.overlay.hidden = true;
     } else if (mode === "competitive") {
       lastCompetitiveInputsEnabled = false;
@@ -1737,7 +3179,7 @@ export async function bootstrap(): Promise<void> {
       false,
     );
     if (closingMode === "practice") {
-      setPracticePaused(false);
+      setPracticePauseReason("menu", false);
     } else if (closingMode === "competitive") {
       lastCompetitiveInputsEnabled = null;
       const view = competitive?.view();
@@ -1777,59 +3219,96 @@ export async function bootstrap(): Promise<void> {
     shell.rematchButton.disabled = true;
     const match = activeMatch;
     const session = mode === "competitive" ? competitive : null;
-    if (session !== null) {
+    const phase = session?.view().phase;
+    const started = phase === "countdown" ||
+      phase === "playing" ||
+      phase === "network-pause" ||
+      phase === "finished" ||
+      match?.startedEventId !== undefined;
+    if (session !== null && started) {
       try {
         await settleExplicitForfeit(session);
       } catch {
         // The canonical durable fallback was queued in settleExplicitForfeit.
       }
     }
-    if (match !== null && match.role !== "spectator") {
-      const occupant = match.role === "a" ? match.challenge.seatA : match.challenge.seatB;
-      if (match.role === "a") {
-        void appendDurable({
-          schema: "split-stack/lobby/v1",
-          kind: "challenge-closed",
-          eventId: eventId("challenge-closed"),
-          logicalClock: lamport.next(),
-          challengeId: match.challenge.challengeId,
-          actor: selfActor,
-        });
-      } else if (occupant !== null) {
-        void appendDurable({
-          schema: "split-stack/lobby/v1",
-          kind: "seat-released",
-          eventId: eventId("seat-released"),
-          logicalClock: lamport.next(),
-          challengeId: match.challenge.challengeId,
-          actor: selfActor,
-          occupancyEventId: occupant.occupancyEventId,
-          nextVacancyId: `${runtimeId}:${lamport.next()}:vacancy-b`,
-        });
-      }
+    if (match !== null && match.role !== "spectator" && !started) {
+      leaveStartingPairing(match.pairingId);
     }
-    showLobby();
+    showHome();
     shell.leaveMatchButton.disabled = false;
     shell.resultsLeaveButton.disabled = false;
     shell.rematchButton.disabled = false;
     leaveInProgress = false;
   };
   shell.leaveMatchButton.addEventListener("click", () => void leaveChallenge());
-  shell.resultsLeaveButton.addEventListener("click", () => void leaveChallenge());
-  shell.rematchButton.addEventListener("click", () => {
-    if (activeMatch === null) {
-      startPractice();
+  shell.leavePairingButton.addEventListener("click", () => void leaveChallenge());
+  shell.resultsHomeButton.addEventListener("click", showHome);
+
+  const requestRematch = (): void => {
+    const resultView = displayedResult;
+    if (resultView === null) return;
+    const requestPending = [...pendingMaterializedFeedback.values()].some(
+      (entry) => entry.payload.kind === "rematch-requested" &&
+        entry.payload.afterMatchId === resultView.matchId,
+    );
+    if (requestPending) return;
+    const view = competition.view(selfActor.id);
+    if (view.activity.kind !== "idle") return;
+    const playerIds = resultView.result.players.map((player) => player.id);
+    if (!playerIds.includes(selfActor.id)) return;
+    const opponent = resultView.result.players.find((player) => player.id !== selfActor.id);
+    if (opponent === undefined) return;
+    const pending = rematchForResult(resultView, view);
+    if (pending !== undefined && !pending.requestedByPlayerIds.includes(selfActor.id)) {
+      acceptPendingRematch(resultView.matchId);
       return;
     }
-    const nextRound = activeMatch.round + 1;
-    void appendDurable({
-      schema: "split-stack/rematch/v1",
-      eventId: eventId("rematch"),
-      logicalClock: lamport.next(),
-      challengeId: activeMatch.challenge.challengeId,
-      round: nextRound,
-      actor: selfActor,
-    });
+    const requested: Extract<CompetitionEventV2, { kind: "rematch-requested" }> = {
+      ...eventBase("rematch-requested"),
+      kind: "rematch-requested",
+      seriesId: resultView.seriesId,
+      afterMatchId: resultView.matchId,
+      round: resultView.round + 1,
+    };
+    appendAfterMaterialization(
+      requested,
+      {
+        kind: "rematch-requested",
+        opponentId: opponent.id,
+      },
+      () => rematchRequestedFeedback({
+        requesterName: selfActor.displayName,
+        opponentId: opponent.id,
+        matchId: resultView.matchId,
+        activity: chatActivity(),
+      }),
+    );
+    shell.setRematchAction("pending");
+  };
+  shell.requestRematchButton.addEventListener("click", requestRematch);
+  shell.newChallengeButton.addEventListener("click", () => {
+    if (competition.view(selfActor.id).activity.kind !== "idle") return;
+    createChallenge();
+    showHome();
+  });
+  shell.practiceAgainButton.addEventListener("click", startPractice);
+  shell.practiceCreateChallengeButton.addEventListener("click", () => {
+    createChallenge();
+    showHome();
+  });
+  shell.practiceHomeButton.addEventListener("click", showHome);
+
+  const cancelInterruptedPairing = (): void => {
+    if (interruptedPairing === null) return;
+    leaveStartingPairing(interruptedPairing.pairingId);
+  };
+  shell.cancelPairingButton.addEventListener("click", cancelInterruptedPairing);
+  shell.goToMatchButton.addEventListener("click", () => {
+    const pairing = interruptedPairing;
+    if (pairing === null) return;
+    showLobby();
+    reconcileLobby();
   });
 
   document.addEventListener("visibilitychange", () => {
@@ -1837,12 +3316,39 @@ export async function bootstrap(): Promise<void> {
     if (hidden) {
       audio.pauseMusic();
       renderer?.noteSuspension();
+      if (passiveLiveRecovery !== null) {
+        if (passiveLiveRecovery.tickTimer !== null) {
+          window.clearTimeout(passiveLiveRecovery.tickTimer);
+          passiveLiveRecovery.tickTimer = null;
+        }
+      }
+    } else {
+      retryRuntimeClaimsImmediately();
+      const recovery = passiveLiveRecovery;
+      if (recovery !== null) {
+        const watchedMatch = mode === "spectator" && activeMatch?.role === "spectator"
+          ? activeMatch
+          : null;
+        spectator?.channel.leave?.();
+        spectator = null;
+        realtimeHub?.close();
+        realtimeHub = null;
+        ensureRealtimeHub();
+        if (watchedMatch !== null) spectator = spectatorRuntime(watchedMatch);
+        recovery.observedAtMs = performance.now();
+        recovery.seatASeenAtMs = null;
+        recovery.seatBSeenAtMs = null;
+        recovery.hubRetryAttempts = 0;
+        refreshPassiveLiveRecovery();
+      }
     }
     if (mode === "practice" && practice !== null) {
       if (hidden) {
-        setPracticePaused(true);
+        setPracticePauseReason("visibility", true);
         matchMenuOpen = true;
         setMatchMenu(shell, "practice", true);
+      } else {
+        setPracticePauseReason("visibility", false);
       }
     } else if (mode === "competitive") {
       if (hidden) competitive?.setHidden(true);
@@ -1858,6 +3364,7 @@ export async function bootstrap(): Promise<void> {
       audio.resumeMusic();
     }
   });
+  window.addEventListener("pagehide", stopAllRuntimeClaimRetries);
   window.addEventListener("keydown", (event) => {
     if (
       (mode === "practice" || mode === "competitive" || mode === "spectator") &&
@@ -1967,29 +3474,6 @@ export async function bootstrap(): Promise<void> {
       }
       lastScrambleActive = scrambled;
       if (view.result !== undefined) showResult(view.result, selfActor.id);
-      if (
-        activeMatch.role === "a" &&
-        view.configHash !== undefined &&
-        view.seed !== undefined &&
-        announcedConfigHash !== view.configHash
-      ) {
-        announcedConfigHash = view.configHash;
-        void appendDurable({
-          schema: "split-stack/match-announcement/v1",
-          eventId: eventId("match-announcement"),
-          logicalClock: lamport.next(),
-          challengeId: activeMatch.challenge.challengeId,
-          matchId: activeMatch.matchId,
-          round: activeMatch.round,
-          rulesHash: RULES_HASH,
-          configHash: view.configHash,
-          seed: view.seed,
-          seedHash: hashCanonicalHex({ seed: view.seed }),
-          seatAPlayerId: activeMatch.challenge.seatA.playerId,
-          seatBPlayerId: activeMatch.challenge.seatB?.playerId ?? "",
-          actor: selfActor,
-        });
-      }
     } else if (mode === "spectator" && spectator !== null && activeMatch !== null) {
       stopGlitchPreview();
       const seatB = activeMatch.challenge.seatB;
@@ -2099,14 +3583,129 @@ export async function bootstrap(): Promise<void> {
       ? STRINGS["match.unsupportedWebgl"]
       : "";
   shell.matchMenuButton.hidden = true;
-  shell.show("lobby");
-  renderHistory();
+  shell.show("home");
+  renderCompetitionState();
   setInputsEnabled(false);
   window.requestAnimationFrame(renderFrame);
+  window.setInterval(() => {
+    publishWaitingPresence();
+    renderCompetitionState();
+  }, PRESENCE_HEARTBEAT_MS);
 
   if (durable !== null) {
-    await durable.start((update) => receiveDurable(update.payload, update.serial), 0);
+    for (const entry of pendingChatFeedback.entries()) {
+      installPersistedFeedback(entry);
+    }
+    await durable.start(receiveDurable, 0);
     durableReplayReady = true;
+    for (const entry of pendingChatFeedback.entries()) {
+      if (entry.resolved && entry.metadata !== undefined) {
+        enqueueDurable(projectChatUpdate(entry.payload, entry.metadata));
+        continue;
+      }
+      const status = competition.eventStatus(entry.payload.eventId);
+      if (status === "unknown") {
+        appendCompetition(entry.payload);
+      } else if (status === "rejected") {
+        pendingChatFeedback.acknowledge(entry.payload.eventId);
+        forgetRuntimeFeedback(entry.payload.eventId);
+      }
+    }
+    renderCompetitionState();
+    const viewBeforeRouting = competition.view(selfActor.id);
+    const ownedStartingRoutePriority = viewBeforeRouting.activity.kind === "starting";
     reconcileLobby();
+    publishWaitingPresence();
+
+    const routeHash = window.location.hash;
+    const recognizedRoute = isRecognizedAppRouteHash(routeHash);
+    if (recognizedRoute) {
+      window.history.replaceState(
+        null,
+        "",
+        `${window.location.pathname}${window.location.search}`,
+      );
+    }
+
+    if (recognizedRoute && !ownedStartingRoutePriority) {
+      const view = competition.view(selfActor.id);
+      const syntacticRoute = parseAppRoute(routeHash);
+      const route = parseAppRoute(routeHash, {
+        challengeExists: (challengeId) => view.openChallenges.some(
+          (challenge) => challenge.challengeId === challengeId,
+        ),
+        liveMatchExists: (matchId) => view.liveMatches.some(
+          (match) => match.matchId === matchId,
+        ),
+        resultExists: (matchId) => view.recentResults.some(
+          (result) => result.matchId === matchId,
+        ),
+        rulesHashIsCurrent: (rulesHash) => rulesHash === RULES_HASH,
+      });
+      const sameRoute = (() => {
+        if (syntacticRoute.screen !== route.screen) return false;
+        if (syntacticRoute.screen === "lobby" && route.screen === "lobby") {
+          return syntacticRoute.challengeId === route.challengeId;
+        }
+        if (syntacticRoute.screen === "match" && route.screen === "match") {
+          return syntacticRoute.matchId === route.matchId;
+        }
+        if (syntacticRoute.screen === "result" && route.screen === "result") {
+          return syntacticRoute.matchId === route.matchId;
+        }
+        if (
+          syntacticRoute.screen === "practice-leaderboard" &&
+          route.screen === "practice-leaderboard"
+        ) {
+          return syntacticRoute.rulesHash === route.rulesHash;
+        }
+        return true;
+      })();
+      const fragment = routeHash.startsWith("#") ? routeHash.slice(1) : routeHash;
+      const syntacticTarget = syntacticRoute.screen === "match" ||
+        syntacticRoute.screen === "result" ||
+        syntacticRoute.screen === "practice-leaderboard" ||
+        (syntacticRoute.screen === "lobby" && syntacticRoute.challengeId !== undefined);
+      const malformedRecognizedRoute = fragment !== "home" &&
+        fragment !== "lobby" &&
+        !syntacticTarget;
+      const staleRoute = malformedRecognizedRoute || !sameRoute;
+
+      if (staleRoute) {
+        showLobby();
+        shell.lobbyStatus.textContent = STRINGS["lobby.staleLink"];
+        window.setTimeout(() => {
+          if (shell.lobbyStatus.textContent !== STRINGS["lobby.staleLink"]) return;
+          shell.lobbyStatus.textContent = "";
+          renderCompetitionState();
+        }, STALE_ROUTE_NOTICE_MS);
+      } else if (route.screen === "home") {
+        showHome();
+      } else if (route.screen === "lobby" || route.screen === "practice-leaderboard") {
+        showLobby();
+        if (route.screen === "lobby" && route.challengeId !== undefined) {
+          const target = [...shell.openChallenges.querySelectorAll<HTMLElement>(
+            "[data-challenge-id]",
+          )].find((candidate) => candidate.dataset.challengeId === route.challengeId);
+          target?.scrollIntoView({ block: "nearest" });
+        }
+      } else if (route.screen === "match") {
+        if (view.activity.kind === "live" && view.activity.matchId === route.matchId) {
+          showHome();
+        } else {
+          watchMatch(route.matchId);
+        }
+      } else if (route.screen === "result") {
+        const entry = view.recentResults.find((result) => result.matchId === route.matchId);
+        if (entry !== undefined) {
+          const localPlayerId = entry.result.players.some(
+            (player) => player.id === selfActor.id,
+          )
+            ? selfActor.id
+            : null;
+          showResult(entry.result, localPlayerId, entry);
+        }
+      }
+    }
   }
 }

@@ -289,6 +289,12 @@ describe("realtime envelope codec", () => {
     expect(
       decodeEnvelope(new TextEncoder().encode(JSON.stringify(tooDeep))),
     ).toMatchObject({ ok: false, error: "too-deep" });
+    tooDeep.matchId = "another-match";
+    expect(
+      decodeEnvelope(new TextEncoder().encode(JSON.stringify(tooDeep)), {
+        expectedMatchId: "match-1",
+      }),
+    ).toMatchObject({ ok: false, error: "foreign-match" });
 
     expect(decodeEnvelope(new Uint8Array(128_001))).toMatchObject({
       ok: false,

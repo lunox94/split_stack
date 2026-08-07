@@ -29,6 +29,8 @@ function createPair(overrides: {
   onASimulationEffects?: (effects: readonly SimulationEffect[]) => void;
   onAResultConfirmed?: (result: MatchResultV1) => void;
   onBResultConfirmed?: (result: MatchResultV1) => void;
+  onAStartCommitted?: () => void;
+  onBStartCommitted?: () => void;
   onADesynchronization?: (reason: string) => void;
   onATransportRecoveryNeeded?: () => boolean | void;
   onBTransportRecoveryNeeded?: () => boolean | void;
@@ -70,6 +72,9 @@ function createPair(overrides: {
     ...(overrides.onAResultConfirmed === undefined
       ? {}
       : { onResultConfirmed: overrides.onAResultConfirmed }),
+    ...(overrides.onAStartCommitted === undefined
+      ? {}
+      : { onStartCommitted: overrides.onAStartCommitted }),
     ...(overrides.onADesynchronization === undefined
       ? {}
       : { onDesynchronization: overrides.onADesynchronization }),
@@ -93,6 +98,9 @@ function createPair(overrides: {
     ...(overrides.onBResultConfirmed === undefined
       ? {}
       : { onResultConfirmed: overrides.onBResultConfirmed }),
+    ...(overrides.onBStartCommitted === undefined
+      ? {}
+      : { onStartCommitted: overrides.onBStartCommitted }),
     ...(overrides.onBTransportRecoveryNeeded === undefined
       ? {}
       : { onTransportRecoveryNeeded: overrides.onBTransportRecoveryNeeded }),
@@ -227,6 +235,19 @@ describe("CompetitiveSession", () => {
 
     expect(pair.a.view().phase).toBe("countdown");
     expect(pair.b.view().phase).toBe("countdown");
+  });
+
+  it("announces the initial synchronized start commit exactly once per player", () => {
+    const onAStartCommitted = vi.fn();
+    const onBStartCommitted = vi.fn();
+    const pair = createPair({ onAStartCommitted, onBStartCommitted });
+
+    ready(pair);
+    pair.a.pump();
+    pair.b.pump();
+
+    expect(onAStartCommitted).toHaveBeenCalledTimes(1);
+    expect(onBStartCommitted).toHaveBeenCalledTimes(1);
   });
 
   it("returns to the lobby after a pre-match visibility interruption and can still ready", () => {

@@ -2,6 +2,10 @@ export interface DurableReceivedUpdate<T = unknown> {
   payload: T;
   serial: number;
   max_serial: number;
+  info?: string;
+  href?: string;
+  summary?: string;
+  notify?: Record<string, string>;
 }
 
 export interface DurableOutboundUpdate<T> {

@@ -22,6 +22,277 @@ import {
 } from "../../src/ui/shell";
 
 describe("application shell", () => {
+  it("separates the fast Home actions from the sectioned Lobby", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+
+    expect(shell.home).not.toBe(shell.lobby);
+    expect(shell.home.hidden).toBe(false);
+    expect(shell.lobby.hidden).toBe(true);
+    expect(shell.home.querySelector(".brand-title")?.textContent).toBe("Split Stack");
+    expect(shell.createButton.textContent).toBe("Create challenge");
+    expect(shell.practiceButton.textContent).toBe("Practice");
+    expect(shell.lobbyButton.textContent).toContain("Lobby");
+    expect(shell.home.contains(shell.joinButton)).toBe(false);
+    expect([...shell.lobbyButton.parentElement!.children]).toEqual([
+      shell.createButton.closest(".home-challenge-action"),
+      shell.lobbyButton,
+      shell.practiceButton,
+    ]);
+
+    shell.show("lobby");
+
+    expect(shell.home.hidden).toBe(true);
+    expect(shell.lobby.hidden).toBe(false);
+    expect(shell.lobby.querySelector("h2")?.textContent).toBe("Lobby");
+    expect(shell.lobbyBackButton.textContent).toBe("Home");
+    expect(shell.yourActivity.closest("section")?.querySelector("h3")?.textContent)
+      .toBe("Your activity");
+    expect(shell.openChallenges.closest("section")?.querySelector("h3")?.textContent)
+      .toBe("Open challenges");
+    expect(shell.startingSoon.closest("section")?.querySelector("h3")?.textContent)
+      .toBe("Starting soon");
+    expect(shell.liveGames.closest("section")?.querySelector("h3")?.textContent)
+      .toBe("Live games");
+    expect(shell.history.closest("section")?.querySelector("h3")?.textContent)
+      .toBe("Recent results");
+    expect(shell.standings.closest("section")?.querySelector("h3")?.textContent)
+      .toBe("Standings");
+    expect(shell.practiceLeaderboard.closest("section")?.querySelector("h3")?.textContent)
+      .toBe("Practice leaderboard");
+    for (const body of [
+      shell.yourActivity,
+      shell.openChallenges,
+      shell.startingSoon,
+      shell.liveGames,
+      shell.history,
+      shell.standings,
+      shell.practiceLeaderboard,
+    ]) {
+      const region = body.closest("section");
+      expect(region?.getAttribute("aria-labelledby"))
+        .toBe(region?.querySelector("h3")?.id);
+      expect(body.querySelector('[data-empty-state="true"]')).not.toBeNull();
+    }
+    expect(shell.openChallenges.textContent).toContain("No one is waiting");
+    expect(shell.liveGames.textContent).toContain("No games are live");
+    expect(shell.standings.textContent).toContain("No competitive standings");
+  });
+
+  it("consolidates waiting actions without duplicating Lobby or status copy", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+
+    expect(shell.createButton.hidden).toBe(false);
+    expect(shell.homeWaiting.hidden).toBe(true);
+
+    shell.setHomeChallengeWaiting(true);
+    shell.setLobbyActivityCounts(2, 3);
+    shell.setPracticeRecords({
+      personalBest: 82_400,
+      chatRecord: { score: 103_750, playerName: "Marta" },
+    });
+
+    expect(shell.createButton.hidden).toBe(true);
+    expect(shell.homeWaiting.hidden).toBe(false);
+    expect(shell.homeWaiting.querySelector('[role="status"]')?.getAttribute("aria-live"))
+      .toBe("polite");
+    expect(
+      [...shell.home.querySelectorAll("[role=status]")]
+        .filter((status) => status.textContent?.includes("Waiting for an opponent")),
+    ).toHaveLength(1);
+    expect(shell.cancelChallengeButton.textContent).toBe("Cancel challenge");
+    expect(shell.cancelChallengeButton.classList).toContain("destructive");
+    expect(shell.viewLobbyButton.textContent).toContain("Lobby");
+    expect(shell.viewLobbyButton.textContent).toContain("2 waiting · 3 live");
+    expect(shell.lobbyButton.hidden).toBe(true);
+    const visibleLobbyActions = [...shell.home.querySelectorAll("button")].filter(
+      (action) =>
+        action.textContent?.includes("Lobby") &&
+        !action.hidden &&
+        action.closest("[hidden]") === null,
+    );
+    expect(visibleLobbyActions).toEqual([shell.viewLobbyButton]);
+    expect(shell.practiceButton.hidden).toBe(false);
+    expect(shell.homeWaiting.contains(shell.practiceButton)).toBe(false);
+    expect(
+      shell.homeWaiting.compareDocumentPosition(shell.practiceButton) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+    expect(shell.personalPracticeRecord.closest("section")?.getAttribute("aria-label"))
+      .toBe("Practice records");
+    expect(shell.lobbyActivity.textContent).toBe("2 waiting · 3 live");
+    expect(shell.lobbySummary.textContent).toBe("2 waiting · 3 live");
+    expect(shell.lobbyButton.getAttribute("aria-label"))
+      .toBe("Lobby · 2 waiting · 3 live");
+    expect(shell.personalPracticeRecord.textContent).toBe("Your best: 82400");
+    expect(shell.chatPracticeRecord.textContent).toBe("Chat record: 103750 · Marta");
+
+    shell.setPracticeRecords({ personalBest: 82_400 });
+    shell.setHomeChallengeWaiting(false);
+
+    expect(shell.chatPracticeRecord.textContent).toBe("No Practice record yet");
+    expect(shell.createButton.hidden).toBe(false);
+    expect(shell.homeWaiting.hidden).toBe(true);
+    expect(shell.lobbyButton.hidden).toBe(false);
+  });
+
+  it("keeps live-controller and setup recovery actionable on Home", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+
+    expect(shell.homeRecovery.hidden).toBe(true);
+
+    shell.setHomeRecovery({ kind: "active-elsewhere" });
+    expect(shell.homeRecovery.hidden).toBe(false);
+    expect(shell.homeRecoveryMessage.textContent).toBe(
+      "Game active in another session",
+    );
+    expect(shell.retryConnectionButton.hidden).toBe(true);
+    expect(shell.exitSetupButton.hidden).toBe(true);
+
+    shell.setHomeRecovery({ kind: "interrupted", remainingSeconds: 42 });
+    expect(shell.homeRecoveryMessage.textContent).toBe(
+      "Game interrupted · waiting for reconnection (42s)",
+    );
+    expect(shell.exitSetupButton.hidden).toBe(true);
+    expect(shell.endInterruptedMatchButton.hidden).toBe(true);
+
+    shell.setHomeRecovery({ kind: "interrupted", remainingSeconds: 0 });
+    expect(shell.homeRecoveryMessage.textContent).toBe(
+      "Game interrupted · no controller reconnected",
+    );
+    expect(shell.endInterruptedMatchButton.hidden).toBe(false);
+    expect(shell.endInterruptedMatchButton.textContent).toBe("End interrupted match");
+    expect(shell.endInterruptedMatchButton.classList).toContain("destructive");
+    expect(shell.exitSetupButton.hidden).toBe(true);
+
+    shell.setHomeRecovery({ kind: "confirming", exit: "withdraw" });
+    expect(shell.homeRecoveryMessage.textContent).toBe(
+      "Still confirming the active game session…",
+    );
+    expect(shell.retryConnectionButton.hidden).toBe(false);
+    expect(shell.retryConnectionButton.textContent).toBe("Retry connection");
+    expect(shell.exitSetupButton.hidden).toBe(false);
+    expect(shell.exitSetupButton.textContent).toBe("Withdraw");
+
+    shell.setHomeRecovery({ kind: "confirming", exit: "cancel" });
+    expect(shell.exitSetupButton.textContent).toBe("Cancel pairing");
+
+    shell.setHomeRecovery(null);
+    expect(shell.homeRecovery.hidden).toBe(true);
+  });
+
+  it("uses a global actionable interruption for pairings and mutual rematches", () => {
+    const trigger = document.createElement("button");
+    const mount = document.createElement("div");
+    document.body.append(trigger, mount);
+    const shell = createAppShell(document, mount);
+    trigger.focus();
+
+    expect(shell.pairingInterruption.hidden).toBe(true);
+    expect(shell.pairingInterruption.getAttribute("role")).toBe("dialog");
+    expect(shell.pairingInterruption.getAttribute("aria-modal")).toBe("true");
+
+    shell.setPairingInterruption({ kind: "pairing", opponentName: "Alice" });
+
+    expect(shell.pairingInterruption.hidden).toBe(false);
+    expect(shell.pairingInterruption.dataset.kind).toBe("pairing");
+    expect(shell.pairingInterruptionHeading.textContent).toBe("Opponent found");
+    expect(shell.pairingInterruptionMessage.textContent).toBe(
+      "Alice joined your challenge.",
+    );
+    expect(shell.goToMatchButton.textContent).toBe("Go to match");
+    expect(shell.cancelPairingButton.textContent).toBe("Cancel pairing");
+    expect(document.activeElement).toBe(shell.goToMatchButton);
+
+    shell.cancelPairingButton.focus();
+    shell.cancelPairingButton.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Tab",
+      bubbles: true,
+      cancelable: true,
+    }));
+    expect(document.activeElement).toBe(shell.goToMatchButton);
+
+    shell.setPairingInterruption({ kind: "rematch", opponentName: "Bob" });
+
+    expect(shell.pairingInterruptionHeading.textContent).toBe("Rematch ready");
+    expect(shell.pairingInterruptionMessage.textContent).toBe(
+      "Bob accepted the rematch.",
+    );
+    expect(shell.cancelPairingButton.textContent).toBe("Cancel rematch");
+
+    shell.setPairingInterruption(null);
+
+    expect(shell.pairingInterruption.hidden).toBe(true);
+    expect(shell.pairingInterruption.dataset.kind).toBeUndefined();
+    expect(document.activeElement).toBe(trigger);
+
+    trigger.remove();
+    mount.remove();
+  });
+
+  it("provides independent competitive and Practice result actions", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+
+    expect(shell.rematchButton).toBe(shell.requestRematchButton);
+    expect(shell.resultsLeaveButton).toBe(shell.resultsHomeButton);
+    expect(shell.requestRematchButton.textContent).toBe("Request rematch");
+    expect(shell.newChallengeButton.textContent).toBe("New challenge");
+    expect(shell.resultsHomeButton.textContent).toBe("Home");
+    expect(shell.resultsCompetitiveActions.hidden).toBe(false);
+    expect(shell.resultsPracticeActions.hidden).toBe(true);
+    expect(shell.resultsCompetitiveActions.getAttribute("role")).toBe("group");
+    expect(shell.resultsCompetitiveActions.getAttribute("aria-label"))
+      .toBe("Competitive result actions");
+
+    shell.setCompetitiveResult({
+      round: 3,
+      scores: [
+        { playerName: "Marta", score: 48_200 },
+        { playerName: "Luis", score: 41_750 },
+      ],
+      seriesScore: "Marta leads 2–1",
+      headToHeadScore: "Marta leads 3–2",
+      notice: "Standings unchanged.",
+    });
+    shell.setRematchAction("accept");
+
+    expect(shell.resultsSummary.hidden).toBe(false);
+    expect(shell.resultsRound.textContent).toBe("Round 3");
+    expect(shell.resultsScoreboard.textContent).toContain("Marta: 48200");
+    expect(shell.resultsScoreboard.textContent).toContain("Luis: 41750");
+    expect(shell.resultsSeries.textContent).toBe("Series: Marta leads 2–1");
+    expect(shell.resultsHeadToHead.textContent).toBe(
+      "Head-to-head: Marta leads 3–2",
+    );
+    expect(shell.resultsNotice.textContent).toBe("Standings unchanged.");
+    expect(shell.requestRematchButton.textContent).toBe("Accept rematch");
+    expect(shell.requestRematchButton.disabled).toBe(false);
+
+    shell.setRematchAction("pending");
+    expect(shell.requestRematchButton.textContent).toBe("Rematch requested");
+    expect(shell.requestRematchButton.disabled).toBe(true);
+
+    shell.setResultsMode("practice");
+
+    expect(shell.results.dataset.resultsMode).toBe("practice");
+    expect(shell.resultsCompetitiveActions.hidden).toBe(true);
+    expect(shell.resultsPracticeActions.hidden).toBe(false);
+    expect(shell.resultsSummary.hidden).toBe(true);
+    expect(shell.practiceAgainButton.textContent).toBe("Practice again");
+    expect(shell.practiceCreateChallengeButton.textContent).toBe("Create challenge");
+    expect(shell.practiceHomeButton.textContent).toBe("Home");
+
+    shell.setResultsMode("competitive");
+
+    expect(shell.resultsCompetitiveActions.hidden).toBe(false);
+    expect(shell.resultsPracticeActions.hidden).toBe(true);
+    expect(shell.resultsSummary.hidden).toBe(false);
+
+    shell.setCompetitiveResult(null);
+    shell.setRematchAction("hidden");
+    expect(shell.resultsSummary.hidden).toBe(true);
+    expect(shell.requestRematchButton.hidden).toBe(true);
+  });
+
   it("builds a labeled board-attached HUD with a seven-segment inner power rail", () => {
     const shell = createAppShell(document, document.createElement("div"));
     const hud = shell.left.pane.querySelector<HTMLElement>(".player-hud");
@@ -317,6 +588,7 @@ describe("application shell", () => {
     expect(shell.localReadyStatus.textContent).toContain("Not ready");
     expect(shell.opponentReadyStatus.textContent).toContain("Not ready");
     expect(shell.cancelReadyButton.hidden).toBe(true);
+    expect(shell.leavePairingButton.textContent).toBe("Leave pairing");
 
     shell.setReadiness(true, false);
 
@@ -325,6 +597,20 @@ describe("application shell", () => {
     expect(shell.localReadyStatus.textContent).toContain("Ready");
     expect(shell.opponentReadyStatus.textContent).toContain("Not ready");
     expect(shell.cancelReadyButton.hidden).toBe(false);
+
+    shell.setReadiness(true, false, {
+      localName: "Alice",
+      opponentName: "Bob",
+    });
+    shell.setPairingExitMode("withdraw");
+
+    expect(shell.localReadyStatus.textContent).toBe("Alice (You) · Ready");
+    expect(shell.opponentReadyStatus.textContent).toBe("Bob · Not ready");
+    expect(shell.leavePairingButton.textContent).toBe("Withdraw");
+    expect(shell.leavePairingButton.dataset.exitMode).toBe("withdraw");
+
+    shell.setPairingExitMode("leave");
+    expect(shell.leavePairingButton.textContent).toBe("Leave pairing");
 
     shell.setOverlayMessage("Match starts in 3");
     expect(shell.readinessPanel.hidden).toBe(true);

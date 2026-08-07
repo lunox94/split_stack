@@ -395,6 +395,48 @@ export interface SettingsInputs {
   gameplayTips: HTMLInputElement;
 }
 
+export type AppScreen =
+  | "home"
+  | "lobby"
+  | "help"
+  | "settings"
+  | "match"
+  | "results";
+
+export interface PracticeRecordPresentation {
+  personalBest: number;
+  chatRecord?: {
+    score: number;
+    playerName: string;
+  };
+}
+
+export interface PairingInterruptionPresentation {
+  kind: "pairing" | "rematch";
+  opponentName: string;
+}
+
+export type HomeRecoveryPresentation =
+  | { kind: "active-elsewhere" }
+  | { kind: "interrupted"; remainingSeconds: number }
+  | { kind: "confirming"; exit: "cancel" | "withdraw" };
+
+export interface ReadinessPlayerNames {
+  localName: string;
+  opponentName: string;
+}
+
+export interface CompetitiveResultPresentation {
+  round: number;
+  scores: readonly [
+    { playerName: string; score: number },
+    { playerName: string; score: number },
+  ];
+  seriesScore?: string;
+  headToHeadScore?: string;
+  notice?: string;
+}
+
 function checkboxSetting(
   document: Document,
   parent: HTMLElement,
@@ -412,15 +454,38 @@ function checkboxSetting(
 export interface AppShell {
   container: HTMLElement;
   canvas: HTMLCanvasElement;
+  home: HTMLElement;
+  homeStatus: HTMLElement;
+  homeRecovery: HTMLElement;
+  homeRecoveryMessage: HTMLElement;
+  retryConnectionButton: HTMLButtonElement;
+  endInterruptedMatchButton: HTMLButtonElement;
+  exitSetupButton: HTMLButtonElement;
+  homeChallengeAction: HTMLElement;
+  homeWaiting: HTMLElement;
   lobby: HTMLElement;
   practiceButton: HTMLButtonElement;
   createButton: HTMLButtonElement;
+  cancelChallengeButton: HTMLButtonElement;
+  viewLobbyButton: HTMLButtonElement;
+  lobbyButton: HTMLButtonElement;
+  lobbyActivity: HTMLElement;
+  personalPracticeRecord: HTMLElement;
+  chatPracticeRecord: HTMLElement;
   joinButton: HTMLButtonElement;
   helpButton: HTMLButtonElement;
   controlsHelpButton: HTMLButtonElement;
   settingsButton: HTMLButtonElement;
   lobbyStatus: HTMLElement;
+  lobbyBackButton: HTMLButtonElement;
+  lobbySummary: HTMLElement;
+  yourActivity: HTMLElement;
+  openChallenges: HTMLElement;
+  startingSoon: HTMLElement;
+  liveGames: HTMLElement;
   history: HTMLElement;
+  standings: HTMLElement;
+  practiceLeaderboard: HTMLElement;
   help: HTMLElement;
   helpHeading: HTMLElement;
   helpBody: HTMLElement;
@@ -438,6 +503,7 @@ export interface AppShell {
   readinessPanel: HTMLElement;
   readyButton: HTMLButtonElement;
   cancelReadyButton: HTMLButtonElement;
+  leavePairingButton: HTMLButtonElement;
   localReadyStatus: HTMLElement;
   opponentReadyStatus: HTMLElement;
   matchActions: HTMLElement;
@@ -454,12 +520,50 @@ export interface AppShell {
   unsupported: HTMLElement;
   results: HTMLElement;
   resultsHeading: HTMLElement;
+  resultsSummary: HTMLElement;
+  resultsRound: HTMLElement;
+  resultsScoreboard: HTMLElement;
+  resultsSeries: HTMLElement;
+  resultsHeadToHead: HTMLElement;
+  resultsNotice: HTMLElement;
   resultsStats: HTMLElement;
+  resultsCompetitiveActions: HTMLElement;
+  resultsPracticeActions: HTMLElement;
   rematchButton: HTMLButtonElement;
+  requestRematchButton: HTMLButtonElement;
+  newChallengeButton: HTMLButtonElement;
+  resultsHomeButton: HTMLButtonElement;
+  practiceAgainButton: HTMLButtonElement;
+  practiceCreateChallengeButton: HTMLButtonElement;
+  practiceHomeButton: HTMLButtonElement;
   resultsLeaveButton: HTMLButtonElement;
-  show(screen: "lobby" | "help" | "settings" | "match" | "results"): void;
+  pairingInterruption: HTMLElement;
+  pairingInterruptionHeading: HTMLElement;
+  pairingInterruptionMessage: HTMLElement;
+  goToMatchButton: HTMLButtonElement;
+  cancelPairingButton: HTMLButtonElement;
+  show(screen: AppScreen): void;
+  setHomeChallengeWaiting(waiting: boolean): void;
+  setHomeRecovery(presentation: HomeRecoveryPresentation | null): void;
+  setLobbyActivityCounts(waiting: number, live: number): void;
+  setPracticeRecords(records: PracticeRecordPresentation): void;
+  setPairingInterruption(
+    presentation: PairingInterruptionPresentation | null,
+  ): void;
+  setResultsMode(mode: "competitive" | "practice"): void;
+  setCompetitiveResult(
+    presentation: CompetitiveResultPresentation | null,
+  ): void;
+  setRematchAction(
+    state: "request" | "accept" | "pending" | "hidden",
+  ): void;
+  setPairingExitMode(mode: "leave" | "withdraw"): void;
   setPreferences(preferences: Preferences): void;
-  setReadiness(localReady: boolean, opponentReady: boolean): void;
+  setReadiness(
+    localReady: boolean,
+    opponentReady: boolean,
+    players?: ReadinessPlayerNames,
+  ): void;
   setOverlayMessage(
     message: string,
     presentation?: "modal" | "banner" | "status",
@@ -484,30 +588,218 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
   canvas.setAttribute("aria-hidden", "true");
   const layer = element(document, "div", "app-layer");
 
-  const lobbyParts = menuScreen(document, STRINGS["lobby.heading"]);
-  lobbyParts.heading.className = "brand-title";
+  const homeParts = menuScreen(document, STRINGS["home.heading"]);
+  homeParts.heading.className = "brand-title";
+  homeParts.heading.id = "home-heading";
+  homeParts.screen.setAttribute("aria-labelledby", homeParts.heading.id);
+  homeParts.screen.classList.add("home-screen");
   const subtitle = element(document, "p", "brand-subtitle", STRINGS["app.description"]);
-  const lobbyStatus = element(document, "p", "muted");
-  lobbyStatus.setAttribute("role", "status");
-  const lobbyActions = element(document, "div", "menu-actions");
-  const createButton = button(document, STRINGS["lobby.createChallenge"], "primary");
-  const joinButton = button(document, STRINGS["lobby.joinChallenge"]);
+  const homeStatus = element(document, "p", "muted home-status");
+  homeStatus.setAttribute("role", "status");
+  const homeActions = element(document, "div", "menu-actions home-actions");
+  const homeRecovery = element(document, "section", "home-recovery");
+  homeRecovery.hidden = true;
+  homeRecovery.setAttribute("aria-live", "polite");
+  const homeRecoveryMessage = element(document, "p", "home-recovery-message");
+  const homeRecoveryActions = element(document, "div", "home-recovery-actions");
+  const retryConnectionButton = button(
+    document,
+    STRINGS["home.retryConnection"],
+    "primary",
+  );
+  const endInterruptedMatchButton = button(
+    document,
+    STRINGS["home.endInterruptedMatch"],
+    "destructive",
+  );
+  const exitSetupButton = button(document, STRINGS["pairing.cancelPairing"]);
+  retryConnectionButton.hidden = true;
+  endInterruptedMatchButton.hidden = true;
+  exitSetupButton.hidden = true;
+  homeRecoveryActions.append(
+    retryConnectionButton,
+    endInterruptedMatchButton,
+    exitSetupButton,
+  );
+  homeRecovery.append(homeRecoveryMessage, homeRecoveryActions);
+  const homeChallengeAction = element(document, "div", "home-challenge-action");
+  const createButton = button(document, STRINGS["home.createChallenge"], "primary");
+  const homeWaiting = element(document, "section", "home-waiting");
+  homeWaiting.setAttribute("aria-label", STRINGS["lobby.waitingForOpponent"]);
+  homeWaiting.hidden = true;
+  const waitingMessage = element(
+    document,
+    "p",
+    "home-waiting-message",
+    STRINGS["lobby.waitingForOpponent"],
+  );
+  waitingMessage.setAttribute("role", "status");
+  waitingMessage.setAttribute("aria-live", "polite");
+  const waitingActions = element(document, "div", "home-waiting-actions");
+  const cancelChallengeButton = button(
+    document,
+    STRINGS["home.cancelChallenge"],
+  );
+  cancelChallengeButton.classList.add("destructive");
+  const viewLobbyButton = button(document, STRINGS["home.lobby"]);
+  viewLobbyButton.classList.add("home-lobby-button");
+  const waitingLobbyButtonLabel = element(
+    document,
+    "span",
+    "home-lobby-label",
+    STRINGS["home.lobby"],
+  );
+  const waitingLobbyActivity = element(
+    document,
+    "span",
+    "home-lobby-activity",
+    formatString("home.lobbyActivity", { waiting: 0, live: 0 }),
+  );
+  viewLobbyButton.replaceChildren(waitingLobbyButtonLabel, waitingLobbyActivity);
+  waitingActions.append(cancelChallengeButton, viewLobbyButton);
+  homeWaiting.append(waitingMessage, waitingActions);
+  homeChallengeAction.append(createButton, homeWaiting);
   const practiceButton = button(document, STRINGS["lobby.practice"]);
-  lobbyActions.append(createButton, joinButton, practiceButton);
-  const secondary = element(document, "div", "secondary-actions");
+  const lobbyButton = button(document, STRINGS["home.lobby"]);
+  lobbyButton.classList.add("home-lobby-button");
+  const lobbyButtonLabel = element(document, "span", "home-lobby-label", STRINGS["home.lobby"]);
+  const lobbyActivity = element(
+    document,
+    "span",
+    "home-lobby-activity",
+    formatString("home.lobbyActivity", { waiting: 0, live: 0 }),
+  );
+  lobbyButton.replaceChildren(lobbyButtonLabel, lobbyActivity);
+  homeActions.append(homeChallengeAction, lobbyButton, practiceButton);
+  const practiceRecords = element(document, "section", "home-practice-records");
+  practiceRecords.setAttribute("aria-label", STRINGS["home.practiceRecords"]);
+  const personalPracticeRecord = element(
+    document,
+    "p",
+    "home-practice-record",
+    formatString("home.yourBest", { score: 0 }),
+  );
+  personalPracticeRecord.setAttribute("aria-live", "polite");
+  const chatPracticeRecord = element(
+    document,
+    "p",
+    "home-practice-record muted",
+    STRINGS["home.noPracticeRecord"],
+  );
+  chatPracticeRecord.setAttribute("aria-live", "polite");
+  practiceRecords.append(personalPracticeRecord, chatPracticeRecord);
+  const secondary = element(document, "div", "secondary-actions home-secondary-actions");
   const helpButton = button(document, STRINGS["lobby.howToPlay"]);
   const controlsHelpButton = button(document, STRINGS["lobby.practiceControls"]);
   const settingsButton = button(document, STRINGS["lobby.settings"]);
   secondary.append(helpButton, controlsHelpButton, settingsButton);
-  const historyHeading = element(document, "h3", undefined, STRINGS["lobby.history"]);
-  const history = element(document, "ul", "history-list");
-  lobbyParts.panel.append(
+
+  homeParts.panel.append(
     subtitle,
-    lobbyStatus,
-    lobbyActions,
+    homeStatus,
+    homeRecovery,
+    homeActions,
+    practiceRecords,
     secondary,
-    historyHeading,
-    history,
+  );
+
+  const lobbyParts = menuScreen(document, STRINGS["lobby.browserHeading"]);
+  lobbyParts.heading.id = "lobby-heading";
+  lobbyParts.screen.setAttribute("aria-labelledby", lobbyParts.heading.id);
+  lobbyParts.screen.classList.add("lobby-browser-screen");
+  lobbyParts.panel.classList.add("lobby-browser-panel");
+  const lobbyHeader = element(document, "div", "lobby-browser-header");
+  const lobbyBackButton = button(document, STRINGS["lobby.backHome"]);
+  const lobbySummary = element(
+    document,
+    "p",
+    "muted lobby-summary",
+    formatString("lobby.activitySummary", { waiting: 0, live: 0 }),
+  );
+  lobbySummary.setAttribute("role", "status");
+  lobbySummary.setAttribute("aria-live", "polite");
+  lobbyHeader.append(lobbyBackButton, lobbySummary);
+  const lobbyStatus = element(document, "p", "lobby-notice muted");
+  lobbyStatus.setAttribute("role", "status");
+  lobbyStatus.setAttribute("aria-live", "polite");
+  const lobbySections = element(document, "div", "lobby-sections");
+  const section = (
+    heading: string,
+    className: string,
+    bodyTag: "div" | "ul" = "div",
+    emptyText?: string,
+  ): HTMLElement => {
+    const wrapper = element(document, "section", `lobby-section ${className}`);
+    const headingNode = element(document, "h3", undefined, heading);
+    headingNode.id = `${className}-heading`;
+    wrapper.setAttribute("aria-labelledby", headingNode.id);
+    wrapper.append(headingNode);
+    const body = element(document, bodyTag, "lobby-section-body");
+    if (bodyTag === "ul") body.classList.add("lobby-list");
+    if (emptyText !== undefined) {
+      const empty = element(
+        document,
+        bodyTag === "ul" ? "li" : "p",
+        "lobby-empty muted",
+        emptyText,
+      );
+      empty.dataset.emptyState = "true";
+      body.append(empty);
+    }
+    wrapper.append(body);
+    lobbySections.append(wrapper);
+    return body;
+  };
+  const yourActivity = section(
+    STRINGS["lobby.yourActivity"],
+    "lobby-your-activity",
+    "div",
+    STRINGS["lobby.noActivity"],
+  );
+  const openChallenges = section(
+    STRINGS["lobby.openChallenges"],
+    "lobby-open-challenges",
+    "ul",
+    STRINGS["lobby.noOpenChallenges"],
+  );
+  const startingSoon = section(
+    STRINGS["lobby.startingSoon"],
+    "lobby-starting-soon",
+    "ul",
+    STRINGS["lobby.noStartingSoon"],
+  );
+  const liveGames = section(
+    STRINGS["lobby.liveGames"],
+    "lobby-live-games",
+    "ul",
+    STRINGS["lobby.noLiveGames"],
+  );
+  const history = section(
+    STRINGS["lobby.recentResults"],
+    "lobby-recent-results",
+    "ul",
+    STRINGS["lobby.noRecentResults"],
+  );
+  history.classList.add("history-list");
+  const standings = section(
+    STRINGS["lobby.standings"],
+    "lobby-standings",
+    "div",
+    STRINGS["lobby.noStandings"],
+  );
+  const practiceLeaderboard = section(
+    STRINGS["lobby.practiceLeaderboard"],
+    "lobby-practice-leaderboard",
+    "div",
+    STRINGS["lobby.noPracticeScores"],
+  );
+  const joinButton = button(document, STRINGS["lobby.joinChallenge"]);
+  joinButton.hidden = true;
+  lobbyParts.panel.append(
+    lobbyHeader,
+    lobbyStatus,
+    lobbySections,
+    joinButton,
   );
 
   const helpParts = menuScreen(document, STRINGS["help.heading"]);
@@ -719,12 +1011,19 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     "cancel-ready-button",
   );
   cancelReadyButton.hidden = true;
+  const leavePairingButton = button(
+    document,
+    STRINGS["match.leavePairing"],
+    "leave-pairing-button",
+  );
+  leavePairingButton.dataset.exitMode = "leave";
   readinessPanel.append(
     readyHeading,
     readinessStatuses,
     readyButton,
     readyHint,
     cancelReadyButton,
+    leavePairingButton,
   );
   const overlayText = element(document, "p", undefined, STRINGS["match.waitingForReady"]);
   overlayText.setAttribute("role", "status");
@@ -770,30 +1069,171 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
   );
 
   const resultsParts = menuScreen(document, STRINGS["results.draw"]);
+  const resultsSummary = element(document, "section", "results-summary");
+  resultsSummary.setAttribute("aria-label", STRINGS["results.finalScores"]);
+  resultsSummary.hidden = true;
+  const resultsRound = element(document, "p", "results-round");
+  const resultsScoreboard = element(document, "ul", "results-scoreboard");
+  const resultsSeries = element(document, "p", "results-series");
+  const resultsHeadToHead = element(document, "p", "results-head-to-head");
+  const resultsNotice = element(document, "p", "muted results-notice");
+  resultsNotice.setAttribute("role", "status");
+  resultsSummary.append(
+    resultsRound,
+    resultsScoreboard,
+    resultsSeries,
+    resultsHeadToHead,
+    resultsNotice,
+  );
   const resultsStats = element(document, "dl", "results-stats");
-  const resultsActions = element(document, "div", "menu-actions");
-  const rematchButton = button(document, STRINGS["results.rematch"], "primary");
-  const resultsLeaveButton = button(document, STRINGS["results.leave"]);
-  resultsActions.append(rematchButton, resultsLeaveButton);
-  resultsParts.panel.append(resultsStats, resultsActions);
+  const resultsCompetitiveActions = element(
+    document,
+    "div",
+    "menu-actions results-actions results-competitive-actions",
+  );
+  resultsCompetitiveActions.setAttribute(
+    "aria-label",
+    STRINGS["results.competitiveActions"],
+  );
+  resultsCompetitiveActions.setAttribute("role", "group");
+  const requestRematchButton = button(
+    document,
+    STRINGS["results.requestRematch"],
+    "primary",
+  );
+  requestRematchButton.dataset.rematchState = "request";
+  const newChallengeButton = button(document, STRINGS["results.newChallenge"]);
+  const resultsHomeButton = button(document, STRINGS["results.home"]);
+  resultsCompetitiveActions.append(
+    requestRematchButton,
+    newChallengeButton,
+    resultsHomeButton,
+  );
+  const resultsPracticeActions = element(
+    document,
+    "div",
+    "menu-actions results-actions results-practice-actions",
+  );
+  resultsPracticeActions.setAttribute(
+    "aria-label",
+    STRINGS["results.practiceActions"],
+  );
+  resultsPracticeActions.setAttribute("role", "group");
+  resultsPracticeActions.hidden = true;
+  const practiceAgainButton = button(
+    document,
+    STRINGS["results.practiceAgain"],
+    "primary",
+  );
+  const practiceCreateChallengeButton = button(
+    document,
+    STRINGS["results.createChallenge"],
+  );
+  const practiceHomeButton = button(document, STRINGS["results.home"]);
+  resultsPracticeActions.append(
+    practiceAgainButton,
+    practiceCreateChallengeButton,
+    practiceHomeButton,
+  );
+  // Legacy aliases keep bootstrap call sites compiling during the UI migration.
+  const rematchButton = requestRematchButton;
+  const resultsLeaveButton = resultsHomeButton;
+  resultsParts.panel.append(
+    resultsSummary,
+    resultsStats,
+    resultsCompetitiveActions,
+    resultsPracticeActions,
+  );
+
+  let pairingReturnFocus: HTMLElement | null = null;
+  const pairingInterruption = element(
+    document,
+    "section",
+    "pairing-interruption-backdrop",
+  );
+  pairingInterruption.setAttribute("role", "dialog");
+  pairingInterruption.setAttribute("aria-modal", "true");
+  pairingInterruption.setAttribute("aria-labelledby", "pairing-interruption-heading");
+  pairingInterruption.setAttribute("aria-describedby", "pairing-interruption-message");
+  pairingInterruption.hidden = true;
+  const pairingInterruptionCard = element(
+    document,
+    "div",
+    "pairing-interruption-card",
+  );
+  const pairingInterruptionHeading = element(
+    document,
+    "h2",
+    undefined,
+    STRINGS["pairing.opponentFound"],
+  );
+  pairingInterruptionHeading.id = "pairing-interruption-heading";
+  const pairingInterruptionMessage = element(
+    document,
+    "p",
+    "muted",
+    formatString("pairing.opponentFoundMessage", {
+      player: STRINGS["common.playerFallback"],
+    }),
+  );
+  pairingInterruptionMessage.id = "pairing-interruption-message";
+  const pairingInterruptionActions = element(
+    document,
+    "div",
+    "menu-actions pairing-interruption-actions",
+  );
+  const goToMatchButton = button(
+    document,
+    STRINGS["pairing.goToMatch"],
+    "primary",
+  );
+  const cancelPairingButton = button(document, STRINGS["pairing.cancelPairing"]);
+  pairingInterruptionActions.append(goToMatchButton, cancelPairingButton);
+  pairingInterruptionCard.append(
+    pairingInterruptionHeading,
+    pairingInterruptionMessage,
+    pairingInterruptionActions,
+  );
+  pairingInterruption.append(pairingInterruptionCard);
+  pairingInterruption.addEventListener("keydown", (event) => {
+    if (event.key !== "Tab" || pairingInterruption.hidden) return;
+    const first = goToMatchButton;
+    const last = cancelPairingButton;
+    if (event.shiftKey) {
+      if (document.activeElement !== first) return;
+      event.preventDefault();
+      last.focus();
+      return;
+    }
+    if (document.activeElement !== last) return;
+    event.preventDefault();
+    first.focus();
+  });
 
   layer.append(
+    homeParts.screen,
     lobbyParts.screen,
     helpParts.screen,
     settingsParts.screen,
     match,
     resultsParts.screen,
+    pairingInterruption,
   );
   container.append(canvas, layer);
   mount.replaceChildren(container);
 
   const screens = {
+    home: homeParts.screen,
     lobby: lobbyParts.screen,
     help: helpParts.screen,
     settings: settingsParts.screen,
     match,
     results: resultsParts.screen,
   } as const;
+  lobbyParts.screen.hidden = true;
+  helpParts.screen.hidden = true;
+  settingsParts.screen.hidden = true;
+  resultsParts.screen.hidden = true;
   let readinessSignature: string | null = null;
   let helpPreviewTimer: number | null = null;
   const stopHelpPreviewAnimation = (): void => {
@@ -821,15 +1261,38 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
   const shell: AppShell = {
     container,
     canvas,
+    home: homeParts.screen,
+    homeStatus,
+    homeRecovery,
+    homeRecoveryMessage,
+    retryConnectionButton,
+    endInterruptedMatchButton,
+    exitSetupButton,
+    homeChallengeAction,
+    homeWaiting,
     lobby: lobbyParts.screen,
     practiceButton,
     createButton,
+    cancelChallengeButton,
+    viewLobbyButton,
+    lobbyButton,
+    lobbyActivity,
+    personalPracticeRecord,
+    chatPracticeRecord,
     joinButton,
     helpButton,
     controlsHelpButton,
     settingsButton,
     lobbyStatus,
+    lobbyBackButton,
+    lobbySummary,
+    yourActivity,
+    openChallenges,
+    startingSoon,
+    liveGames,
     history,
+    standings,
+    practiceLeaderboard,
     help: helpParts.screen,
     helpHeading: helpParts.heading,
     helpBody,
@@ -860,6 +1323,7 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     readinessPanel,
     readyButton,
     cancelReadyButton,
+    leavePairingButton,
     localReadyStatus,
     opponentReadyStatus,
     matchActions,
@@ -876,12 +1340,214 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     unsupported,
     results: resultsParts.screen,
     resultsHeading: resultsParts.heading,
+    resultsSummary,
+    resultsRound,
+    resultsScoreboard,
+    resultsSeries,
+    resultsHeadToHead,
+    resultsNotice,
     resultsStats,
+    resultsCompetitiveActions,
+    resultsPracticeActions,
     rematchButton,
+    requestRematchButton,
+    newChallengeButton,
+    resultsHomeButton,
+    practiceAgainButton,
+    practiceCreateChallengeButton,
+    practiceHomeButton,
     resultsLeaveButton,
+    pairingInterruption,
+    pairingInterruptionHeading,
+    pairingInterruptionMessage,
+    goToMatchButton,
+    cancelPairingButton,
     show(screen): void {
       if (screen !== "help") stopHelpPreviewAnimation();
       for (const [name, node] of Object.entries(screens)) node.hidden = name !== screen;
+    },
+    setHomeChallengeWaiting(waiting): void {
+      createButton.hidden = waiting;
+      homeWaiting.hidden = !waiting;
+      lobbyButton.hidden = waiting;
+    },
+    setHomeRecovery(presentation): void {
+      homeRecovery.hidden = presentation === null;
+      retryConnectionButton.hidden = true;
+      endInterruptedMatchButton.hidden = true;
+      endInterruptedMatchButton.disabled = false;
+      exitSetupButton.hidden = true;
+      exitSetupButton.disabled = false;
+      if (presentation === null) {
+        homeRecoveryMessage.textContent = "";
+        delete homeRecovery.dataset.kind;
+        return;
+      }
+      homeRecovery.dataset.kind = presentation.kind;
+      if (presentation.kind === "active-elsewhere") {
+        homeRecoveryMessage.textContent = STRINGS["home.gameActiveElsewhere"];
+        return;
+      }
+      if (presentation.kind === "interrupted") {
+        if (presentation.remainingSeconds <= 0) {
+          homeRecoveryMessage.textContent = STRINGS["home.gameInterruptedReady"];
+          endInterruptedMatchButton.hidden = false;
+        } else {
+          homeRecoveryMessage.textContent = formatString("home.gameInterrupted", {
+            seconds: Math.ceil(presentation.remainingSeconds),
+          });
+        }
+        return;
+      }
+      homeRecoveryMessage.textContent = STRINGS["home.confirmingLong"];
+      retryConnectionButton.hidden = false;
+      exitSetupButton.hidden = false;
+      exitSetupButton.textContent = presentation.exit === "withdraw"
+        ? STRINGS["lobby.withdraw"]
+        : STRINGS["pairing.cancelPairing"];
+    },
+    setLobbyActivityCounts(waiting, live): void {
+      const safeWaiting = Number.isSafeInteger(waiting) ? Math.max(0, waiting) : 0;
+      const safeLive = Number.isSafeInteger(live) ? Math.max(0, live) : 0;
+      const homeText = formatString("home.lobbyActivity", {
+        waiting: safeWaiting,
+        live: safeLive,
+      });
+      const lobbyText = formatString("lobby.activitySummary", {
+        waiting: safeWaiting,
+        live: safeLive,
+      });
+      lobbyActivity.textContent = homeText;
+      waitingLobbyActivity.textContent = homeText;
+      lobbySummary.textContent = lobbyText;
+      lobbyButton.setAttribute(
+        "aria-label",
+        `${STRINGS["home.lobby"]} · ${homeText}`,
+      );
+      viewLobbyButton.setAttribute(
+        "aria-label",
+        `${STRINGS["home.lobby"]} · ${homeText}`,
+      );
+    },
+    setPracticeRecords(records): void {
+      const personalBest = Number.isSafeInteger(records.personalBest)
+        ? Math.max(0, records.personalBest)
+        : 0;
+      personalPracticeRecord.textContent = formatString("home.yourBest", {
+        score: personalBest,
+      });
+      if (records.chatRecord === undefined) {
+        chatPracticeRecord.textContent = STRINGS["home.noPracticeRecord"];
+        chatPracticeRecord.classList.add("muted");
+        return;
+      }
+      const chatScore = Number.isSafeInteger(records.chatRecord.score)
+        ? Math.max(0, records.chatRecord.score)
+        : 0;
+      chatPracticeRecord.textContent = formatString("home.chatRecord", {
+        score: chatScore,
+        player: records.chatRecord.playerName,
+      });
+      chatPracticeRecord.classList.remove("muted");
+    },
+    setPairingInterruption(presentation): void {
+      if (presentation === null) {
+        pairingInterruption.hidden = true;
+        delete pairingInterruption.dataset.kind;
+        const returnFocus = pairingReturnFocus;
+        pairingReturnFocus = null;
+        if (returnFocus?.isConnected === true) returnFocus.focus();
+        return;
+      }
+      if (pairingInterruption.hidden) {
+        pairingReturnFocus = document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+      }
+      pairingInterruption.dataset.kind = presentation.kind;
+      const rematch = presentation.kind === "rematch";
+      pairingInterruptionHeading.textContent = rematch
+        ? STRINGS["pairing.rematchReady"]
+        : STRINGS["pairing.opponentFound"];
+      pairingInterruptionMessage.textContent = formatString(
+        rematch
+          ? "pairing.rematchReadyMessage"
+          : "pairing.opponentFoundMessage",
+        { player: presentation.opponentName },
+      );
+      cancelPairingButton.textContent = rematch
+        ? STRINGS["pairing.cancelRematch"]
+        : STRINGS["pairing.cancelPairing"];
+      pairingInterruption.hidden = false;
+      goToMatchButton.focus();
+    },
+    setResultsMode(resultsMode): void {
+      resultsCompetitiveActions.hidden = resultsMode !== "competitive";
+      resultsPracticeActions.hidden = resultsMode !== "practice";
+      resultsSummary.hidden = resultsMode !== "competitive" ||
+        resultsSummary.dataset.populated !== "true";
+      resultsParts.screen.dataset.resultsMode = resultsMode;
+    },
+    setCompetitiveResult(presentation): void {
+      resultsScoreboard.replaceChildren();
+      if (presentation === null) {
+        resultsSummary.hidden = true;
+        delete resultsSummary.dataset.populated;
+        resultsRound.textContent = "";
+        resultsSeries.textContent = "";
+        resultsHeadToHead.textContent = "";
+        resultsNotice.textContent = "";
+        return;
+      }
+      const safeRound = Number.isSafeInteger(presentation.round)
+        ? Math.max(1, presentation.round)
+        : 1;
+      resultsRound.textContent = formatString("results.round", {
+        round: safeRound,
+      });
+      for (const score of presentation.scores) {
+        const safeScore = Number.isSafeInteger(score.score)
+          ? Math.max(0, score.score)
+          : 0;
+        resultsScoreboard.append(
+          element(
+            document,
+            "li",
+            "results-score-row",
+            formatString("results.playerScore", {
+              player: score.playerName,
+              score: safeScore,
+            }),
+          ),
+        );
+      }
+      resultsSeries.textContent = presentation.seriesScore === undefined
+        ? ""
+        : formatString("results.series", { score: presentation.seriesScore });
+      resultsHeadToHead.textContent = presentation.headToHeadScore === undefined
+        ? ""
+        : formatString("results.headToHead", {
+            score: presentation.headToHeadScore,
+          });
+      resultsNotice.textContent = presentation.notice ?? "";
+      resultsSummary.dataset.populated = "true";
+      resultsSummary.hidden = resultsParts.screen.dataset.resultsMode === "practice";
+    },
+    setRematchAction(rematchState): void {
+      requestRematchButton.hidden = rematchState === "hidden";
+      requestRematchButton.disabled = rematchState === "pending";
+      requestRematchButton.textContent = rematchState === "accept"
+        ? STRINGS["results.acceptRematch"]
+        : rematchState === "pending"
+          ? STRINGS["results.rematchRequested"]
+          : STRINGS["results.requestRematch"];
+      requestRematchButton.dataset.rematchState = rematchState;
+    },
+    setPairingExitMode(exitMode): void {
+      leavePairingButton.textContent = exitMode === "withdraw"
+        ? STRINGS["match.withdrawPairing"]
+        : STRINGS["match.leavePairing"];
+      leavePairingButton.dataset.exitMode = exitMode;
     },
     setPreferences(preferences): void {
       effectsEnabled.checked = preferences.effectsEnabled;
@@ -897,8 +1563,12 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
       screenShake.checked = preferences.screenShake;
       gameplayTips.checked = preferences.gameplayTips;
     },
-    setReadiness(localReady, opponentReady): void {
-      const signature = `${localReady}:${opponentReady}`;
+    setReadiness(localReady, opponentReady, players): void {
+      const localLabel = players === undefined
+        ? STRINGS["match.you"]
+        : formatString("match.youName", { player: players.localName });
+      const opponentLabel = players?.opponentName ?? STRINGS["match.opponent"];
+      const signature = `${localReady}:${opponentReady}:${localLabel}:${opponentLabel}`;
       if (
         readinessSignature === signature &&
         !readinessPanel.hidden &&
@@ -922,8 +1592,8 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
       };
       readinessPanel.hidden = false;
       overlayText.hidden = true;
-      updateStatus(localReadyStatus, STRINGS["match.you"], localReady);
-      updateStatus(opponentReadyStatus, STRINGS["match.opponent"], opponentReady);
+      updateStatus(localReadyStatus, localLabel, localReady);
+      updateStatus(opponentReadyStatus, opponentLabel, opponentReady);
       readyButton.textContent = localReady
         ? STRINGS["match.youAreReady"]
         : STRINGS["match.readyUp"];
