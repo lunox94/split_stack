@@ -130,8 +130,8 @@ rules version 2 and must change together with the peer rules hash.
   shows a nonblocking warning while play continues, five seconds freezes the
   simulation, and eight seconds requests a replacement channel. The second seat
   waits another 500 ms to reduce simultaneous replacement, and retries back off
-  through 3, 6, 12, then 15 seconds while the one-minute recovery window remains
-  open.
+  through 3, 6, 12, then 15 seconds while the committed controller's recovery
+  window remains open.
 - Network pause stops each authoritative local simulation immediately. Resume
   restores both owners to their newest common rolling checkpoint, bounded to
   three seconds of rollback independently of the longer missing-peer timeout,
@@ -144,9 +144,23 @@ rules version 2 and must change together with the peer rules hash.
   reorient. Recovery countdowns stay compact and silent. A checkpoint or hash
   mismatch ends neutrally as a desynchronization rather than guessing which
   owner state to rewrite.
-- Exhausting the recovery window produces the neutral `connection-lost`
-  result. It is retained in recent history but excluded from win/loss tallies;
-  an explicit Leave remains a forfeit.
+- An exact committed controller may produce the neutral `connection-lost`
+  result after twenty seconds only while its app is visible and its realtime
+  recovery loop remains active. Hiding invalidates elapsed observation and
+  returning begins a fresh window; internal transport detach/attach attempts
+  preserve that visible incident's deadline. A verified recovery clears it.
+  A receive-only replacement has separate authority: after sixty seconds without
+  controller traffic it may offer an explicit neutral cleanup, but it never ends
+  the match automatically. Neutral results remain in recent history but are
+  excluded from win/loss tallies; an explicit Leave remains a forfeit.
+- A replacement runtime cannot resume its committed simulation, but the seated
+  participant may durably concede from that copy. Concession is a canonical
+  self-loss, updates standings, and emits one concise result message; a neutral
+  connection-loss cleanup updates only summary/history metadata. Pending result
+  feedback is journaled until its canonical echo materializes. Failed appends
+  retry automatically, while successful writes without an echo use one bounded
+  payload-only confirmation probe; later manual probes reuse the same event ID
+  so missing receipts cannot create chat duplicates or an unbounded resend log.
 - Networking is pumped on a dedicated wall-clock interval rather than from the
   render loop. Privacy-safe diagnostics retain at most three incidents and 100
   events in local storage and may be copied or cleared by the player. Frame and

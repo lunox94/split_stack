@@ -30,6 +30,26 @@ function button(document: Document, label: string, className?: string): HTMLButt
   return node;
 }
 
+function trapFocusBetween(
+  document: Document,
+  dialog: HTMLElement,
+  first: HTMLElement,
+  last: HTMLElement,
+): void {
+  dialog.addEventListener("keydown", (event) => {
+    if (event.key !== "Tab" || dialog.hidden) return;
+    if (event.shiftKey) {
+      if (document.activeElement !== first) return;
+      event.preventDefault();
+      last.focus();
+      return;
+    }
+    if (document.activeElement !== last) return;
+    event.preventDefault();
+    first.focus();
+  });
+}
+
 function menuScreen(document: Document, heading: string): {
   screen: HTMLElement;
   panel: HTMLElement;
@@ -418,8 +438,17 @@ export interface PairingInterruptionPresentation {
 
 export type HomeRecoveryPresentation =
   | { kind: "active-elsewhere" }
+  | { kind: "setup-elsewhere" }
   | { kind: "interrupted"; remainingSeconds: number }
+  | { kind: "ending"; delayed: boolean }
   | { kind: "confirming"; exit: "cancel" | "withdraw" };
+
+export type RecoveryConfirmationKind = "concede" | "neutral";
+
+export type ReadOnlyWatchStatus =
+  | { kind: "waiting" }
+  | { kind: "live" }
+  | { kind: "stale"; ageSeconds: number };
 
 export interface ReadinessPlayerNames {
   localName: string;
@@ -457,10 +486,22 @@ export interface AppShell {
   home: HTMLElement;
   homeStatus: HTMLElement;
   homeRecovery: HTMLElement;
+  homeRecoveryHeading: HTMLElement;
+  homeRecoveryHelpButton: HTMLButtonElement;
+  homeRecoveryHelp: HTMLElement;
   homeRecoveryMessage: HTMLElement;
+  homeRecoveryStatus: HTMLElement;
+  homeRecoveryHint: HTMLElement;
+  watchRecoveryMatchButton: HTMLButtonElement;
+  concedeRecoveryButton: HTMLButtonElement;
   retryConnectionButton: HTMLButtonElement;
   endInterruptedMatchButton: HTMLButtonElement;
   exitSetupButton: HTMLButtonElement;
+  recoveryConfirmation: HTMLElement;
+  recoveryConfirmationHeading: HTMLElement;
+  recoveryConfirmationMessage: HTMLElement;
+  cancelRecoveryConfirmationButton: HTMLButtonElement;
+  confirmRecoveryButton: HTMLButtonElement;
   homeChallengeAction: HTMLElement;
   homeWaiting: HTMLElement;
   lobby: HTMLElement;
@@ -508,6 +549,8 @@ export interface AppShell {
   opponentReadyStatus: HTMLElement;
   matchActions: HTMLElement;
   matchMenuButton: HTMLButtonElement;
+  exitWatchButton: HTMLButtonElement;
+  watchStatus: HTMLElement;
   matchMenu: HTMLElement;
   matchMenuMessage: HTMLElement;
   matchMenuCloseButton: HTMLButtonElement;
@@ -545,6 +588,8 @@ export interface AppShell {
   show(screen: AppScreen): void;
   setHomeChallengeWaiting(waiting: boolean): void;
   setHomeRecovery(presentation: HomeRecoveryPresentation | null): void;
+  setRecoveryConfirmation(kind: RecoveryConfirmationKind | null): void;
+  setReadOnlyWatchStatus(status: ReadOnlyWatchStatus | null): void;
   setLobbyActivityCounts(waiting: number, live: number): void;
   setPracticeRecords(records: PracticeRecordPresentation): void;
   setPairingInterruption(
@@ -598,10 +643,63 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
   homeStatus.setAttribute("role", "status");
   const homeActions = element(document, "div", "menu-actions home-actions");
   const homeRecovery = element(document, "section", "home-recovery");
+  homeRecovery.id = "home-recovery";
   homeRecovery.hidden = true;
-  homeRecovery.setAttribute("aria-live", "polite");
-  const homeRecoveryMessage = element(document, "p", "home-recovery-message");
+  homeRecovery.setAttribute("aria-labelledby", "home-recovery-heading");
+  const homeRecoveryHeader = element(document, "div", "home-recovery-header");
+  const homeRecoveryHeading = element(
+    document,
+    "h3",
+    "home-recovery-heading",
+    STRINGS["home.unfinishedMatch"],
+  );
+  homeRecoveryHeading.id = "home-recovery-heading";
+  const homeRecoveryHelpButton = button(
+    document,
+    "?",
+    "home-recovery-help-button",
+  );
+  homeRecoveryHelpButton.setAttribute(
+    "aria-label",
+    STRINGS["home.unfinishedMatchHelpLabel"],
+  );
+  homeRecoveryHelpButton.setAttribute("aria-expanded", "false");
+  homeRecoveryHelpButton.setAttribute("aria-controls", "home-recovery-help");
+  const homeRecoveryHelp = element(
+    document,
+    "p",
+    "home-recovery-help muted",
+    STRINGS["home.unfinishedMatchHelp"],
+  );
+  homeRecoveryHelp.id = "home-recovery-help";
+  homeRecoveryHelp.hidden = true;
+  homeRecoveryHelpButton.addEventListener("click", () => {
+    const expanded = homeRecoveryHelpButton.getAttribute("aria-expanded") === "true";
+    homeRecoveryHelpButton.setAttribute("aria-expanded", String(!expanded));
+    homeRecoveryHelp.hidden = expanded;
+  });
+  homeRecoveryHeader.append(homeRecoveryHeading, homeRecoveryHelpButton);
+  const homeRecoveryMessage = element(
+    document,
+    "p",
+    "home-recovery-message",
+    STRINGS["home.unfinishedMatchSummary"],
+  );
+  const homeRecoveryStatus = element(document, "p", "home-recovery-status");
+  homeRecoveryStatus.setAttribute("role", "status");
+  homeRecoveryStatus.setAttribute("aria-live", "polite");
+  const homeRecoveryHint = element(document, "p", "home-recovery-hint muted");
   const homeRecoveryActions = element(document, "div", "home-recovery-actions");
+  const watchRecoveryMatchButton = button(
+    document,
+    STRINGS["home.watchMatch"],
+    "primary",
+  );
+  const concedeRecoveryButton = button(
+    document,
+    STRINGS["home.concedeAndLeave"],
+    "destructive",
+  );
   const retryConnectionButton = button(
     document,
     STRINGS["home.retryConnection"],
@@ -613,15 +711,26 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     "destructive",
   );
   const exitSetupButton = button(document, STRINGS["pairing.cancelPairing"]);
+  watchRecoveryMatchButton.hidden = true;
+  concedeRecoveryButton.hidden = true;
   retryConnectionButton.hidden = true;
   endInterruptedMatchButton.hidden = true;
   exitSetupButton.hidden = true;
   homeRecoveryActions.append(
+    watchRecoveryMatchButton,
+    concedeRecoveryButton,
     retryConnectionButton,
     endInterruptedMatchButton,
     exitSetupButton,
   );
-  homeRecovery.append(homeRecoveryMessage, homeRecoveryActions);
+  homeRecovery.append(
+    homeRecoveryHeader,
+    homeRecoveryHelp,
+    homeRecoveryMessage,
+    homeRecoveryStatus,
+    homeRecoveryHint,
+    homeRecoveryActions,
+  );
   const homeChallengeAction = element(document, "div", "home-challenge-action");
   const createButton = button(document, STRINGS["home.createChallenge"], "primary");
   const homeWaiting = element(document, "section", "home-waiting");
@@ -932,7 +1041,17 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
   matchMenuButton.setAttribute("aria-haspopup", "dialog");
   matchMenuButton.setAttribute("aria-expanded", "false");
   matchMenuButton.hidden = true;
-  matchActions.append(matchMenuButton);
+  const exitWatchButton = button(
+    document,
+    STRINGS["match.exitWatch"],
+    "exit-watch-button",
+  );
+  exitWatchButton.hidden = true;
+  matchActions.append(matchMenuButton, exitWatchButton);
+  const watchStatus = element(document, "aside", "watch-status");
+  watchStatus.setAttribute("role", "status");
+  watchStatus.setAttribute("aria-live", "polite");
+  watchStatus.hidden = true;
   const matchMenu = element(document, "section", "match-menu-popover");
   matchMenu.setAttribute("role", "dialog");
   matchMenu.setAttribute("aria-modal", "false");
@@ -1060,6 +1179,7 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
   match.append(
     arena,
     matchActions,
+    watchStatus,
     matchMenu,
     gameplayTip,
     gameplayTipAnnouncement,
@@ -1195,20 +1315,65 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     pairingInterruptionActions,
   );
   pairingInterruption.append(pairingInterruptionCard);
-  pairingInterruption.addEventListener("keydown", (event) => {
-    if (event.key !== "Tab" || pairingInterruption.hidden) return;
-    const first = goToMatchButton;
-    const last = cancelPairingButton;
-    if (event.shiftKey) {
-      if (document.activeElement !== first) return;
-      event.preventDefault();
-      last.focus();
-      return;
-    }
-    if (document.activeElement !== last) return;
-    event.preventDefault();
-    first.focus();
-  });
+  trapFocusBetween(
+    document,
+    pairingInterruption,
+    goToMatchButton,
+    cancelPairingButton,
+  );
+
+  let recoveryConfirmationReturnFocus: HTMLElement | null = null;
+  const recoveryConfirmation = element(
+    document,
+    "section",
+    "recovery-confirmation-backdrop",
+  );
+  recoveryConfirmation.setAttribute("role", "dialog");
+  recoveryConfirmation.setAttribute("aria-modal", "true");
+  recoveryConfirmation.setAttribute(
+    "aria-labelledby",
+    "recovery-confirmation-heading",
+  );
+  recoveryConfirmation.setAttribute(
+    "aria-describedby",
+    "recovery-confirmation-message",
+  );
+  recoveryConfirmation.hidden = true;
+  const recoveryConfirmationCard = element(
+    document,
+    "div",
+    "recovery-confirmation-card",
+  );
+  const recoveryConfirmationHeading = element(document, "h2");
+  recoveryConfirmationHeading.id = "recovery-confirmation-heading";
+  const recoveryConfirmationMessage = element(document, "p", "muted");
+  recoveryConfirmationMessage.id = "recovery-confirmation-message";
+  const recoveryConfirmationActions = element(
+    document,
+    "div",
+    "menu-actions recovery-confirmation-actions",
+  );
+  const cancelRecoveryConfirmationButton = button(
+    document,
+    STRINGS["common.cancel"],
+  );
+  const confirmRecoveryButton = button(document, "", "destructive");
+  recoveryConfirmationActions.append(
+    cancelRecoveryConfirmationButton,
+    confirmRecoveryButton,
+  );
+  recoveryConfirmationCard.append(
+    recoveryConfirmationHeading,
+    recoveryConfirmationMessage,
+    recoveryConfirmationActions,
+  );
+  recoveryConfirmation.append(recoveryConfirmationCard);
+  trapFocusBetween(
+    document,
+    recoveryConfirmation,
+    cancelRecoveryConfirmationButton,
+    confirmRecoveryButton,
+  );
 
   layer.append(
     homeParts.screen,
@@ -1218,6 +1383,7 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     match,
     resultsParts.screen,
     pairingInterruption,
+    recoveryConfirmation,
   );
   container.append(canvas, layer);
   mount.replaceChildren(container);
@@ -1264,7 +1430,14 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     home: homeParts.screen,
     homeStatus,
     homeRecovery,
+    homeRecoveryHeading,
+    homeRecoveryHelpButton,
+    homeRecoveryHelp,
     homeRecoveryMessage,
+    homeRecoveryStatus,
+    homeRecoveryHint,
+    watchRecoveryMatchButton,
+    concedeRecoveryButton,
     retryConnectionButton,
     endInterruptedMatchButton,
     exitSetupButton,
@@ -1328,6 +1501,8 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     opponentReadyStatus,
     matchActions,
     matchMenuButton,
+    exitWatchButton,
+    watchStatus,
     matchMenu,
     matchMenuMessage,
     matchMenuCloseButton,
@@ -1362,6 +1537,11 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     pairingInterruptionMessage,
     goToMatchButton,
     cancelPairingButton,
+    recoveryConfirmation,
+    recoveryConfirmationHeading,
+    recoveryConfirmationMessage,
+    cancelRecoveryConfirmationButton,
+    confirmRecoveryButton,
     show(screen): void {
       if (screen !== "help") stopHelpPreviewAnimation();
       for (const [name, node] of Object.entries(screens)) node.hidden = name !== screen;
@@ -1373,38 +1553,125 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     },
     setHomeRecovery(presentation): void {
       homeRecovery.hidden = presentation === null;
+      homeRecoveryHeading.textContent = STRINGS["home.unfinishedMatch"];
+      homeRecoveryHelpButton.hidden = false;
+      homeRecoveryMessage.textContent = STRINGS["home.unfinishedMatchSummary"];
+      homeRecoveryStatus.textContent = "";
+      homeRecoveryHint.textContent = "";
+      watchRecoveryMatchButton.hidden = true;
+      concedeRecoveryButton.hidden = true;
       retryConnectionButton.hidden = true;
+      retryConnectionButton.textContent = STRINGS["home.retryConnection"];
       endInterruptedMatchButton.hidden = true;
       endInterruptedMatchButton.disabled = false;
       exitSetupButton.hidden = true;
       exitSetupButton.disabled = false;
       if (presentation === null) {
-        homeRecoveryMessage.textContent = "";
+        homeRecoveryHelp.hidden = true;
+        homeRecoveryHelpButton.setAttribute("aria-expanded", "false");
         delete homeRecovery.dataset.kind;
         return;
       }
       homeRecovery.dataset.kind = presentation.kind;
       if (presentation.kind === "active-elsewhere") {
-        homeRecoveryMessage.textContent = STRINGS["home.gameActiveElsewhere"];
+        homeRecoveryStatus.textContent = STRINGS["home.gameActiveElsewhere"];
+        watchRecoveryMatchButton.hidden = false;
+        concedeRecoveryButton.hidden = false;
+        return;
+      }
+      if (presentation.kind === "setup-elsewhere") {
+        homeRecoveryHeading.textContent = STRINGS["home.pairingActiveElsewhere"];
+        homeRecoveryHelpButton.hidden = true;
+        homeRecoveryHelp.hidden = true;
+        homeRecoveryHelpButton.setAttribute("aria-expanded", "false");
+        homeRecoveryMessage.textContent = STRINGS["home.pairingActiveElsewhereSummary"];
         return;
       }
       if (presentation.kind === "interrupted") {
+        watchRecoveryMatchButton.hidden = false;
+        concedeRecoveryButton.hidden = false;
+        homeRecoveryHint.textContent = STRINGS["home.concedeNow"];
         if (presentation.remainingSeconds <= 0) {
-          homeRecoveryMessage.textContent = STRINGS["home.gameInterruptedReady"];
+          homeRecoveryStatus.textContent = STRINGS["home.neutralExitAvailable"];
           endInterruptedMatchButton.hidden = false;
         } else {
-          homeRecoveryMessage.textContent = formatString("home.gameInterrupted", {
+          homeRecoveryStatus.textContent = formatString("home.neutralExitUnlocks", {
             seconds: Math.ceil(presentation.remainingSeconds),
           });
         }
         return;
       }
-      homeRecoveryMessage.textContent = STRINGS["home.confirmingLong"];
+      if (presentation.kind === "ending") {
+        homeRecoveryStatus.textContent = presentation.delayed
+          ? STRINGS["home.stillWaitingForConfirmation"]
+          : STRINGS["home.endingMatch"];
+        retryConnectionButton.hidden = !presentation.delayed;
+        retryConnectionButton.textContent = STRINGS["home.retryNow"];
+        return;
+      }
+      homeRecoveryHeading.textContent = STRINGS["home.pairingDelayed"];
+      homeRecoveryHelpButton.hidden = true;
+      homeRecoveryHelp.hidden = true;
+      homeRecoveryHelpButton.setAttribute("aria-expanded", "false");
+      homeRecoveryMessage.textContent = "";
+      homeRecoveryStatus.textContent = STRINGS["home.confirmingLong"];
       retryConnectionButton.hidden = false;
       exitSetupButton.hidden = false;
       exitSetupButton.textContent = presentation.exit === "withdraw"
         ? STRINGS["lobby.withdraw"]
         : STRINGS["pairing.cancelPairing"];
+    },
+    setRecoveryConfirmation(kind): void {
+      if (kind === null) {
+        recoveryConfirmation.hidden = true;
+        delete recoveryConfirmation.dataset.kind;
+        const returnFocus = recoveryConfirmationReturnFocus;
+        recoveryConfirmationReturnFocus = null;
+        if (returnFocus?.isConnected === true) returnFocus.focus();
+        return;
+      }
+      if (recoveryConfirmation.hidden) {
+        recoveryConfirmationReturnFocus = document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+      }
+      recoveryConfirmation.dataset.kind = kind;
+      const concede = kind === "concede";
+      recoveryConfirmationHeading.textContent = concede
+        ? STRINGS["home.concedeConfirmationHeading"]
+        : STRINGS["home.neutralConfirmationHeading"];
+      recoveryConfirmationMessage.textContent = concede
+        ? STRINGS["home.concedeConfirmationMessage"]
+        : STRINGS["home.neutralConfirmationMessage"];
+      confirmRecoveryButton.textContent = concede
+        ? STRINGS["home.concedeConfirmationAction"]
+        : STRINGS["home.endInterruptedMatch"];
+      recoveryConfirmation.hidden = false;
+      cancelRecoveryConfirmationButton.focus();
+    },
+    setReadOnlyWatchStatus(status): void {
+      exitWatchButton.hidden = status === null;
+      watchStatus.hidden = status === null || status.kind === "live";
+      if (status === null) {
+        watchStatus.textContent = "";
+        delete watchStatus.dataset.kind;
+        return;
+      }
+      watchStatus.dataset.kind = status.kind;
+      if (status.kind === "waiting") {
+        watchStatus.textContent = STRINGS["match.waitingForLiveData"];
+        return;
+      }
+      if (status.kind === "stale") {
+        const seconds = Number.isFinite(status.ageSeconds)
+          ? Math.max(0, Math.ceil(status.ageSeconds))
+          : 0;
+        watchStatus.textContent = formatString("match.liveUpdatesInterrupted", {
+          seconds,
+        });
+        return;
+      }
+      watchStatus.textContent = "";
     },
     setLobbyActivityCounts(waiting, live): void {
       const safeWaiting = Number.isSafeInteger(waiting) ? Math.max(0, waiting) : 0;

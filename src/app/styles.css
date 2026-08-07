@@ -84,6 +84,14 @@ button:disabled {
   cursor: not-allowed;
 }
 
+.home-challenge-action > button.primary[data-availability="unavailable"] {
+  border-color: rgba(147, 174, 217, 0.25);
+  color: var(--muted);
+  background: rgba(24, 34, 51, 0.92);
+  box-shadow: none;
+  opacity: 1;
+}
+
 button.destructive {
   border-color: rgba(255, 98, 119, 0.72);
   color: #fff7f8;
@@ -268,6 +276,7 @@ button.destructive:focus-visible {
 }
 
 .home-recovery {
+  position: relative;
   display: grid;
   gap: 0.65rem;
   margin-block: 1rem;
@@ -277,15 +286,105 @@ button.destructive:focus-visible {
   background: rgba(92, 56, 12, 0.22);
 }
 
-.home-recovery-message {
+.home-recovery-header {
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
+}
+
+.home-recovery-heading {
   margin: 0;
+  font-size: 1.05rem;
+}
+
+.home-recovery-help-button {
+  display: grid;
+  place-items: center;
+  width: 1.65rem;
+  min-width: 1.65rem;
+  height: 1.65rem;
+  min-height: 1.65rem;
+  padding: 0;
+  border-radius: 50%;
+  color: var(--muted);
+  background: rgba(12, 20, 36, 0.92);
+  box-shadow: none;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.home-recovery-help {
+  position: absolute;
+  z-index: 2;
+  top: 2.85rem;
+  right: 0.85rem;
+  width: min(24rem, calc(100% - 1.7rem));
+  margin: 0;
+  padding: 0.65rem 0.7rem;
+  border: 1px solid rgba(147, 174, 217, 0.22);
+  border-radius: var(--radius-sm);
+  background: rgba(4, 8, 16, 0.72);
+  box-shadow: var(--shadow);
+  line-height: 1.4;
+}
+
+.home-recovery-message,
+.home-recovery-status,
+.home-recovery-hint {
+  margin: 0;
+}
+
+.home-recovery-message,
+.home-recovery-status {
   font-weight: 800;
+}
+
+.home-recovery-status {
+  color: #ffdca8;
+  font-variant-numeric: tabular-nums;
+}
+
+.home-recovery-status:empty,
+.home-recovery-hint:empty {
+  display: none;
 }
 
 .home-recovery-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.55rem;
+}
+
+.recovery-confirmation-backdrop {
+  position: absolute;
+  z-index: 22;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding:
+    calc(var(--safe-top) + 1rem) calc(var(--safe-right) + 1rem)
+    calc(var(--safe-bottom) + 1rem) calc(var(--safe-left) + 1rem);
+  background: rgba(3, 6, 12, 0.76);
+  pointer-events: auto;
+  backdrop-filter: blur(7px);
+}
+
+.recovery-confirmation-card {
+  width: min(100%, 28rem);
+  padding: 1.2rem;
+  border: 1px solid rgba(255, 98, 119, 0.5);
+  border-radius: var(--radius-md);
+  background: var(--panel-strong);
+  box-shadow: var(--shadow);
+}
+
+.recovery-confirmation-card h2,
+.recovery-confirmation-card p {
+  margin-top: 0;
+}
+
+.recovery-confirmation-actions {
+  margin-bottom: 0;
 }
 
 .lobby-browser-panel {
@@ -1159,6 +1258,7 @@ button.destructive:focus-visible {
 }
 
 .center-overlay[data-presentation="status"] .center-overlay-card {
+  width: min(25rem, calc(100vw - 2rem));
   border-color: rgba(94, 216, 255, 0.55);
 }
 
@@ -1168,7 +1268,9 @@ button.destructive:focus-visible {
   color: var(--ink);
   font-size: 0.84rem;
   font-weight: 800;
+  font-variant-numeric: tabular-nums;
   letter-spacing: 0.015em;
+  white-space: pre-line;
 }
 
 .ready-panel {
@@ -1261,8 +1363,48 @@ button.destructive:focus-visible {
   z-index: 9;
   top: calc(var(--safe-top) + 0.45rem);
   left: 50%;
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
   translate: -50% 0;
   pointer-events: auto;
+}
+
+.match-actions .exit-watch-button {
+  min-height: 44px;
+  padding-inline: 0.9rem;
+  border-color: rgba(94, 216, 255, 0.58);
+  background: rgba(12, 20, 36, 0.94);
+  font-weight: 800;
+  white-space: nowrap;
+  backdrop-filter: blur(8px);
+}
+
+.watch-status {
+  position: absolute;
+  z-index: 8;
+  top: 50%;
+  left: 50%;
+  max-width: min(28rem, calc(100% - 2rem));
+  margin: 0;
+  padding: 0.65rem 0.9rem;
+  border: 1px solid rgba(94, 216, 255, 0.55);
+  border-radius: 999px;
+  background: rgba(7, 13, 24, 0.94);
+  box-shadow: 0 0.35rem 1.2rem rgba(0, 0, 0, 0.32);
+  translate: -50% -50%;
+  color: var(--ink);
+  text-align: center;
+  font-size: 0.84rem;
+  font-weight: 800;
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+}
+
+.watch-status[data-kind="stale"] {
+  top: calc(var(--safe-top) + 4.25rem);
+  border-color: rgba(255, 204, 102, 0.6);
+  translate: -50% 0;
 }
 
 .match-actions .match-menu-button {
@@ -2017,6 +2159,7 @@ kbd {
   }
 
   .home-waiting-actions,
+  .home-recovery-actions,
   .lobby-sections {
     grid-template-columns: minmax(0, 1fr);
   }

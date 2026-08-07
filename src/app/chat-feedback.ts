@@ -55,7 +55,7 @@ export interface MatchResultFeedbackInput {
   seatA: ChatResultPlayer;
   seatB: ChatResultPlayer;
   outcome: "seat-a" | "seat-b" | "draw" | "neutral";
-  reason?: "connection-lost";
+  reason?: "connection-lost" | "concession";
   headToHead: HeadToHeadScore;
   activity: ChatActivityCounts;
 }
@@ -225,10 +225,17 @@ export function matchStartedFeedback(
 }
 
 function resultInfo(input: MatchResultFeedbackInput): string {
-  if (input.outcome === "neutral") {
-    if (input.reason === "connection-lost") {
-      return infoText("Match ended · connection lost · no result");
+  if (input.reason === "concession") {
+    if (input.outcome !== "seat-a" && input.outcome !== "seat-b") {
+      throw new RangeError("A concession must name a winning seat");
     }
+    const winner = input.outcome === "seat-a" ? input.seatA : input.seatB;
+    const conceder = input.outcome === "seat-a" ? input.seatB : input.seatA;
+    return infoText(
+      `${displayName(conceder.displayName)} conceded · ${displayName(winner.displayName)} wins`,
+    );
+  }
+  if (input.outcome === "neutral") {
     return infoText("No result · standings unchanged");
   }
   const seatAFirst = input.outcome !== "seat-b";
@@ -264,6 +271,9 @@ export function matchResultFeedback(
   assertId(input.seatB.id, "Seat B player ID");
   if (input.seatA.id === input.seatB.id) {
     throw new RangeError("Result players must be different");
+  }
+  if (input.outcome === "neutral" && input.reason === "connection-lost") {
+    return { summary: tournamentSummary(input.activity) };
   }
   const info = resultInfo(input);
   return {

@@ -17,6 +17,11 @@ export interface RecoveryPresentationInput {
   countdownTicks: number;
   connectionStatus: CompetitiveConnectionStatus;
   resuming: boolean;
+  /** Visual frame for the one/two/three-dot reconnecting loop. */
+  reconnectingDotCount?: number;
+  /** Present only while a visible controller is observing this incident. */
+  interruptionRemainingSeconds?: number;
+  reducedMotion?: boolean;
 }
 
 export interface RecoveryPresentation {
@@ -24,6 +29,22 @@ export interface RecoveryPresentation {
   message: string | null;
   inputsEnabled: boolean;
   countdownCueSecond: number | null;
+}
+
+function reconnectingMessage(input: RecoveryPresentationInput): string {
+  if (input.interruptionRemainingSeconds === undefined) {
+    return STRINGS["match.reconnecting"];
+  }
+  const requestedDots = input.reducedMotion
+    ? 3
+    : Number.isFinite(input.reconnectingDotCount)
+      ? Math.round(input.reconnectingDotCount ?? 3)
+      : 3;
+  const dots = ".".repeat(Math.min(3, Math.max(1, requestedDots)));
+  const seconds = Number.isFinite(input.interruptionRemainingSeconds)
+    ? Math.max(0, Math.ceil(input.interruptionRemainingSeconds))
+    : 0;
+  return `Reconnecting${dots}\n${formatString("match.reconnectDeadline", { seconds })}`;
 }
 
 export function recoveryPresentationFor(
@@ -61,7 +82,7 @@ export function recoveryPresentationFor(
     if (input.connectionStatus !== "connected") {
       return {
         surface: "status",
-        message: STRINGS["match.reconnecting"],
+        message: reconnectingMessage(input),
         inputsEnabled: false,
         countdownCueSecond: null,
       };
@@ -76,11 +97,13 @@ export function recoveryPresentationFor(
   if (input.phase === "network-pause") {
     return {
       surface: "status",
-      message: input.connectionStatus === "unstable"
-        ? STRINGS["match.connectionInterrupted"]
-        : input.connectionStatus === "resynchronizing"
-          ? STRINGS["match.resynchronizing"]
-          : STRINGS["match.reconnecting"],
+      message: input.connectionStatus === "resynchronizing"
+        ? STRINGS["match.resynchronizing"]
+        : input.interruptionRemainingSeconds !== undefined
+          ? reconnectingMessage(input)
+          : input.connectionStatus === "unstable"
+            ? STRINGS["match.connectionInterrupted"]
+            : reconnectingMessage(input),
       inputsEnabled: false,
       countdownCueSecond: null,
     };

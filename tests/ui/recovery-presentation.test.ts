@@ -87,6 +87,49 @@ describe("recovery presentation policy", () => {
     });
   });
 
+  it("shows the visible controller what happens when reconnecting times out", () => {
+    expect(recoveryPresentationFor({
+      phase: "network-pause",
+      countdownTicks: 0,
+      connectionStatus: "reconnecting",
+      resuming: false,
+      reconnectingDotCount: 2,
+      interruptionRemainingSeconds: 19,
+    })).toEqual({
+      surface: "status",
+      message: "Reconnecting..\nMatch ends in 19s if your opponent does not return.",
+      inputsEnabled: false,
+      countdownCueSecond: null,
+    });
+  });
+
+  it("keeps reconnecting copy static when reduced motion is enabled", () => {
+    expect(recoveryPresentationFor({
+      phase: "network-pause",
+      countdownTicks: 0,
+      connectionStatus: "reconnecting",
+      resuming: false,
+      reconnectingDotCount: 1,
+      interruptionRemainingSeconds: 8,
+      reducedMotion: true,
+    }).message).toBe(
+      "Reconnecting...\nMatch ends in 8s if your opponent does not return.",
+    );
+  });
+
+  it("keeps the deadline visible throughout the interrupted incident", () => {
+    expect(recoveryPresentationFor({
+      phase: "network-pause",
+      countdownTicks: 0,
+      connectionStatus: "unstable",
+      resuming: false,
+      reconnectingDotCount: 1,
+      interruptionRemainingSeconds: 20,
+    }).message).toBe(
+      "Reconnecting.\nMatch ends in 20s if your opponent does not return.",
+    );
+  });
+
   it("shows returned peer traffic as compact resynchronization", () => {
     expect(recoveryPresentationFor({
       phase: "network-pause",

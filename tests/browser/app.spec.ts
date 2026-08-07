@@ -1128,6 +1128,46 @@ async function dropOwnChallengeCreatedEchoes(
   }, maximumDrops);
 }
 
+async function suppressOwnMatchConcededEchoes(
+  context: BrowserContext,
+): Promise<void> {
+  await context.addInitScript(() => {
+    let installedHost: WebxdcHost | undefined;
+    let suppressEchoes = true;
+    (
+      window as unknown as {
+        __splitStackReleaseOwnMatchConcededEchoes: () => void;
+      }
+    ).__splitStackReleaseOwnMatchConcededEchoes = () => {
+      suppressEchoes = false;
+    };
+    Object.defineProperty(window, "webxdc", {
+      configurable: true,
+      get: () => installedHost,
+      set: (host: WebxdcHost) => {
+        host.sendUpdateInterval = 0;
+        const setUpdateListener = host.setUpdateListener.bind(host);
+        host.setUpdateListener = (listener, serial) =>
+          setUpdateListener((update) => {
+            const payload = update.payload as {
+              readonly kind?: string;
+              readonly actor?: { readonly id?: string };
+            };
+            if (
+              suppressEchoes &&
+              payload.kind === "match-conceded" &&
+              payload.actor?.id === host.selfAddr
+            ) {
+              return;
+            }
+            listener(update);
+          }, serial);
+        installedHost = host;
+      },
+    });
+  });
+}
+
 async function failFirstChatFeedbackUpdate(context: BrowserContext): Promise<void> {
   await context.addInitScript(() => {
     let installedHost: WebxdcHost | undefined;
@@ -2196,28 +2236,21 @@ test("replaces a silent competitive channel without registering a second listene
   await expect(localPane).toHaveAttribute("aria-disabled", "false");
   await expectRecoveryStatusCentered(seatA);
 
-  const hardPause = seatA.getByText(
-    "Connection interrupted — game paused…",
-    { exact: true },
+  const reconnecting = seatA.getByText(
+    /Reconnecting\.{1,3}\s*Match ends in \d+s if your opponent does not return\./,
   );
   await advanceMonotonicUntilVisible(
     seatA,
-    hardPause,
+    reconnecting,
     RULES.network.missingPeerMs,
   );
-  await expect(hardPause).toBeVisible();
+  await expect(reconnecting).toBeVisible();
   await expect(recoveryOverlay).toHaveAttribute("data-presentation", "status");
   await expect(localPane).toHaveAttribute("aria-disabled", "true");
   await expectRecoveryStatusCentered(seatA);
 
-  const reconnecting = seatA.getByText("Reconnecting…", { exact: true });
-  await advanceMonotonicUntilVisible(
-    seatA,
-    reconnecting,
-    RULES.network.reconnectingMs,
-  );
-  await expect(reconnecting).toBeVisible();
-  await expectRecoveryStatusCentered(seatA);
+  await advanceMonotonic(seatA, RULES.network.reconnectingMs);
+  await seatA.waitForTimeout(60);
 
   await expect
     .poll(
@@ -2657,11 +2690,20 @@ test("an owned orphan recovery continues while its participant watches another l
     recreated.getByRole("heading", { name: "Split Stack", exact: true }),
   ).toBeVisible();
   const endInterruptedMatch = recreated.getByRole("button", {
-    name: "End interrupted match",
+    name: "End match with no result",
     exact: true,
   });
   await expect(endInterruptedMatch).toBeVisible();
   await endInterruptedMatch.click();
+  const confirmation = recreated.getByRole("dialog", {
+    name: "End match with no result?",
+    exact: true,
+  });
+  await expect(confirmation).toBeVisible();
+  await confirmation.getByRole("button", {
+    name: "End match with no result",
+    exact: true,
+  }).click();
   await expect.poll(connectionLossEventIds, { timeout: 10_000 }).toEqual([
     expect.any(String),
   ]);
@@ -2763,9 +2805,12 @@ test("a live reload stays on navigable Home without resetting the committed matc
   })).toBeVisible({
     timeout: 15_000,
   });
-  await expect(seatB.getByText(
-    /game (?:active in another session|interrupted · waiting for reconnection)/i,
-  )).toBeVisible({ timeout: 15_000 });
+  await expect(seatB.getByText("Unfinished match", { exact: true })).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(
+    seatB.getByText("This copy can watch but cannot resume playing.", { exact: true }),
+  ).toBeVisible();
   for (const boardName of [
     "Your board",
     "Opponent board",
@@ -2780,11 +2825,478 @@ test("a live reload stays on navigable Home without resetting the committed matc
   await expect(
     seatB.getByRole("button", { name: /^Lobby(?: ·|$)/ }),
   ).toBeEnabled();
-  await expect(seatA.getByText("Reconnecting…", { exact: true })).toBeVisible({
-    timeout: 15_000,
-  });
+  await expect(
+    seatA.getByText(
+      /Reconnecting\.{1,3}\s*Match ends in \d+s if your opponent does not return\./,
+    ),
+  ).toBeVisible({ timeout: 15_000 });
   expect(await numericText(localScore(seatA))).toBeGreaterThanOrEqual(progressedScore);
   await seatB.close();
+});
+
+test("a surviving controller releases a reloaded opponent after its reconnect grace", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(60_000);
+  await installControllableMonotonicClock(context);
+  await enforceSingleRealtimeListener(context);
+  const { seatA, seatB } = await openVersusPair(context, page);
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
+  await advancePairMonotonic(seatA, seatB, 4_000, 500);
+  await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
+
+  const committedMatchId = () => seatA.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{
+      readonly payload?: { readonly kind?: string; readonly matchId?: string };
+    }>;
+    return updates.find((update) => update.payload?.kind === "match-started")
+      ?.payload?.matchId ?? null;
+  });
+  await expect.poll(committedMatchId).not.toBeNull();
+  const matchId = await committedMatchId();
+  if (matchId === null) throw new Error("Expected a durably committed live match");
+
+  await seatB.reload();
+  await expect(
+    seatB.getByRole("heading", { name: "Split Stack", exact: true }),
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(seatB.getByText("Unfinished match", { exact: true })).toBeVisible();
+  await expect(
+    seatB.getByRole("button", { name: "Create challenge", exact: true }),
+  ).toBeDisabled();
+
+  const connectionLost = seatA.getByRole("heading", {
+    name: "Connection lost",
+    exact: true,
+  });
+  await advanceMonotonicUntilVisible(
+    seatA,
+    connectionLost,
+    RULES.network.controllerReconnectGraceMs + 1_000,
+    250,
+  );
+  await expect(connectionLost).toBeVisible({ timeout: 5_000 });
+
+  const neutralRecovery = () => seatB.evaluate((ownedMatchId) => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{
+      readonly payload?: {
+        readonly kind?: string;
+        readonly eventId?: string;
+        readonly matchId?: string;
+        readonly result?: {
+          readonly outcome?: string;
+          readonly reason?: string;
+        };
+      };
+      readonly info?: string;
+      readonly href?: string;
+      readonly summary?: string;
+      readonly notify?: Record<string, string>;
+    }>;
+    const terminalUpdates = updates.filter((update) =>
+      update.payload?.kind === "match-finished" &&
+      update.payload.matchId === ownedMatchId &&
+      update.payload.result?.reason === "connection-lost"
+    );
+    const terminals = [...new Map(terminalUpdates.flatMap((update) =>
+      update.payload?.eventId === undefined
+        ? []
+        : [[update.payload.eventId, {
+            eventId: update.payload.eventId,
+            outcome: update.payload.result?.outcome,
+            reason: update.payload.result?.reason,
+          }] as const]
+    )).values()];
+    return {
+      terminals,
+      summaries: [...new Set(terminalUpdates.flatMap((update) =>
+        update.summary === undefined ? [] : [update.summary]
+      ))],
+      infos: terminalUpdates.flatMap((update) =>
+        update.info === undefined ? [] : [update.info]
+      ),
+      hrefs: terminalUpdates.flatMap((update) =>
+        update.href === undefined ? [] : [update.href]
+      ),
+      notifications: terminalUpdates.flatMap((update) =>
+        update.notify === undefined ? [] : [update.notify]
+      ),
+    };
+  }, matchId);
+  await expect.poll(neutralRecovery, { timeout: 10_000 }).toEqual({
+    terminals: [{
+      eventId: expect.any(String),
+      outcome: "desync",
+      reason: "connection-lost",
+    }],
+    summaries: ["0 wait · 0 live"],
+    infos: [],
+    hrefs: [],
+    notifications: [],
+  });
+
+  await seatA.getByRole("button", { name: "Home", exact: true }).click();
+  for (const participant of [seatA, seatB]) {
+    await expect(
+      participant.getByRole("button", { name: "Create challenge", exact: true }),
+    ).toBeEnabled({ timeout: 10_000 });
+    await openLobby(participant);
+    await expect(participant.locator(".lobby-summary")).toContainText("0 live");
+    const recentResult = participant.locator(".lobby-result-row");
+    await expect(recentResult).toHaveCount(1);
+    await expect(recentResult).toContainText(/Connection lost · neutral result/i);
+  }
+
+  await seatB.close();
+});
+
+test("a recreated participant can explicitly watch its own live match read only", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(45_000);
+  const { seatA, seatB } = await openVersusPair(context, page);
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
+  await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
+  await expect.poll(() => seatA.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{ readonly payload?: { readonly kind?: string } }>;
+    return updates.some((update) => update.payload?.kind === "match-started");
+  })).toBe(true);
+
+  await seatB.reload();
+  await expect(
+    seatB.getByRole("heading", { name: "Split Stack", exact: true }),
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(seatB.getByText("Unfinished match", { exact: true })).toBeVisible();
+  await expect(
+    seatB.getByText("This copy can watch but cannot resume playing.", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    seatB.getByText("The original match is still active.", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    seatB.getByRole("button", { name: "Create challenge", exact: true }),
+  ).toBeDisabled();
+
+  await seatB.getByRole("button", { name: "Watch match", exact: true }).click();
+  await expect(
+    seatB.getByRole("application", { name: "Seat A board" }),
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(
+    seatB.getByRole("application", { name: "Seat B board" }),
+  ).toBeVisible();
+  await expect(seatB.locator('.player-pane[data-side="left"]')).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+  await expect(seatB.locator('.player-pane[data-side="right"]')).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+  await expect(
+    seatB.getByRole("button", { name: "Exit watch", exact: true }),
+  ).toBeVisible();
+
+  await seatB.getByRole("button", { name: "Exit watch", exact: true }).click();
+  await expect(
+    seatB.getByRole("heading", { name: "Split Stack", exact: true }),
+  ).toBeVisible();
+  await expect(seatA.getByText(/Reconnecting\.{1,3}/)).toBeVisible({
+    timeout: 15_000,
+  });
+
+  await seatB.close();
+  await seatA.close();
+});
+
+test("a recreated participant can concede once and unlock competitive play", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(45_000);
+  const { seatA, seatB } = await openVersusPair(context, page);
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
+  await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
+  await expect.poll(() => seatA.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{ readonly payload?: { readonly kind?: string } }>;
+    return updates.some((update) => update.payload?.kind === "match-started");
+  })).toBe(true);
+
+  await seatB.reload();
+  await expect(
+    seatB.getByRole("heading", { name: "Split Stack", exact: true }),
+  ).toBeVisible({ timeout: 15_000 });
+  await seatB.getByRole("button", {
+    name: "Concede and leave",
+    exact: true,
+  }).click();
+
+  const confirmation = seatB.getByRole("dialog", {
+    name: "Concede this match?",
+  });
+  await expect(confirmation).toBeVisible();
+  await expect(confirmation).toContainText(
+    "Your opponent will win, and this cannot be undone.",
+  );
+  await expect(
+    confirmation.getByRole("button", { name: "Cancel", exact: true }),
+  ).toBeFocused();
+  await confirmation.getByRole("button", {
+    name: "Concede match",
+    exact: true,
+  }).click();
+
+  const create = seatB.getByRole("button", {
+    name: "Create challenge",
+    exact: true,
+  });
+  await expect(create).toBeEnabled({ timeout: 15_000 });
+  await expect(
+    seatA.getByRole("heading", { name: "Victory", exact: true }),
+  ).toBeVisible({ timeout: 15_000 });
+
+  await expect.poll(() => seatB.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{
+      readonly info?: string;
+      readonly payload?: {
+        readonly eventId?: string;
+        readonly kind?: string;
+      };
+    }>;
+    return {
+      concessionEventIds: [...new Set(updates.flatMap((update) =>
+        update.payload?.kind === "match-conceded" &&
+          update.payload.eventId !== undefined
+          ? [update.payload.eventId]
+          : []
+      ))],
+      concessionMessages: updates.flatMap((update) =>
+        update.info === "Bob conceded · Alice wins" ? [update.info] : []
+      ),
+    };
+  }), { timeout: 15_000 }).toEqual({
+    concessionEventIds: [expect.any(String)],
+    concessionMessages: ["Bob conceded · Alice wins"],
+  });
+
+  await openLobby(seatB);
+  const aliceStanding = seatB.locator(
+    '.standings-table tr[data-player-id="alice@example.test"]',
+  );
+  const bobStanding = seatB.locator(
+    '.standings-table tr[data-player-id="bob@example.test"]',
+  );
+  await expect(aliceStanding.locator("td").nth(0)).toHaveText("1");
+  await expect(aliceStanding.locator("td").nth(1)).toHaveText("0");
+  await expect(bobStanding.locator("td").nth(0)).toHaveText("0");
+  await expect(bobStanding.locator("td").nth(1)).toHaveText("1");
+
+  await seatB.close();
+  await seatA.close();
+});
+
+test("an externally finished match dismisses an obsolete recovery confirmation", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(45_000);
+  const { seatA, seatB } = await openVersusPair(context, page);
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
+  await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
+  await expect.poll(() => seatA.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{ readonly payload?: { readonly kind?: string } }>;
+    return updates.some((update) => update.payload?.kind === "match-started");
+  })).toBe(true);
+
+  await seatB.reload();
+  await expect(
+    seatB.getByRole("heading", { name: "Split Stack", exact: true }),
+  ).toBeVisible({ timeout: 15_000 });
+  await seatB.getByRole("button", {
+    name: "Concede and leave",
+    exact: true,
+  }).click();
+  const obsoleteConfirmation = seatB.getByRole("dialog", {
+    name: "Concede this match?",
+  });
+  await expect(obsoleteConfirmation).toBeVisible();
+
+  await leaveThroughMatchMenu(seatA);
+
+  await expect(obsoleteConfirmation).toBeHidden({ timeout: 15_000 });
+  await expect(
+    seatB.getByRole("heading", { name: "Split Stack", exact: true }),
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(
+    seatB.getByRole("button", { name: "Create challenge", exact: true }),
+  ).toBeEnabled();
+  await expect(obsoleteConfirmation).toBeHidden();
+
+  await seatB.close();
+  await seatA.close();
+});
+
+test("a pending concession retries automatically then throttles each manual retry", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(60_000);
+  await installControllableMonotonicClock(context);
+  await suppressOwnMatchConcededEchoes(context);
+  const { seatA, seatB } = await openVersusPair(context, page);
+  await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
+  await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
+  await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
+  await expect.poll(() => seatA.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{ readonly payload?: { readonly kind?: string } }>;
+    return updates.some((update) => update.payload?.kind === "match-started");
+  })).toBe(true);
+
+  await seatB.reload();
+  await expect(
+    seatB.getByRole("heading", { name: "Split Stack", exact: true }),
+  ).toBeVisible({ timeout: 15_000 });
+  await seatB.getByRole("button", {
+    name: "Concede and leave",
+    exact: true,
+  }).click();
+  await seatB.getByRole("dialog", { name: "Concede this match?" })
+    .getByRole("button", { name: "Concede match", exact: true })
+    .click();
+
+  const concessionDeliveryState = () => seatB.evaluate(() => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{
+      readonly href?: string;
+      readonly info?: string;
+      readonly notify?: unknown;
+      readonly payload?: {
+        readonly eventId?: string;
+        readonly kind?: string;
+      };
+      readonly summary?: string;
+    }>;
+    const concessions = updates.filter(
+      (update) => update.payload?.kind === "match-conceded",
+    );
+    const feedbackKey = Object.keys(window.localStorage).find((key) =>
+      key.startsWith("split-stack/pending-chat-feedback/v2:")
+    );
+    const journal = feedbackKey === undefined
+      ? []
+      : JSON.parse(window.localStorage.getItem(feedbackKey) ?? "[]") as Array<{
+        readonly payload?: { readonly kind?: string };
+        readonly resolved?: boolean;
+      }>;
+    return {
+      eventIds: [...new Set(concessions.map((update) => update.payload?.eventId))],
+      rawCount: concessions.filter((update) =>
+        update.href === undefined &&
+        update.info === undefined &&
+        update.notify === undefined &&
+        update.summary === undefined
+      ).length,
+      concessionInfos: concessions.flatMap((update) =>
+        update.info === undefined ? [] : [update.info]
+      ),
+      journalLength: journal.length,
+      concessionJournalResolved: journal
+        .filter((entry) => entry.payload?.kind === "match-conceded")
+        .map((entry) => entry.resolved ?? false),
+    };
+  });
+  const create = seatB.getByRole("button", {
+    name: "Create challenge",
+    exact: true,
+  });
+
+  await expect.poll(concessionDeliveryState, { timeout: 10_000 }).toEqual({
+    eventIds: [expect.any(String)],
+    rawCount: 2,
+    concessionInfos: [],
+    journalLength: 1,
+    concessionJournalResolved: [false],
+  });
+  await seatB.waitForTimeout(1_250);
+  expect(await concessionDeliveryState()).toEqual({
+    eventIds: [expect.any(String)],
+    rawCount: 2,
+    concessionInfos: [],
+    journalLength: 1,
+    concessionJournalResolved: [false],
+  });
+  await expect(create).toBeDisabled();
+
+  await advanceMonotonic(seatB, 10_001);
+  await expect(
+    seatB.getByText("Still waiting for confirmation.", { exact: true }),
+  ).toBeVisible({ timeout: 3_000 });
+  const retry = seatB.getByRole("button", { name: "Retry now", exact: true });
+  await retry.click();
+  await expect.poll(
+    async () => (await concessionDeliveryState()).rawCount,
+    { timeout: 3_000 },
+  ).toBe(3);
+  await seatB.waitForTimeout(1_250);
+  expect((await concessionDeliveryState()).rawCount).toBe(3);
+  await expect(create).toBeDisabled();
+
+  await advanceMonotonic(seatB, 10_001);
+  await expect(
+    seatB.getByText("Still waiting for confirmation.", { exact: true }),
+  ).toBeVisible({ timeout: 3_000 });
+  await seatB.evaluate(() => {
+    (
+      window as unknown as {
+        __splitStackReleaseOwnMatchConcededEchoes: () => void;
+      }
+    ).__splitStackReleaseOwnMatchConcededEchoes();
+  });
+  await retry.click();
+
+  await expect(create).toBeEnabled({ timeout: 15_000 });
+  await expect.poll(concessionDeliveryState, { timeout: 15_000 }).toEqual({
+    eventIds: [expect.any(String)],
+    rawCount: 4,
+    concessionInfos: ["Bob conceded · Alice wins"],
+    journalLength: 0,
+    concessionJournalResolved: [],
+  });
+
+  await openLobby(seatB);
+  const aliceStanding = seatB.locator(
+    '.standings-table tr[data-player-id="alice@example.test"]',
+  );
+  const bobStanding = seatB.locator(
+    '.standings-table tr[data-player-id="bob@example.test"]',
+  );
+  await expect(aliceStanding.locator("td").nth(0)).toHaveText("1");
+  await expect(aliceStanding.locator("td").nth(1)).toHaveText("0");
+  await expect(bobStanding.locator("td").nth(0)).toHaveText("0");
+  await expect(bobStanding.locator("td").nth(1)).toHaveText("1");
+
+  await seatB.close();
+  await seatA.close();
 });
 
 test("a recreated live player consumes a stale match link without entering the arena", async ({
@@ -2829,9 +3341,10 @@ test("a recreated live player consumes a stale match link without entering the a
   await expect(
     seatB.getByRole("heading", { name: "Split Stack", exact: true }),
   ).toBeVisible();
-  await expect(seatB.getByText(
-    /game (?:active in another session|interrupted · waiting for reconnection)/i,
-  )).toBeVisible();
+  await expect(seatB.getByText("Unfinished match", { exact: true })).toBeVisible();
+  await expect(
+    seatB.getByText("This copy can watch but cannot resume playing.", { exact: true }),
+  ).toBeVisible();
 
   await seatB.close();
   await seatA.close();
@@ -2864,6 +3377,10 @@ test("an orphaned live match waits for explicit neutral release", async ({
     reopenedSeatA.getByRole("main", { name: "Split Stack" }),
   ).toBeVisible();
   await reopenedSeatA.waitForLoadState("networkidle");
+
+  await expect(
+    reopenedSeatA.getByText(/Neutral exit unlocks in \d+s/),
+  ).toBeVisible({ timeout: 10_000 });
 
   await advanceMonotonic(
     reopenedSeatA,
@@ -2905,12 +3422,21 @@ test("an orphaned live match waits for explicit neutral release", async ({
   await expect(create).toBeVisible({ timeout: 10_000 });
   await expect(create).toBeDisabled();
   const endInterruptedMatch = reopenedSeatA.getByRole("button", {
-    name: "End interrupted match",
+    name: "End match with no result",
     exact: true,
   });
   await expect(endInterruptedMatch).toBeVisible();
   await expect(endInterruptedMatch).toBeEnabled();
   await endInterruptedMatch.click();
+  const confirmation = reopenedSeatA.getByRole("dialog", {
+    name: "End match with no result?",
+    exact: true,
+  });
+  await expect(confirmation).toBeVisible();
+  await confirmation.getByRole("button", {
+    name: "End match with no result",
+    exact: true,
+  }).click();
 
   await expect.poll(connectionLossFinishes, { timeout: 10_000 }).toEqual([
     {
@@ -2929,15 +3455,41 @@ test("an orphaned live match waits for explicit neutral release", async ({
   await expect.poll(() => reopenedSeatA.evaluate(() => {
     const updates = JSON.parse(
       window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
-    ) as Array<{ readonly info?: string }>;
-    return updates.flatMap((update) =>
-      update.info !== undefined && /connection lost/i.test(update.info)
-        ? [update.info]
-        : []
+    ) as Array<{
+      readonly payload?: {
+        readonly kind?: string;
+        readonly eventId?: string;
+        readonly result?: { readonly reason?: string };
+      };
+      readonly info?: string;
+      readonly href?: string;
+      readonly summary?: string;
+      readonly notify?: Record<string, string>;
+    }>;
+    const neutralUpdates = updates.filter((update) =>
+      update.payload?.kind === "match-finished" &&
+      update.payload.result?.reason === "connection-lost"
     );
-  }), { timeout: 10_000 }).toEqual([
-    "Match ended · connection lost · no result",
-  ]);
+    return {
+      summaries: [...new Set(neutralUpdates.flatMap((update) =>
+        update.summary === undefined ? [] : [update.summary]
+      ))],
+      infos: neutralUpdates.flatMap((update) =>
+        update.info === undefined ? [] : [update.info]
+      ),
+      hrefs: neutralUpdates.flatMap((update) =>
+        update.href === undefined ? [] : [update.href]
+      ),
+      notifications: neutralUpdates.flatMap((update) =>
+        update.notify === undefined ? [] : [update.notify]
+      ),
+    };
+  }), { timeout: 10_000 }).toEqual({
+    summaries: ["0 wait · 0 live"],
+    infos: [],
+    hrefs: [],
+    notifications: [],
+  });
 
   await reopenedSeatA.close();
 });
@@ -2979,9 +3531,14 @@ test("a deaf duplicate cannot end a match whose committed controllers are live",
   await expect(
     duplicate.getByRole("heading", { name: "Split Stack", exact: true }),
   ).toBeVisible();
-  await expect(duplicate.getByText(
-    /game (?:active in another session|interrupted · waiting for reconnection)/i,
-  )).toBeVisible({ timeout: 15_000 });
+  await expect(
+    duplicate.getByText("Unfinished match", { exact: true }),
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(
+    duplicate.getByText("This copy can watch but cannot resume playing.", {
+      exact: true,
+    }),
+  ).toBeVisible();
 
   await advanceMonotonic(duplicate, RULES.network.reconnectGraceMs + 1_000);
   await duplicate.waitForTimeout(1_000);
@@ -3399,8 +3956,19 @@ test("a newer pre-match runtime takes control while the older runtime stays on H
     timeout: 15_000,
   });
   await expect(
-    olderSeatB.getByText("Game active in another session", { exact: true }),
+    olderSeatB.getByText("Pairing active in another session", { exact: true }),
   ).toBeVisible();
+  await expect(
+    olderSeatB.getByText("This copy cannot control the pairing.", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    olderSeatB.getByRole("button", { name: "Watch match", exact: true }),
+  ).toBeHidden();
+  await expect(
+    olderSeatB.getByRole("button", { name: "Concede and leave", exact: true }),
+  ).toBeHidden();
   await expect(olderSeatB.getByText(/bound to another game session/i)).toBeHidden();
   for (const boardName of [
     "Your board",

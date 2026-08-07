@@ -35,6 +35,7 @@ describe("approved balance configuration", () => {
       reconnectSeatStaggerMs: 500,
       reconnectRetryBaseMs: 3_000,
       reconnectRetryMaxMs: 15_000,
+      controllerReconnectGraceMs: 20_000,
       reconnectGraceMs: 60_000,
       resultConsensusMs: 20_000,
       fastResumeCountdownTicks: 45,

@@ -81,6 +81,12 @@ export interface MatchFinishedV2 extends CompetitionEventBaseV2 {
   readonly result: MatchResultV1;
 }
 
+export interface MatchConcededV2 extends CompetitionEventBaseV2 {
+  readonly kind: "match-conceded";
+  readonly matchId: string;
+  readonly startedEventId: string;
+}
+
 export interface RematchRequestedV2 extends CompetitionEventBaseV2 {
   readonly kind: "rematch-requested";
   readonly seriesId: string;
@@ -122,6 +128,7 @@ export type CompetitionEventV2 =
   | ReadyChangedV2
   | MatchStartedV2
   | MatchFinishedV2
+  | MatchConcededV2
   | RematchRequestedV2
   | RematchAcceptedV2
   | RematchWithdrawnV2
@@ -519,6 +526,19 @@ export function isCompetitionEventV2(value: unknown): value is CompetitionEventV
       isBoundedString(value.startedEventId, 256) &&
       isStrictMatchResult(value.result);
   }
+  if (value.kind === "match-conceded") {
+    return hasExactKeys(value, [
+      "actor",
+      "eventId",
+      "kind",
+      "logicalClock",
+      "matchId",
+      "schema",
+      "startedEventId",
+    ]) &&
+      isBoundedString(value.matchId, 256) &&
+      isBoundedString(value.startedEventId, 256);
+  }
   if (value.kind === "rematch-requested") {
     return hasExactKeys(value, [
       "actor",
@@ -696,6 +716,39 @@ function resultMatchesPairing(result: MatchResultV1, pairing: MutablePairing): b
     result.players[1]?.id === pairing.seatB.id;
 }
 
+function concessionResult(
+  event: MatchConcededV2,
+  pairing: MutablePairing,
+): MatchResultV1 | undefined {
+  const start = pairing.started;
+  if (start === undefined || !actorInPairing(pairing, event.actor.id)) return undefined;
+  const emptyStats = (): PlayerResultStats => ({
+    score: 0,
+    lines: 0,
+    garbageSent: 0,
+    powersActivated: 0,
+    tetrises: 0,
+    tSpinSingles: 0,
+    tSpinDoubles: 0,
+    tSpinTriples: 0,
+  });
+  return {
+    schema: "split-stack/result/v1",
+    matchId: pairing.matchId,
+    seedHash: start.seedHash,
+    players: [{ ...pairing.seatA }, { ...pairing.seatB }],
+    outcome: event.actor.id === pairing.seatA.id ? "seat-b" : "seat-a",
+    reason: "forfeit",
+    durationTicks: 0,
+    finalLevel: 1,
+    statsByPlayer: {
+      [pairing.seatA.id]: emptyStats(),
+      [pairing.seatB.id]: emptyStats(),
+    },
+    completedBy: event.actor.id,
+  };
+}
+
 function materializeResult(pairing: MutablePairing): CompetitionResultView | undefined {
   const variants = [...pairing.resultVariants.entries()].sort(([left], [right]) =>
     compareCodeUnits(left, right)
@@ -811,7 +864,10 @@ export class CompetitionLedgerV2 {
     const practiceBests = new Map<string, PracticeCompletedV2>();
     const practiceBestOrderByPlayer = new Map<string, number>();
     const pendingStarts: MatchStartedV2[] = [];
-    const pendingFinishes: Array<{ event: MatchFinishedV2; order: number }> = [];
+    const pendingTerminals: Array<{
+      event: MatchFinishedV2 | MatchConcededV2;
+      order: number;
+    }> = [];
     const rejectedClaims: RejectedClaimView[] = [];
     const invalidatePendingRematches = (actorId: string, exceptKey?: string): void => {
       for (const [key, rematch] of rematches) {
@@ -890,9 +946,10 @@ export class CompetitionLedgerV2 {
           accepted.result.reason === "connection-lost";
         const candidateIsConnectionLoss = event.result.outcome === "desync" &&
           event.result.reason === "connection-lost";
-        // A receive-only fallback is deliberately subordinate to a result from
-        // the committed simulation. This remains convergent even if the
-        // fallback's lower logical clock made it materialize first.
+        // A receive-only fallback is deliberately subordinate to a terminal
+        // authority from the committed simulation or an explicit participant
+        // concession. This remains convergent even if the fallback's lower
+        // logical clock made it materialize first.
         if (accepted !== undefined && acceptedIsConnectionLoss && !candidateIsConnectionLoss) {
           markRejected(accepted);
           pairing.firstFinish = event;
@@ -933,14 +990,37 @@ export class CompetitionLedgerV2 {
       }
       return "committed";
     };
-    const retryPendingFinishes = (): void => {
-      for (let index = 0; index < pendingFinishes.length;) {
-        const pending = pendingFinishes[index]!;
-        const outcome = tryCommitFinish(pending.event, pending.order);
+    const tryCommitConcession = (
+      event: MatchConcededV2,
+      eventOrder: number,
+    ): "committed" | "deferred" | "rejected" => {
+      const pairing = matches.get(event.matchId);
+      if (pairing === undefined) {
+        markDeferred(event);
+        return "deferred";
+      }
+      const result = concessionResult(event, pairing);
+      if (result === undefined || pairing.started?.eventId !== event.startedEventId) {
+        markRejected(event);
+        return "rejected";
+      }
+      const finish: MatchFinishedV2 = {
+        ...event,
+        kind: "match-finished",
+        result,
+      };
+      return tryCommitFinish(finish, eventOrder);
+    };
+    const retryPendingTerminals = (): void => {
+      for (let index = 0; index < pendingTerminals.length;) {
+        const pending = pendingTerminals[index]!;
+        const outcome = pending.event.kind === "match-finished"
+          ? tryCommitFinish(pending.event, pending.order)
+          : tryCommitConcession(pending.event, pending.order);
         if (outcome === "deferred") {
           index += 1;
         } else {
-          pendingFinishes.splice(index, 1);
+          pendingTerminals.splice(index, 1);
         }
       }
     };
@@ -989,7 +1069,7 @@ export class CompetitionLedgerV2 {
       commitments.set(pairing.seatA.id, activity);
       commitments.set(pairing.seatB.id, activity);
       markEffective(event);
-      retryPendingFinishes();
+      retryPendingTerminals();
       return "committed";
     };
     const retryPendingStarts = (): void => {
@@ -1146,7 +1226,13 @@ export class CompetitionLedgerV2 {
       }
       if (event.kind === "match-finished") {
         if (tryCommitFinish(event, eventOrder) === "deferred") {
-          pendingFinishes.push({ event, order: eventOrder });
+          pendingTerminals.push({ event, order: eventOrder });
+        }
+        continue;
+      }
+      if (event.kind === "match-conceded") {
+        if (tryCommitConcession(event, eventOrder) === "deferred") {
+          pendingTerminals.push({ event, order: eventOrder });
         }
         continue;
       }
@@ -1318,7 +1404,7 @@ export class CompetitionLedgerV2 {
       if (tracked?.kind === "match-started") {
         const pairing = pairings.get(tracked.pairingId);
         if (pairing?.status !== "starting") trackedEventStatus = "rejected";
-      } else if (tracked?.kind === "match-finished") {
+      } else if (tracked?.kind === "match-finished" || tracked?.kind === "match-conceded") {
         const potentialStart = pendingStarts.find((start) =>
           start.eventId === tracked.startedEventId && start.matchId === tracked.matchId
         );

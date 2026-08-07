@@ -22,6 +22,8 @@ export interface CompetitionPresenterOptions extends CompetitionPresenterCallbac
   readonly view: CompetitionLedgerView;
   readonly self: CompetitionActor;
   readonly realtimeAvailable: boolean;
+  /** Replacement runtimes may watch their committed match but never control it. */
+  readonly allowOwnedMatchWatch?: boolean;
   /** Presence is advisory. Errors are displayed as offline and never block joining. */
   readonly isOnline: (actorId: string, challengeId: string) => boolean;
 }
@@ -202,7 +204,14 @@ function renderStartingPairings(options: CompetitionPresenterOptions): void {
 }
 
 function renderLiveMatches(options: CompetitionPresenterOptions): void {
-  const { shell, view, self, realtimeAvailable, onWatchMatch } = options;
+  const {
+    shell,
+    view,
+    self,
+    realtimeAvailable,
+    allowOwnedMatchWatch = false,
+    onWatchMatch,
+  } = options;
   const document = shell.container.ownerDocument;
   if (view.liveMatches.length === 0) {
     replaceWithEmpty(shell.liveGames, STRINGS["lobby.noLiveGames"]);
@@ -229,8 +238,10 @@ function renderLiveMatches(options: CompetitionPresenterOptions): void {
     );
     const watch = button(document, STRINGS["lobby.watch"]);
     const owned = match.seatA.id === self.id || match.seatB.id === self.id;
-    watch.disabled = !realtimeAvailable || owned;
-    if (owned) watch.title = STRINGS["home.gameActiveElsewhere"];
+    watch.disabled = !realtimeAvailable || (owned && !allowOwnedMatchWatch);
+    if (owned && !allowOwnedMatchWatch) {
+      watch.title = STRINGS["home.unfinishedMatchSummary"];
+    }
     watch.setAttribute(
       "aria-label",
       `${STRINGS["lobby.watch"]} ${match.seatA.displayName} vs ${match.seatB.displayName}`,
@@ -499,7 +510,16 @@ export function presentCompetition(options: CompetitionPresenterOptions): void {
         }),
   });
 
-  shell.createButton.disabled = !realtimeAvailable || view.activity.kind !== "idle";
+  const competitionLocked = view.activity.kind !== "idle";
+  shell.createButton.disabled = !realtimeAvailable || competitionLocked;
+  shell.createButton.dataset.availability = shell.createButton.disabled
+    ? "unavailable"
+    : "available";
+  if (competitionLocked) {
+    shell.createButton.setAttribute("aria-describedby", shell.homeRecovery.id);
+  } else {
+    shell.createButton.removeAttribute("aria-describedby");
+  }
   // Cancellation is a durable lifecycle update and does not require a live
   // realtime channel. A suspended creator must always be able to free the seat.
   shell.cancelChallengeButton.disabled = false;

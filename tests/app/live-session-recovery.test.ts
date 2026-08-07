@@ -69,8 +69,8 @@ describe("live controller recovery", () => {
     expect(liveControllerRecoveryStatus({
       observedAtMs,
       controllerSeenAtMs: [null, null],
-      nowMs: observedAtMs + 18_000,
-    })).toEqual({ kind: "interrupted", remainingSeconds: 42 });
+      nowMs: observedAtMs + RULES.network.controllerReconnectGraceMs,
+    })).toEqual({ kind: "interrupted", remainingSeconds: 40 });
 
     expect(liveControllerRecoveryStatus({
       observedAtMs,

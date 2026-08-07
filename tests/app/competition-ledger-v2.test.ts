@@ -13,6 +13,7 @@ import {
   type ReadyChangedV2,
   type MatchStartedV2,
   type MatchFinishedV2,
+  type MatchConcededV2,
   type RematchRequestedV2,
   type RematchAcceptedV2,
   type PracticeCompletedV2,
@@ -239,6 +240,22 @@ function finished(start: MatchStartedV2, outcome: MatchResultV1["outcome"], logi
     matchId: start.matchId,
     startedEventId: start.eventId,
     result: result(start.matchId, outcome, start.seed),
+  };
+}
+
+function conceded(
+  start: MatchStartedV2,
+  actorId: "alice" | "bob",
+  logicalClock: number,
+): MatchConcededV2 {
+  return {
+    schema: "split-stack/competition/v2",
+    kind: "match-conceded",
+    eventId: `${start.matchId}:conceded:${actorId}`,
+    logicalClock,
+    actor: { id: actorId, displayName: actorId.toUpperCase() },
+    matchId: start.matchId,
+    startedEventId: start.eventId,
   };
 }
 
@@ -929,6 +946,7 @@ describe("CompetitionLedgerV2", () => {
     const start = started(claim.eventId, challenge.challengeId, 1, 7);
     const request = rematchRequested("alice", "series", start.matchId, 2, 9);
     const left = pairingLeft("bob", claim.eventId, "runtime-b", 3);
+    const concession = conceded(start, "alice", 8);
     const valid = [
       challenge,
       claim,
@@ -938,6 +956,7 @@ describe("CompetitionLedgerV2", () => {
       readyChanged("alice", claim.eventId, "runtime-a", true, 4),
       start,
       finished(start, "seat-a", 8),
+      concession,
       request,
       rematchAccepted("bob", request, 10),
       rematchWithdrawn("alice", "series", 2, 10),
@@ -954,6 +973,8 @@ describe("CompetitionLedgerV2", () => {
     expect(isCompetitionEventV2(leftWithoutRuntime)).toBe(false);
     expect(isCompetitionEventV2({ ...left, runtimeSessionId: "" })).toBe(false);
     expect(isCompetitionEventV2({ ...start, configHash: "forged" })).toBe(false);
+    const { startedEventId: _startedEventId, ...concessionWithoutStart } = concession;
+    expect(isCompetitionEventV2(concessionWithoutStart)).toBe(false);
     expect(isCompetitionEventV2({ ...finished(start, "seat-a", 13), result: { ...result(start.matchId, "seat-a"), extra: true } }))
       .toBe(false);
   });
@@ -1131,6 +1152,136 @@ describe("CompetitionLedgerV2", () => {
     });
   });
 
+  it("records an explicit participant concession as an opponent win", () => {
+    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const challenge = created("alice", "concession-series", 1);
+    const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
+    const start = started(claim.eventId, challenge.challengeId, 1, 7);
+    const concession = conceded(start, "alice", 8);
+    [
+      challenge,
+      claim,
+      runtimeClaimed("alice", claim.eventId, "runtime-a", 3),
+      runtimeClaimed("bob", claim.eventId, "runtime-b", 4),
+      readyChanged("alice", claim.eventId, "runtime-a", true, 5),
+      readyChanged("bob", claim.eventId, "runtime-b", true, 6),
+      start,
+      concession,
+    ].forEach((payload, index) => ledger.apply({ serial: index + 1, payload }));
+
+    expect(ledger.view("alice")).toMatchObject({
+      activity: { kind: "idle" },
+      counts: { live: 0, completed: 1 },
+      recentResults: [{
+        matchId: start.matchId,
+        result: {
+          outcome: "seat-b",
+          reason: "forfeit",
+          completedBy: "alice",
+        },
+      }],
+      standings: [
+        { player: { id: "bob" }, wins: 1, losses: 0, draws: 0, games: 1 },
+        { player: { id: "alice" }, wins: 0, losses: 1, draws: 0, games: 1 },
+      ],
+      headToHead: [{ winsByPlayer: { alice: 0, bob: 1 }, draws: 0 }],
+      seriesScores: [{ winsByPlayer: { alice: 0, bob: 1 }, completedRounds: 1 }],
+    });
+    expect(ledger.eventStatus(concession.eventId)).toBe("effective");
+    expect(ledger.apply({ serial: 99, payload: concession })).toBe(false);
+    expect(ledger.view().standings).toMatchObject([
+      { player: { id: "bob" }, wins: 1, games: 1 },
+      { player: { id: "alice" }, losses: 1, games: 1 },
+    ]);
+  });
+
+  it("retries a concession that arrives while its valid start is still deferred", () => {
+    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const challenge = created("alice", "concession-race", 1);
+    const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
+    const start = started(claim.eventId, challenge.challengeId, 1, 6);
+    const concession = conceded(start, "bob", 7);
+    [
+      challenge,
+      claim,
+      runtimeClaimed("alice", claim.eventId, "runtime-a", 3),
+      runtimeClaimed("bob", claim.eventId, "runtime-b", 4),
+      readyChanged("alice", claim.eventId, "runtime-a", true, 5),
+      start,
+      concession,
+    ].forEach((payload, index) => ledger.apply({ serial: index + 1, payload }));
+
+    expect(ledger.eventStatus(start.eventId)).toBe("deferred");
+    expect(ledger.eventStatus(concession.eventId)).toBe("deferred");
+
+    ledger.apply({
+      serial: 8,
+      payload: readyChanged("bob", claim.eventId, "runtime-b", true, 8),
+    });
+
+    expect(ledger.view("bob")).toMatchObject({
+      activity: { kind: "idle" },
+      counts: { live: 0, completed: 1 },
+      recentResults: [{
+        result: { outcome: "seat-a", reason: "forfeit", completedBy: "bob" },
+      }],
+    });
+    expect(ledger.eventStatus(concession.eventId)).toBe("effective");
+  });
+
+  it("rejects a concession from an actor outside the committed pairing", () => {
+    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const challenge = created("alice", "outsider-concession", 1);
+    const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
+    const start = started(claim.eventId, challenge.challengeId, 1, 7);
+    const outsider: MatchConcededV2 = {
+      ...conceded(start, "alice", 8),
+      eventId: `${start.matchId}:conceded:charlie`,
+      actor: { id: "charlie", displayName: "CHARLIE" },
+    };
+    [
+      challenge,
+      claim,
+      runtimeClaimed("alice", claim.eventId, "runtime-a", 3),
+      runtimeClaimed("bob", claim.eventId, "runtime-b", 4),
+      readyChanged("alice", claim.eventId, "runtime-a", true, 5),
+      readyChanged("bob", claim.eventId, "runtime-b", true, 6),
+      start,
+      outsider,
+    ].forEach((payload, index) => ledger.apply({ serial: index + 1, payload }));
+
+    expect(ledger.view()).toMatchObject({ counts: { live: 1, completed: 0 } });
+    expect(ledger.eventStatus(outsider.eventId)).toBe("rejected");
+  });
+
+  it("preserves canonical concession precedence when multiple terminals wait on a deferred start", () => {
+    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const challenge = created("alice", "terminal-race", 1);
+    const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
+    const start = started(claim.eventId, challenge.challengeId, 1, 6);
+    const concession = conceded(start, "alice", 7);
+    const laterFinish = finished(start, "seat-a", 8);
+    [
+      challenge,
+      claim,
+      runtimeClaimed("alice", claim.eventId, "runtime-a", 3),
+      runtimeClaimed("bob", claim.eventId, "runtime-b", 4),
+      readyChanged("alice", claim.eventId, "runtime-a", true, 5),
+      start,
+      concession,
+      laterFinish,
+      readyChanged("bob", claim.eventId, "runtime-b", true, 9),
+    ].forEach((payload, index) => ledger.apply({ serial: index + 1, payload }));
+
+    expect(ledger.view().recentResults[0]?.result).toMatchObject({
+      outcome: "seat-b",
+      reason: "forfeit",
+      completedBy: "alice",
+    });
+    expect(ledger.eventStatus(concession.eventId)).toBe("effective");
+    expect(ledger.eventStatus(laterFinish.eventId)).toBe("rejected");
+  });
+
   it("keeps a normal first finish authoritative over a later connection-loss fallback", () => {
     const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
     const start = appendCompletedMatch(ledger, "series", 1, "seat-a");
@@ -1156,6 +1307,39 @@ describe("CompetitionLedgerV2", () => {
       seriesScores: [{ winsByPlayer: { alice: 1, bob: 0 }, completedRounds: 1 }],
     });
     expect(ledger.eventStatus(connectionLossFallback.eventId)).toBe("rejected");
+  });
+
+  it("lets a concession supersede an earlier technical fallback", () => {
+    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const start = appendCompletedMatch(ledger, "concession-after-fallback", 1, "desync");
+    const fallback = finished(start, "desync", 8);
+    const concession = conceded(start, "bob", 9);
+
+    ledger.apply({ serial: 9, payload: concession });
+
+    expect(ledger.view().recentResults[0]?.result).toMatchObject({
+      outcome: "seat-a",
+      reason: "forfeit",
+      completedBy: "bob",
+    });
+    expect(ledger.eventStatus(fallback.eventId)).toBe("rejected");
+    expect(ledger.eventStatus(concession.eventId)).toBe("effective");
+  });
+
+  it("rejects a concession after a normal result is already authoritative", () => {
+    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const start = appendCompletedMatch(ledger, "late-concession", 1, "seat-a");
+    const normal = finished(start, "seat-a", 8);
+    const concession = conceded(start, "alice", 9);
+
+    ledger.apply({ serial: 9, payload: concession });
+
+    expect(ledger.view().recentResults[0]?.result).toMatchObject({
+      outcome: "seat-a",
+      reason: "top-out",
+    });
+    expect(ledger.eventStatus(normal.eventId)).toBe("effective");
+    expect(ledger.eventStatus(concession.eventId)).toBe("rejected");
   });
 
   it("lets a committed simulation result supersede an earlier technical fallback", () => {

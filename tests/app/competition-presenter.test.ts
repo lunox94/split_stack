@@ -317,6 +317,22 @@ describe("competition presenter", () => {
     expect(watched).toHaveBeenCalledOnce();
     expect(watched).toHaveBeenCalledWith("match-2");
     expect(shell.yourActivity.textContent).toContain("Live · Round 1");
+
+    presentCompetition({
+      shell,
+      view,
+      self: ALICE,
+      realtimeAvailable: true,
+      isOnline: () => true,
+      onWatchMatch: watched,
+      allowOwnedMatchWatch: true,
+    });
+    const replacementWatch = shell.liveGames.querySelector<HTMLButtonElement>(
+      '[data-match-id="match-1"] button',
+    );
+    expect(replacementWatch?.disabled).toBe(false);
+    replacementWatch?.click();
+    expect(watched).toHaveBeenLastCalledWith("match-1");
   });
 
   it("explains a live commitment once while blocking other Join actions", () => {
@@ -344,6 +360,11 @@ describe("competition presenter", () => {
     const join = shell.openChallenges.querySelector<HTMLButtonElement>("button");
 
     expect(join?.disabled).toBe(true);
+    expect(shell.createButton.disabled).toBe(true);
+    expect(shell.createButton.dataset.availability).toBe("unavailable");
+    expect(shell.createButton.getAttribute("aria-describedby")).toBe(
+      shell.homeRecovery.id,
+    );
     expect(shell.lobbyStatus.textContent).toBe(
       "Finish your active match before joining another challenge.",
     );

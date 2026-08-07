@@ -73,7 +73,9 @@ function resolverMatches(
       isBoundedString(value.seatAName, MAX_NAME_CHARACTERS) &&
       isBoundedString(value.seatBName, MAX_NAME_CHARACTERS);
   }
-  if (value.kind === "match-result") return payload.kind === "match-finished";
+  if (value.kind === "match-result") {
+    return payload.kind === "match-finished" || payload.kind === "match-conceded";
+  }
   if (value.kind === "pairing-left") {
     return payload.kind === "pairing-left" &&
       (value.source === "challenge" || value.source === "rematch") &&

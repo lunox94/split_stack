@@ -143,6 +143,7 @@ export interface CompetitiveSessionView {
   peerMissing: boolean;
   connectionStatus: CompetitiveConnectionStatus;
   recoveryRequired: boolean;
+  reconnectRemainingSeconds?: number;
   resuming: boolean;
   matchTick: Tick;
   countdownTicks: number;
@@ -525,9 +526,11 @@ export class CompetitiveSession {
 
     if (
       this.phase === "network-pause" &&
+      !this.locallyHidden &&
+      this.channelConnected &&
       this.connectionIncidentStartedMs !== null &&
       this.options.clock.now() - this.connectionIncidentStartedMs >=
-        RULES.network.reconnectGraceMs
+        RULES.network.controllerReconnectGraceMs
     ) {
       this.recordConnectionLost();
     }
@@ -572,15 +575,21 @@ export class CompetitiveSession {
   }
 
   public setHidden(hidden: boolean): void {
+    const wasHidden = this.locallyHidden;
     this.locallyHidden = hidden;
-    if (hidden) this.enterNetworkPause(true, false);
-    else if (this.phase === "network-pause") {
+    if (hidden) {
+      this.connectionIncidentStartedMs = null;
+      this.enterNetworkPause(true, false);
+    } else if (this.phase === "network-pause") {
       if (this.config === null && this.simulation === null) {
         this.pauseEpoch = 0;
         this.pauseTick = 0;
         this.missingSinceMs = null;
         this.peerReturnNoted = false;
         this.setPhase("lobby");
+      }
+      if (wasHidden && this.phase === "network-pause") {
+        this.connectionIncidentStartedMs = this.options.clock.now();
       }
       if (!this.liveness.isMissing() && this.peerResumeAvailable) {
         this.notePeerReturn();
@@ -611,6 +620,23 @@ export class CompetitiveSession {
       (this.transportRecoveryRequested ||
         this.liveness.silentForMs() >= this.transportRecoveryThresholdMs());
     const peerUnstable = this.liveness.isUnstable();
+    const reconnectRemainingSeconds =
+      this.phase === "network-pause" &&
+      !this.locallyHidden &&
+      this.channelConnected &&
+      this.connectionIncidentStartedMs !== null
+        ? Math.max(
+            1,
+            Math.ceil(
+              (RULES.network.controllerReconnectGraceMs -
+                Math.max(
+                  0,
+                  this.options.clock.now() - this.connectionIncidentStartedMs,
+                )) /
+                1_000,
+            ),
+          )
+        : undefined;
     const connectionStatus: CompetitiveConnectionStatus =
       this.terminal?.reason === "connection-lost"
         ? "lost"
@@ -631,6 +657,9 @@ export class CompetitiveSession {
       peerMissing: this.phase === "network-pause" || this.liveness.isMissing(),
       connectionStatus,
       recoveryRequired,
+      ...(reconnectRemainingSeconds === undefined
+        ? {}
+        : { reconnectRemainingSeconds }),
       resuming: this.phase === "countdown" && this.pauseEpoch > 0,
       matchTick: local?.tick ?? 0,
       countdownTicks,
@@ -1832,10 +1861,13 @@ export class CompetitiveSession {
     issueStartedMs = this.options.clock.now(),
   ): void {
     if (this.phase === "finished") return;
-    if (connectionIssue) {
+    if (connectionIssue || (!this.locallyHidden && this.channelConnected)) {
+      const observedIssueStartedMs = connectionIssue
+        ? issueStartedMs
+        : this.options.clock.now();
       this.connectionIncidentStartedMs = Math.min(
-        this.connectionIncidentStartedMs ?? issueStartedMs,
-        issueStartedMs,
+        this.connectionIncidentStartedMs ?? observedIssueStartedMs,
+        observedIssueStartedMs,
       );
     }
     this.pauseRequiresOrientation ||= !connectionIssue;
@@ -1986,7 +2018,7 @@ export class CompetitiveSession {
       return;
     }
     this.peerReturnNoted = true;
-    this.connectionIncidentStartedMs ??= this.options.clock.now();
+    this.connectionIncidentStartedMs = this.options.clock.now();
     this.recordDiagnostic({
       kind: "peer-traffic-restored",
       telemetry: this.telemetry.snapshot(),
@@ -2414,7 +2446,7 @@ export class CompetitiveSession {
     });
     this.recordDiagnostic({
       kind: "connection-lost",
-      silenceMs: RULES.network.reconnectGraceMs,
+      silenceMs: RULES.network.controllerReconnectGraceMs,
       pauseTick: this.pauseTick,
       telemetry: this.telemetry.snapshot(),
     });

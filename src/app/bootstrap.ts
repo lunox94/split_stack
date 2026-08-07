@@ -158,6 +158,8 @@ const DURABLE_RETRY_MIN_MS = 1_000;
 const DURABLE_RETRY_MAX_MS = 10_000;
 const DURABLE_SUCCESS_SEND_LIMIT = 2;
 const LIVE_RECOVERY_TICK_MS = 1_000;
+const RECONNECT_DOT_STEP_MS = 600;
+const RECOVERY_CONFIRMATION_DELAY_MS = 10_000;
 const STALE_ROUTE_NOTICE_MS = 5_000;
 const SNAPSHOT_PROFILE = parseSnapshotProfile(
   import.meta.env.VITE_SPLIT_STACK_SNAPSHOT_HZ,
@@ -176,6 +178,8 @@ interface ActiveMatch {
   seatASessionId: string;
   seatBSessionId: string;
   duplicateRuntime: boolean;
+  /** An explicit read-only view of the participant's own fenced live match. */
+  recoveryWatch?: boolean;
   startedEventId?: string;
   committedSeed?: string;
   committedConfigHash?: string;
@@ -185,6 +189,7 @@ interface SpectatorRuntime {
   channel: WebxdcRealtimeChannel;
   snapshots: RemoteSnapshotStore;
   matchId: string;
+  lastSnapshotAtMs: number | null;
 }
 
 interface RemoteRenderCache {
@@ -472,6 +477,7 @@ export async function bootstrap(): Promise<void> {
     hubRetryAttempts: number;
   }
   let passiveLiveRecovery: PassiveLiveRecovery | null = null;
+  const recoveryResolutionStartedAtMs = new Map<string, number>();
   let confirmingPairing: {
     pairingId: string;
     startedAtMs: number;
@@ -865,6 +871,7 @@ export async function bootstrap(): Promise<void> {
 
   interface DurableOutboxEntry {
     readonly update: DurableOutboundUpdate<DurablePayload>;
+    readonly successfulSendLimit: number;
     attempts: number;
     successfulSends: number;
     metadataDelivered: boolean;
@@ -943,7 +950,7 @@ export async function bootstrap(): Promise<void> {
       entry.sending = false;
     }
     if (durableOutbox.get(eventId) !== entry) return;
-    if (entry.successfulSends >= DURABLE_SUCCESS_SEND_LIMIT) {
+    if (entry.successfulSends >= entry.successfulSendLimit) {
       // A successful host append with no listener echo is ambiguous. One
       // payload-only confirmation retry repairs an isolated dropped echo,
       // while the persisted feedback journal handles reload recovery without
@@ -959,6 +966,7 @@ export async function bootstrap(): Promise<void> {
 
   const enqueueDurable = (
     update: DurableOutboundUpdate<DurablePayload>,
+    options: { readonly successfulSendLimit?: number } = {},
   ): void => {
     if (durable === null) return;
     const eventId = update.payload.eventId;
@@ -968,6 +976,7 @@ export async function bootstrap(): Promise<void> {
     }
     const entry: DurableOutboxEntry = {
       update,
+      successfulSendLimit: options.successfulSendLimit ?? DURABLE_SUCCESS_SEND_LIMIT,
       attempts: 0,
       successfulSends: 0,
       metadataDelivered: false,
@@ -1011,6 +1020,49 @@ export async function bootstrap(): Promise<void> {
     }
   };
 
+  const matchResultMetadata = (
+    result: MatchResultV1,
+    view: CompetitionLedgerView,
+    reasonOverride?: "concession",
+  ): ChatUpdateMetadata | null => {
+    const seatA = result.players[0];
+    const seatB = result.players[1];
+    if (seatA === undefined || seatB === undefined) return null;
+    const tally = view.headToHead.find((entry) =>
+      entry.playerIds.includes(seatA.id) && entry.playerIds.includes(seatB.id)
+    );
+    const reason = reasonOverride ?? (
+      result.reason === "connection-lost" ? "connection-lost" as const : undefined
+    );
+    return matchResultFeedback({
+      matchId: result.matchId,
+      seatA: {
+        ...seatA,
+        score: result.statsByPlayer[seatA.id]?.score ?? 0,
+      },
+      seatB: {
+        ...seatB,
+        score: result.statsByPlayer[seatB.id]?.score ?? 0,
+      },
+      outcome: result.outcome === "seat-a"
+        ? "seat-a"
+        : result.outcome === "seat-b"
+          ? "seat-b"
+          : result.outcome === "draw"
+            ? "draw"
+            : "neutral",
+      ...(reason === undefined ? {} : { reason }),
+      headToHead: {
+        seatAWins: tally?.winsByPlayer[seatA.id] ?? 0,
+        seatBWins: tally?.winsByPlayer[seatB.id] ?? 0,
+      },
+      activity: {
+        waiting: view.counts.waiting,
+        live: view.counts.live,
+      },
+    });
+  };
+
   const materializedMetadataForPersistedFeedback = (
     entry: PendingChatFeedbackV2,
     view: CompetitionLedgerView,
@@ -1027,42 +1079,18 @@ export async function bootstrap(): Promise<void> {
         },
       });
     }
-    if (resolver.kind === "match-result" && payload.kind === "match-finished") {
-      const seatA = payload.result.players[0];
-      const seatB = payload.result.players[1];
-      if (seatA === undefined || seatB === undefined) return null;
-      const tally = view.headToHead.find((entry) =>
-        entry.playerIds.includes(seatA.id) && entry.playerIds.includes(seatB.id)
-      );
-      return matchResultFeedback({
-        matchId: payload.result.matchId,
-        seatA: {
-          ...seatA,
-          score: payload.result.statsByPlayer[seatA.id]?.score ?? 0,
-        },
-        seatB: {
-          ...seatB,
-          score: payload.result.statsByPlayer[seatB.id]?.score ?? 0,
-        },
-        outcome: payload.result.outcome === "seat-a"
-          ? "seat-a"
-          : payload.result.outcome === "seat-b"
-            ? "seat-b"
-            : payload.result.outcome === "draw"
-              ? "draw"
-              : "neutral",
-        ...(payload.result.reason === "connection-lost"
-          ? { reason: "connection-lost" as const }
-          : {}),
-        headToHead: {
-          seatAWins: tally?.winsByPlayer[seatA.id] ?? 0,
-          seatBWins: tally?.winsByPlayer[seatB.id] ?? 0,
-        },
-        activity: {
-          waiting: view.counts.waiting,
-          live: view.counts.live,
-        },
-      });
+    if (resolver.kind === "match-result") {
+      if (payload.kind === "match-finished") {
+        return matchResultMetadata(payload.result, view);
+      }
+      if (payload.kind === "match-conceded") {
+        const materialized = view.recentResults.find(
+          (entry) => entry.matchId === payload.matchId,
+        );
+        return materialized === undefined
+          ? null
+          : matchResultMetadata(materialized.result, view, "concession");
+      }
     }
     if (resolver.kind === "pairing-left" && payload.kind === "pairing-left") {
       if (resolver.source !== "challenge") return null;
@@ -1431,6 +1459,7 @@ export async function bootstrap(): Promise<void> {
     announcedConfigHash = null;
     pendingCommittedStart = null;
     shell.overlay.hidden = true;
+    shell.setReadOnlyWatchStatus(null);
     hidePowerTip();
     matchMenuOpen = false;
     setMatchMenu(shell, "competitive", false);
@@ -1831,6 +1860,7 @@ export async function bootstrap(): Promise<void> {
     if (hub === null) return null;
     const channel = hub.transport();
     const snapshots = new RemoteSnapshotStore();
+    let lastSnapshotAtMs: number | null = null;
     snapshots.bind(match.challenge.seatA.playerId, match.seatASessionId);
     snapshots.bind(seatB.playerId, match.seatBSessionId);
     const allowed = new Set([match.challenge.seatA.playerId, seatB.playerId]);
@@ -1841,7 +1871,7 @@ export async function bootstrap(): Promise<void> {
           allowedSenderIds: allowed,
         });
         if (decoded.ok && decoded.value.kind === "SNAPSHOT") {
-          snapshots.accept(decoded.value);
+          if (snapshots.accept(decoded.value)) lastSnapshotAtMs = performance.now();
         }
       });
     } catch {
@@ -1852,13 +1882,28 @@ export async function bootstrap(): Promise<void> {
       }
       return null;
     }
-    return { channel, snapshots, matchId: match.matchId };
+    return {
+      channel,
+      snapshots,
+      matchId: match.matchId,
+      get lastSnapshotAtMs() {
+        return lastSnapshotAtMs;
+      },
+    };
   };
 
   const applyCompetitivePresentation = (
     view: CompetitiveSessionView,
   ): ReturnType<typeof recoveryPresentationFor> => {
-    const presentation = recoveryPresentationFor(view);
+    const presentation = recoveryPresentationFor({
+      ...view,
+      reconnectingDotCount:
+        Math.floor(performance.now() / RECONNECT_DOT_STEP_MS) % 3 + 1,
+      reducedMotion: preferences.reducedMotion,
+      ...(view.reconnectRemainingSeconds === undefined
+        ? {}
+        : { interruptionRemainingSeconds: view.reconnectRemainingSeconds }),
+    });
     setElementHidden(shell.overlay, presentation.surface === "hidden");
     if (presentation.surface === "readiness") {
       shell.setReadiness(view.localReady, view.peerReady);
@@ -1880,52 +1925,37 @@ export async function bootstrap(): Promise<void> {
 
   const appendMatchFinished = (
     finished: Extract<CompetitionEventV2, { kind: "match-finished" }>,
+    onSettled?: () => void,
   ): void => {
     const result = finished.result;
-    const seatA = result.players[0];
-    const seatB = result.players[1];
-    if (seatA === undefined || seatB === undefined) {
+    if (result.players[0] === undefined || result.players[1] === undefined) {
       appendCompetition(finished);
       return;
     }
     appendAfterMaterialization(
       finished,
       { kind: "match-result" },
+      (materialized) => matchResultMetadata(result, materialized),
+      { mayDefer: true, ...(onSettled === undefined ? {} : { onSettled }) },
+    );
+  };
+
+  const appendMatchConceded = (
+    conceded: Extract<CompetitionEventV2, { kind: "match-conceded" }>,
+    onSettled?: () => void,
+  ): void => {
+    appendAfterMaterialization(
+      conceded,
+      { kind: "match-result" },
       (materialized) => {
-        const tally = materialized.headToHead.find((entry) =>
-          entry.playerIds.includes(seatA.id) && entry.playerIds.includes(seatB.id)
+        const result = materialized.recentResults.find(
+          (entry) => entry.matchId === conceded.matchId,
         );
-        return matchResultFeedback({
-          matchId: result.matchId,
-          seatA: {
-            ...seatA,
-            score: result.statsByPlayer[seatA.id]?.score ?? 0,
-          },
-          seatB: {
-            ...seatB,
-            score: result.statsByPlayer[seatB.id]?.score ?? 0,
-          },
-          outcome: result.outcome === "seat-a"
-            ? "seat-a"
-            : result.outcome === "seat-b"
-              ? "seat-b"
-              : result.outcome === "draw"
-                ? "draw"
-                : "neutral",
-          ...(result.reason === "connection-lost"
-            ? { reason: "connection-lost" as const }
-            : {}),
-          headToHead: {
-            seatAWins: tally?.winsByPlayer[seatA.id] ?? 0,
-            seatBWins: tally?.winsByPlayer[seatB.id] ?? 0,
-          },
-          activity: {
-            waiting: materialized.counts.waiting,
-            live: materialized.counts.live,
-          },
-        });
+        return result === undefined
+          ? null
+          : matchResultMetadata(result.result, materialized, "concession");
       },
-      { mayDefer: true },
+      { mayDefer: true, ...(onSettled === undefined ? {} : { onSettled }) },
     );
   };
 
@@ -1957,6 +1987,7 @@ export async function bootstrap(): Promise<void> {
       window.clearTimeout(recovery.tickTimer);
     }
     passiveLiveRecovery = null;
+    shell.setRecoveryConfirmation(null);
     shell.setHomeRecovery(null);
   };
 
@@ -1969,6 +2000,78 @@ export async function bootstrap(): Promise<void> {
       ],
       nowMs: performance.now(),
     });
+
+  type RecoveryResolutionPayload = Extract<
+    CompetitionEventV2,
+    { kind: "match-conceded" | "match-finished" }
+  >;
+
+  const pendingRecoveryResolutionFor = (
+    matchId: string,
+  ): RecoveryResolutionPayload | null => {
+    for (const entry of pendingChatFeedback.entries()) {
+      if (entry.resolved) continue;
+      if (
+        entry.payload.kind === "match-conceded" &&
+        entry.payload.matchId === matchId
+      ) {
+        return entry.payload;
+      }
+      if (
+        entry.payload.kind === "match-finished" &&
+        entry.payload.matchId === matchId &&
+        entry.payload.result.reason === "connection-lost"
+      ) {
+        return entry.payload;
+      }
+    }
+    return null;
+  };
+
+  const clearRecoveryResolutionProgress = (eventId: string): void => {
+    recoveryResolutionStartedAtMs.delete(eventId);
+    const recovery = passiveLiveRecovery;
+    if (recovery !== null) {
+      recovery.finishQueued = false;
+      refreshPassiveLiveRecovery();
+    }
+  };
+
+  const presentPendingRecoveryResolution = (
+    recovery: PassiveLiveRecovery,
+  ): boolean => {
+    const payload = pendingRecoveryResolutionFor(recovery.matchId);
+    if (payload === null) return false;
+    const startedAtMs = recoveryResolutionStartedAtMs.get(payload.eventId) ??
+      performance.now();
+    recoveryResolutionStartedAtMs.set(payload.eventId, startedAtMs);
+    shell.setHomeRecovery({
+      kind: "ending",
+      delayed: performance.now() - startedAtMs >= RECOVERY_CONFIRMATION_DELAY_MS,
+    });
+    return true;
+  };
+
+  const retryPendingRecoveryResolution = (
+    recovery: PassiveLiveRecovery,
+  ): void => {
+    const payload = pendingRecoveryResolutionFor(recovery.matchId);
+    if (payload === null || durableOutbox.has(payload.eventId)) return;
+    const now = performance.now();
+    const startedAtMs = recoveryResolutionStartedAtMs.get(payload.eventId);
+    if (
+      startedAtMs === undefined ||
+      now - startedAtMs < RECOVERY_CONFIRMATION_DELAY_MS
+    ) {
+      return;
+    }
+    recoveryResolutionStartedAtMs.set(payload.eventId, now);
+    enqueueDurable(
+      { payload },
+      { successfulSendLimit: 1 },
+    );
+    refreshPassiveLiveRecovery();
+  };
 
   const publishPassiveConnectionLoss = (
     recovery: PassiveLiveRecovery,
@@ -2007,7 +2110,47 @@ export async function bootstrap(): Promise<void> {
     const finished = connectionLossFallbackFor(live, selfActor);
     recovery.finishQueued = true;
     if (pendingChatFeedback.get(finished.eventId) !== undefined) return;
-    appendMatchFinished(finished);
+    recoveryResolutionStartedAtMs.set(finished.eventId, performance.now());
+    appendMatchFinished(
+      finished,
+      () => clearRecoveryResolutionProgress(finished.eventId),
+    );
+    refreshPassiveLiveRecovery();
+  };
+
+  const concedePassiveMatch = (recovery: PassiveLiveRecovery): void => {
+    if (
+      passiveLiveRecovery !== recovery ||
+      !durableReplayReady ||
+      durable === null
+    ) {
+      return;
+    }
+    const live = competition.view(selfActor.id).liveMatches.find((entry) =>
+      entry.matchId === recovery.matchId &&
+      entry.startedEventId === recovery.startedEventId &&
+      (entry.seatA.id === selfActor.id || entry.seatB.id === selfActor.id)
+    );
+    if (live === undefined) return;
+    const existing = pendingRecoveryResolutionFor(recovery.matchId);
+    if (existing !== null) {
+      recoveryResolutionStartedAtMs.set(existing.eventId, performance.now());
+      appendCompetition(existing);
+      refreshPassiveLiveRecovery();
+      return;
+    }
+    const conceded: Extract<CompetitionEventV2, { kind: "match-conceded" }> = {
+      ...eventBase("match-conceded"),
+      kind: "match-conceded",
+      matchId: live.matchId,
+      startedEventId: live.startedEventId,
+    };
+    recoveryResolutionStartedAtMs.set(conceded.eventId, performance.now());
+    appendMatchConceded(
+      conceded,
+      () => clearRecoveryResolutionProgress(conceded.eventId),
+    );
+    refreshPassiveLiveRecovery();
   };
 
   const refreshPassiveLiveRecovery = (): void => {
@@ -2056,6 +2199,15 @@ export async function bootstrap(): Promise<void> {
     );
     if (live === undefined) {
       clearPassiveLiveRecovery();
+      return;
+    }
+    if (presentPendingRecoveryResolution(recovery)) {
+      if (passiveLiveRecovery === recovery && recovery.tickTimer === null) {
+        recovery.tickTimer = window.setTimeout(
+          refreshPassiveLiveRecovery,
+          LIVE_RECOVERY_TICK_MS,
+        );
+      }
       return;
     }
     const status = passiveRecoveryStatus(recovery);
@@ -2149,7 +2301,7 @@ export async function bootstrap(): Promise<void> {
   const startActiveMatch = (match: ActiveMatch): void => {
     const preserveOwnedLiveRecovery = match.role === "spectator" &&
       passiveLiveRecovery !== null &&
-      passiveLiveRecovery.matchId !== match.matchId;
+      (match.recoveryWatch === true || passiveLiveRecovery.matchId !== match.matchId);
     if (!preserveOwnedLiveRecovery) clearPassiveLiveRecovery();
     stopCompetitivePump();
     stopGlitchPreview();
@@ -2204,6 +2356,7 @@ export async function bootstrap(): Promise<void> {
     shell.touchButtons.hidden = !touchButtonsVisible;
     shell.container.dataset.touchButtonsVisible = String(touchButtonsVisible);
     shell.readinessPanel.hidden = true;
+    shell.setReadOnlyWatchStatus(null);
     shell.left.boardTarget.setAttribute("aria-label", match.role === "spectator" ? STRINGS["match.seatABoard"] : STRINGS["match.localBoard"]);
     shell.right.boardTarget.setAttribute("aria-label", match.role === "spectator" ? STRINGS["match.seatBBoard"] : STRINGS["match.opponentBoard"]);
     shell.show("match");
@@ -2218,6 +2371,7 @@ export async function bootstrap(): Promise<void> {
 
     if (match.role === "spectator") {
       mode = "spectator";
+      shell.right.pane.setAttribute("aria-disabled", "true");
       audio.startMusic(match.challenge.challengeId, match.round - 1);
       currentMusicMatchId = match.matchId;
       spectator = spectatorRuntime(match);
@@ -2230,15 +2384,19 @@ export async function bootstrap(): Promise<void> {
       }
       shell.left.pane.classList.remove("is-local");
       shell.right.pane.classList.remove("is-remote");
-      shell.overlay.hidden = false;
-      shell.setOverlayMessage(match.duplicateRuntime
-        ? STRINGS["lobby.duplicateSession"]
-        : STRINGS["lobby.spectatorNotice"]);
+      shell.setReadOnlyWatchStatus({ kind: "waiting" });
+      if (match.recoveryWatch === true) {
+        shell.overlay.hidden = true;
+      } else {
+        shell.overlay.hidden = false;
+        shell.setOverlayMessage(STRINGS["lobby.spectatorNotice"]);
+      }
       setInputsEnabled(false);
       return;
     }
 
     const seatB = match.challenge.seatB;
+    shell.right.pane.removeAttribute("aria-disabled");
     if (seatB === null) {
       shell.overlay.hidden = false;
       shell.setOverlayMessage(STRINGS["lobby.realtimeUnavailable"]);
@@ -2500,7 +2658,9 @@ export async function bootstrap(): Promise<void> {
         shell.setPairingInterruption(null);
         if (
           mode === "competitive" ||
-          (mode === "spectator" && activeMatch?.pairingId === ownedLive.pairingId)
+          (mode === "spectator" &&
+            activeMatch?.pairingId === ownedLive.pairingId &&
+            activeMatch.recoveryWatch !== true)
         ) {
           showHome();
           refreshPassiveLiveRecovery();
@@ -2568,7 +2728,7 @@ export async function bootstrap(): Promise<void> {
     ) {
       clearConfirmingPairing();
       if (mode === "competitive" || mode === "spectator") showHome();
-      shell.setHomeRecovery({ kind: "active-elsewhere" });
+      shell.setHomeRecovery({ kind: "setup-elsewhere" });
       return;
     }
     if (ownedStarting !== undefined && localSessionId !== runtimeId) {
@@ -2741,12 +2901,40 @@ export async function bootstrap(): Promise<void> {
   shell.viewLobbyButton.addEventListener("click", showLobby);
   shell.lobbyBackButton.addEventListener("click", showHome);
   shell.retryConnectionButton.addEventListener("click", () => {
+    const recovery = passiveLiveRecovery;
+    const pending = recovery === null
+      ? null
+      : pendingRecoveryResolutionFor(recovery.matchId);
+    if (recovery !== null && pending !== null) {
+      retryPendingRecoveryResolution(recovery);
+      return;
+    }
     retryRuntimeClaimsImmediately();
     reconcileLobby();
   });
   shell.endInterruptedMatchButton.addEventListener("click", () => {
     const recovery = passiveLiveRecovery;
     if (recovery !== null && passiveRecoveryStatus(recovery).kind === "expired") {
+      shell.setRecoveryConfirmation("neutral");
+    }
+  });
+  shell.concedeRecoveryButton.addEventListener("click", () => {
+    if (passiveLiveRecovery !== null) shell.setRecoveryConfirmation("concede");
+  });
+  shell.cancelRecoveryConfirmationButton.addEventListener("click", () => {
+    shell.setRecoveryConfirmation(null);
+  });
+  shell.confirmRecoveryButton.addEventListener("click", () => {
+    const kind = shell.recoveryConfirmation.dataset.kind;
+    const recovery = passiveLiveRecovery;
+    shell.setRecoveryConfirmation(null);
+    if (recovery === null) return;
+    if (kind === "concede") {
+      concedePassiveMatch(recovery);
+    } else if (
+      kind === "neutral" &&
+      passiveRecoveryStatus(recovery).kind === "expired"
+    ) {
       publishPassiveConnectionLoss(recovery);
       shell.endInterruptedMatchButton.disabled = recovery.finishQueued;
     }
@@ -2995,11 +3183,24 @@ export async function bootstrap(): Promise<void> {
   const watchMatch = (matchId: string): void => {
     const view = competition.view(selfActor.id);
     if (view.activity.kind === "starting") return;
-    if (view.activity.kind === "live" && view.activity.matchId === matchId) return;
+    const recoveringOwnedMatch = view.activity.kind === "live" &&
+      view.activity.matchId === matchId &&
+      passiveLiveRecovery?.matchId === matchId;
+    if (
+      view.activity.kind === "live" &&
+      view.activity.matchId === matchId &&
+      !recoveringOwnedMatch
+    ) {
+      return;
+    }
     const match = view.liveMatches.find((candidate) => candidate.matchId === matchId);
     if (match === undefined) return;
     const next = activeMatchFrom(match, true);
-    if (next !== null) startActiveMatch(next);
+    if (next !== null) {
+      startActiveMatch(recoveringOwnedMatch
+        ? { ...next, recoveryWatch: true }
+        : next);
+    }
   };
 
   renderCompetitionState = (): void => {
@@ -3009,6 +3210,7 @@ export async function bootstrap(): Promise<void> {
       view,
       self: selfActor,
       realtimeAvailable,
+      allowOwnedMatchWatch: passiveLiveRecovery !== null,
       isOnline: (actorId, challengeId) => presence.isOnline(actorId, challengeId),
       onJoinChallenge: joinChallenge,
       onWatchMatch: watchMatch,
@@ -3304,6 +3506,11 @@ export async function bootstrap(): Promise<void> {
     leaveStartingPairing(interruptedPairing.pairingId);
   };
   shell.cancelPairingButton.addEventListener("click", cancelInterruptedPairing);
+  shell.watchRecoveryMatchButton.addEventListener("click", () => {
+    const recovery = passiveLiveRecovery;
+    if (recovery !== null) watchMatch(recovery.matchId);
+  });
+  shell.exitWatchButton.addEventListener("click", showHome);
   shell.goToMatchButton.addEventListener("click", () => {
     const pairing = interruptedPairing;
     if (pairing === null) return;
@@ -3517,6 +3724,19 @@ export async function bootstrap(): Promise<void> {
       const right = spectatorRightCache?.matchId === activeMatch.matchId
         ? spectatorRightCache
         : null;
+      const snapshotAgeMs = spectator.lastSnapshotAtMs === null
+        ? null
+        : Math.max(0, performance.now() - spectator.lastSnapshotAtMs);
+      if (snapshotAgeMs === null) {
+        shell.setReadOnlyWatchStatus({ kind: "waiting" });
+      } else if (snapshotAgeMs >= RULES.network.missingPeerMs) {
+        shell.setReadOnlyWatchStatus({
+          kind: "stale",
+          ageSeconds: snapshotAgeMs / 1_000,
+        });
+      } else {
+        shell.setReadOnlyWatchStatus({ kind: "live" });
+      }
       const leftConcealed = left?.concealed ?? false;
       const rightConcealed = right?.concealed ?? false;
       leftBoard = left?.board ?? null;
@@ -3536,7 +3756,7 @@ export async function bootstrap(): Promise<void> {
       setElementHidden(shell.left.blackout, !leftConcealed);
       setElementHidden(shell.right.blackout, !rightConcealed);
       if (
-        !activeMatch.duplicateRuntime &&
+        (!activeMatch.duplicateRuntime || activeMatch.recoveryWatch === true) &&
         (left !== undefined || right !== undefined)
       ) {
         setElementHidden(shell.overlay, true);

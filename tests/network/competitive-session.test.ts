@@ -1354,14 +1354,14 @@ describe("CompetitiveSession", () => {
     expect(pair.b.view().matchTick).toBe(frozenTick);
   });
 
-  it("does not declare connection loss while a hidden client still receives peer traffic", () => {
+  it("does not let a hidden controller independently declare connection loss", () => {
     const pair = createPair();
     ready(pair);
     advanceBoth(pair, 3_600, 100);
     const frozenTick = pair.a.view().matchTick;
 
     pair.a.setHidden(true);
-    advanceBoth(pair, RULES.network.reconnectGraceMs + 1_000, 1_000);
+    advanceBoth(pair, RULES.network.controllerReconnectGraceMs + 1_000, 1_000);
 
     expect(pair.a.view()).toMatchObject({
       phase: "network-pause",
@@ -1369,10 +1369,10 @@ describe("CompetitiveSession", () => {
       connectionStatus: "unstable",
     });
     expect(pair.a.view().terminal).toBeUndefined();
-
-    pair.a.setHidden(false);
-    stabilizeRecovery(pair);
-    expect(pair.a.view().phase).toBe("countdown");
+    expect(pair.b.view()).toMatchObject({
+      phase: "finished",
+      terminal: { outcome: "desync", reason: "connection-lost" },
+    });
   });
 
   it("waits for Seat B to become visible before coordinating resume", () => {
@@ -2144,7 +2144,7 @@ describe("CompetitiveSession", () => {
     expect(pair.b.view().phase).toBe("countdown");
   });
 
-  it("ends a partial-traffic resume incident at its absolute sixty-second deadline", () => {
+  it("ends a partial-traffic resume incident at its absolute controller deadline", () => {
     const pair = createPair();
     ready(pair);
     advanceBoth(pair, 3_600, 100);
@@ -2155,7 +2155,7 @@ describe("CompetitiveSession", () => {
     });
 
     pair.b.setHidden(false);
-    advanceBoth(pair, RULES.network.reconnectGraceMs, 1_000);
+    advanceBoth(pair, RULES.network.controllerReconnectGraceMs, 1_000);
 
     expect(pair.a.view()).toMatchObject({
       phase: "finished",
@@ -2411,7 +2411,7 @@ describe("CompetitiveSession", () => {
     expect(pair.a.view().local?.level).toBeGreaterThanOrEqual(3);
   });
 
-  it("ends neutrally once after sixty seconds of silence", () => {
+  it("ends neutrally once after twenty seconds of visible peer silence", () => {
     const onForfeitWin = vi.fn();
     const onAResult = vi.fn<(result: MatchResultV1) => void>();
     const pair = createPair({
@@ -2424,7 +2424,7 @@ describe("CompetitiveSession", () => {
 
     advanceBoth(pair, RULES.network.missingPeerMs);
     pair.aClock.advance(
-      RULES.network.reconnectGraceMs - RULES.network.missingPeerMs - 1,
+      20_000 - RULES.network.missingPeerMs - 1,
     );
     pair.a.pump();
     expect(onForfeitWin).not.toHaveBeenCalled();
@@ -2450,7 +2450,176 @@ describe("CompetitiveSession", () => {
     );
   });
 
-  it("records the same neutral loss when either local channel is unavailable", () => {
+  it("ends when a peer stays hidden but keeps sending realtime heartbeats", () => {
+    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const pair = createPair({ onAResultConfirmed: onAResult });
+    ready(pair);
+    advanceBoth(pair, 3_000);
+
+    pair.b.setHidden(true);
+    advanceBoth(
+      pair,
+      RULES.network.controllerReconnectGraceMs - 1,
+      1_000,
+    );
+    expect(onAResult).not.toHaveBeenCalled();
+
+    advanceBoth(pair, 1, 1);
+    expect(onAResult).toHaveBeenCalledTimes(1);
+    expect(pair.a.view()).toMatchObject({
+      phase: "finished",
+      terminal: { outcome: "desync", reason: "connection-lost" },
+    });
+  });
+
+  it("reports the remaining committed-controller reconnect grace", () => {
+    const pair = createPair();
+    ready(pair);
+    advanceBoth(pair, 3_000);
+    expect(pair.a.view().reconnectRemainingSeconds).toBeUndefined();
+
+    pair.b.disconnect();
+    advanceBoth(pair, RULES.network.missingPeerMs);
+    expect(pair.a.view()).toMatchObject({
+      phase: "network-pause",
+      reconnectRemainingSeconds: 15,
+    });
+
+    pair.aClock.advance(14_000);
+    pair.a.pump();
+    expect(pair.a.view().reconnectRemainingSeconds).toBe(1);
+  });
+
+  it("gives a later peer-silence incident a fresh grace after verified recovery", () => {
+    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const pair = createPair({ onAResultConfirmed: onAResult });
+    ready(pair);
+    advanceBoth(pair, 3_600, 100);
+    pair.b.disconnect();
+    advanceBoth(
+      pair,
+      RULES.network.controllerReconnectGraceMs - 1,
+      1_000,
+    );
+    expect(onAResult).not.toHaveBeenCalled();
+
+    pair.b.attachTransport(pair.bus.connect("runtime-b-between-incidents"));
+    stabilizeRecovery(pair);
+    advanceBoth(
+      pair,
+      (RULES.network.fastResumeCountdownTicks * 1_000) /
+        RULES.timing.ticksPerSecond,
+      50,
+    );
+    expect(pair.a.view().phase).toBe("playing");
+    expect(pair.b.view().phase).toBe("playing");
+
+    pair.b.disconnect();
+    advanceBoth(pair, RULES.network.controllerReconnectGraceMs - 1, 1_000);
+    expect(onAResult).not.toHaveBeenCalled();
+
+    advanceBoth(pair, 1, 1);
+    expect(onAResult).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts a fresh peer-silence grace period after returning visible", () => {
+    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const pair = createPair({ onAResultConfirmed: onAResult });
+    ready(pair);
+    advanceBoth(pair, 3_000);
+    pair.b.disconnect();
+    advanceBoth(pair, RULES.network.missingPeerMs);
+
+    pair.a.setHidden(true);
+    advanceBoth(pair, RULES.network.controllerReconnectGraceMs + 5_000, 1_000);
+
+    expect(pair.a.view().phase).toBe("network-pause");
+    expect(onAResult).not.toHaveBeenCalled();
+
+    pair.a.setHidden(false);
+    pair.a.pump();
+    pair.aClock.advance(RULES.network.controllerReconnectGraceMs - 1);
+    pair.a.pump();
+    expect(onAResult).not.toHaveBeenCalled();
+
+    pair.aClock.advance(1);
+    pair.a.pump();
+    expect(onAResult).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts a fresh grace when returning before a still-hidden peer", () => {
+    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const pair = createPair({ onAResultConfirmed: onAResult });
+    ready(pair);
+    advanceBoth(pair, 3_000);
+
+    pair.a.setHidden(true);
+    pair.b.setHidden(true);
+    advanceBoth(pair, RULES.network.controllerReconnectGraceMs + 5_000, 1_000);
+    expect(onAResult).not.toHaveBeenCalled();
+
+    pair.a.setHidden(false);
+    advanceBoth(
+      pair,
+      RULES.network.controllerReconnectGraceMs - 1,
+      1_000,
+    );
+    expect(onAResult).not.toHaveBeenCalled();
+
+    advanceBoth(pair, 1, 1);
+    expect(onAResult).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the visible peer-loss deadline across repeated visible notifications", () => {
+    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const pair = createPair({ onAResultConfirmed: onAResult });
+    ready(pair);
+    advanceBoth(pair, 3_000);
+    pair.b.disconnect();
+    advanceBoth(pair, RULES.network.missingPeerMs);
+
+    for (let notification = 0; notification < 3; notification += 1) {
+      advanceBoth(pair, 4_000, 1_000);
+      pair.a.setHidden(false);
+    }
+
+    expect(pair.a.view().reconnectRemainingSeconds).toBe(3);
+    expect(onAResult).not.toHaveBeenCalled();
+
+    advanceBoth(pair, 2_999, 1_000);
+    expect(onAResult).not.toHaveBeenCalled();
+
+    advanceBoth(pair, 1, 1);
+    expect(onAResult).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves one visible peer-loss deadline across transport replacements", () => {
+    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const pair = createPair({ onAResultConfirmed: onAResult });
+    ready(pair);
+    advanceBoth(pair, 3_000);
+    pair.b.disconnect();
+    advanceBoth(pair, RULES.network.missingPeerMs);
+
+    for (let replacement = 1; replacement <= 3; replacement += 1) {
+      advanceBoth(pair, 4_000, 1_000);
+      pair.a.disconnect();
+      pair.a.attachTransport(
+        pair.bus.connect(`runtime-a-replacement-${replacement}`),
+      );
+    }
+
+    expect(pair.a.view().reconnectRemainingSeconds).toBe(3);
+    expect(onAResult).not.toHaveBeenCalled();
+
+    advanceBoth(pair, 2_999, 1_000);
+    expect(onAResult).not.toHaveBeenCalled();
+
+    advanceBoth(pair, 1, 1);
+    expect(onAResult).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets only the connected visible controller record a neutral loss", () => {
     const onAResult = vi.fn<(result: MatchResultV1) => void>();
     const onBResult = vi.fn<(result: MatchResultV1) => void>();
     const pair = createPair({
@@ -2464,11 +2633,11 @@ describe("CompetitiveSession", () => {
     advanceBoth(pair, RULES.network.missingPeerMs);
     advanceBoth(
       pair,
-      RULES.network.reconnectGraceMs - RULES.network.missingPeerMs,
+      RULES.network.controllerReconnectGraceMs - RULES.network.missingPeerMs,
     );
     pair.b.pump();
 
-    expect(onAResult).toHaveBeenCalledTimes(1);
+    expect(onAResult).not.toHaveBeenCalled();
     expect(onBResult).toHaveBeenCalledTimes(1);
     expect(onBResult).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2477,7 +2646,8 @@ describe("CompetitiveSession", () => {
         completedBy: "player-a",
       }),
     );
-    expect(pair.a.view().result).toEqual(pair.b.view().result);
+    expect(pair.a.view().result).toBeUndefined();
+    expect(pair.b.view().result).toBeDefined();
   });
 
   it("retries a dropped explicit forfeit before reporting canonical delivery", () => {

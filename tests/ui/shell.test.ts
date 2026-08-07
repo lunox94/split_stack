@@ -135,37 +135,70 @@ describe("application shell", () => {
     expect(shell.lobbyButton.hidden).toBe(false);
   });
 
-  it("keeps live-controller and setup recovery actionable on Home", () => {
+  it("explains an unfinished match and keeps its recovery actions on Home", () => {
     const shell = createAppShell(document, document.createElement("div"));
 
     expect(shell.homeRecovery.hidden).toBe(true);
 
     shell.setHomeRecovery({ kind: "active-elsewhere" });
     expect(shell.homeRecovery.hidden).toBe(false);
+    expect(shell.homeRecoveryHeading.textContent).toBe("Unfinished match");
     expect(shell.homeRecoveryMessage.textContent).toBe(
-      "Game active in another session",
+      "This copy can watch but cannot resume playing.",
     );
+    expect(shell.homeRecoveryHelpButton.getAttribute("aria-expanded")).toBe("false");
+    expect(shell.homeRecoveryHelpButton.getAttribute("aria-controls")).toBe(
+      shell.homeRecoveryHelp.id,
+    );
+    expect(shell.homeRecoveryHelp.hidden).toBe(true);
+    expect(shell.homeRecoveryHelp.textContent).toBe(
+      "Split Stack was reopened while this match was active. To prevent two copies " +
+        "from controlling the same player, this copy can only watch.",
+    );
+    expect(shell.homeRecoveryStatus.textContent).toBe(
+      "The original match is still active.",
+    );
+    shell.homeRecoveryHelpButton.click();
+    expect(shell.homeRecoveryHelpButton.getAttribute("aria-expanded")).toBe("true");
+    expect(shell.homeRecoveryHelp.hidden).toBe(false);
+    expect(shell.watchRecoveryMatchButton.hidden).toBe(false);
+    expect(shell.watchRecoveryMatchButton.textContent).toBe("Watch match");
+    expect(shell.concedeRecoveryButton.hidden).toBe(false);
+    expect(shell.concedeRecoveryButton.textContent).toBe("Concede and leave");
+    expect(shell.concedeRecoveryButton.classList).toContain("destructive");
+    expect(shell.endInterruptedMatchButton.hidden).toBe(true);
     expect(shell.retryConnectionButton.hidden).toBe(true);
     expect(shell.exitSetupButton.hidden).toBe(true);
 
     shell.setHomeRecovery({ kind: "interrupted", remainingSeconds: 42 });
     expect(shell.homeRecoveryMessage.textContent).toBe(
-      "Game interrupted · waiting for reconnection (42s)",
+      "This copy can watch but cannot resume playing.",
     );
+    expect(shell.homeRecoveryStatus.textContent).toBe("Neutral exit unlocks in 42s");
+    expect(shell.homeRecoveryHint.textContent).toBe("Concede now to leave immediately.");
     expect(shell.exitSetupButton.hidden).toBe(true);
     expect(shell.endInterruptedMatchButton.hidden).toBe(true);
 
     shell.setHomeRecovery({ kind: "interrupted", remainingSeconds: 0 });
-    expect(shell.homeRecoveryMessage.textContent).toBe(
-      "Game interrupted · no controller reconnected",
-    );
+    expect(shell.homeRecoveryStatus.textContent).toBe("Neutral exit is available.");
     expect(shell.endInterruptedMatchButton.hidden).toBe(false);
-    expect(shell.endInterruptedMatchButton.textContent).toBe("End interrupted match");
+    expect(shell.endInterruptedMatchButton.textContent).toBe("End match with no result");
     expect(shell.endInterruptedMatchButton.classList).toContain("destructive");
     expect(shell.exitSetupButton.hidden).toBe(true);
 
+    shell.setHomeRecovery({ kind: "ending", delayed: false });
+    expect(shell.homeRecoveryStatus.textContent).toBe("Ending match…");
+    expect(shell.watchRecoveryMatchButton.hidden).toBe(true);
+    expect(shell.concedeRecoveryButton.hidden).toBe(true);
+    expect(shell.retryConnectionButton.hidden).toBe(true);
+
+    shell.setHomeRecovery({ kind: "ending", delayed: true });
+    expect(shell.homeRecoveryStatus.textContent).toBe("Still waiting for confirmation.");
+    expect(shell.retryConnectionButton.hidden).toBe(false);
+    expect(shell.retryConnectionButton.textContent).toBe("Retry now");
+
     shell.setHomeRecovery({ kind: "confirming", exit: "withdraw" });
-    expect(shell.homeRecoveryMessage.textContent).toBe(
+    expect(shell.homeRecoveryStatus.textContent).toBe(
       "Still confirming the active game session…",
     );
     expect(shell.retryConnectionButton.hidden).toBe(false);
@@ -176,8 +209,56 @@ describe("application shell", () => {
     shell.setHomeRecovery({ kind: "confirming", exit: "cancel" });
     expect(shell.exitSetupButton.textContent).toBe("Cancel pairing");
 
+    shell.setHomeRecovery({ kind: "setup-elsewhere" });
+    expect(shell.homeRecoveryHeading.textContent).toBe(
+      "Pairing active in another session",
+    );
+    expect(shell.homeRecoveryMessage.textContent).toBe(
+      "This copy cannot control the pairing.",
+    );
+    expect(shell.homeRecoveryHelpButton.hidden).toBe(true);
+    expect(shell.watchRecoveryMatchButton.hidden).toBe(true);
+    expect(shell.concedeRecoveryButton.hidden).toBe(true);
+    expect(shell.retryConnectionButton.hidden).toBe(true);
+    expect(shell.exitSetupButton.hidden).toBe(true);
+
     shell.setHomeRecovery(null);
     expect(shell.homeRecovery.hidden).toBe(true);
+  });
+
+  it("confirms concession with the safe action focused by default", () => {
+    const trigger = document.createElement("button");
+    const mount = document.createElement("div");
+    document.body.append(trigger, mount);
+    const shell = createAppShell(document, mount);
+    trigger.focus();
+
+    shell.setRecoveryConfirmation("concede");
+
+    expect(shell.recoveryConfirmation.hidden).toBe(false);
+    expect(shell.recoveryConfirmation.getAttribute("role")).toBe("dialog");
+    expect(shell.recoveryConfirmation.getAttribute("aria-modal")).toBe("true");
+    expect(shell.recoveryConfirmationHeading.textContent).toBe("Concede this match?");
+    expect(shell.recoveryConfirmationMessage.textContent).toBe(
+      "Your opponent will win, and this cannot be undone.",
+    );
+    expect(shell.cancelRecoveryConfirmationButton.textContent).toBe("Cancel");
+    expect(shell.confirmRecoveryButton.textContent).toBe("Concede match");
+    expect(shell.confirmRecoveryButton.classList).toContain("destructive");
+    expect(document.activeElement).toBe(shell.cancelRecoveryConfirmationButton);
+
+    shell.setRecoveryConfirmation(null);
+    expect(shell.recoveryConfirmation.hidden).toBe(true);
+    expect(document.activeElement).toBe(trigger);
+
+    shell.setRecoveryConfirmation("neutral");
+    expect(shell.recoveryConfirmationHeading.textContent).toBe(
+      "End match with no result?",
+    );
+    expect(shell.recoveryConfirmationMessage.textContent).toBe(
+      "No winner or loss will be recorded. The original game may still be open elsewhere.",
+    );
+    expect(shell.confirmRecoveryButton.textContent).toBe("End match with no result");
   });
 
   it("uses a global actionable interruption for pairings and mutual rematches", () => {
@@ -621,7 +702,10 @@ describe("application shell", () => {
   it("uses one compact match-menu trigger for Practice and live play", () => {
     const shell = createAppShell(document, document.createElement("div"));
 
-    expect(shell.match.querySelectorAll(".match-actions > button")).toHaveLength(1);
+    expect(
+      [...shell.match.querySelectorAll<HTMLButtonElement>(".match-actions > button")]
+        .filter((action) => !action.hidden),
+    ).toEqual([]);
     expect(shell.matchMenuButton.getAttribute("aria-label")).toBe("Match menu");
     expect(shell.matchMenuButton.getAttribute("aria-haspopup")).toBe("dialog");
     expect(shell.matchMenu.getAttribute("aria-describedby")).toBe(
@@ -763,6 +847,36 @@ describe("application shell", () => {
     expect(primary?.getAttribute("aria-label")).toBe(
       "Glitch Piece, shape concealed",
     );
+  });
+
+  it("keeps read-only watching easy to exit and describes snapshot freshness", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+
+    expect(shell.exitWatchButton.hidden).toBe(true);
+    expect(shell.watchStatus.hidden).toBe(true);
+
+    shell.setReadOnlyWatchStatus({ kind: "waiting" });
+    expect(shell.exitWatchButton.hidden).toBe(false);
+    expect(shell.exitWatchButton.textContent).toBe("Exit watch");
+    expect(shell.watchStatus.hidden).toBe(false);
+    expect(shell.watchStatus.dataset.kind).toBe("waiting");
+    expect(shell.watchStatus.textContent).toBe("Waiting for live game data…");
+    expect(shell.watchStatus.getAttribute("role")).toBe("status");
+
+    shell.setReadOnlyWatchStatus({ kind: "live" });
+    expect(shell.exitWatchButton.hidden).toBe(false);
+    expect(shell.watchStatus.hidden).toBe(true);
+
+    shell.setReadOnlyWatchStatus({ kind: "stale", ageSeconds: 12.2 });
+    expect(shell.watchStatus.hidden).toBe(false);
+    expect(shell.watchStatus.dataset.kind).toBe("stale");
+    expect(shell.watchStatus.textContent).toBe(
+      "Live updates interrupted · last update 13s ago",
+    );
+
+    shell.setReadOnlyWatchStatus(null);
+    expect(shell.exitWatchButton.hidden).toBe(true);
+    expect(shell.watchStatus.hidden).toBe(true);
   });
 
   it("shows independent music and effects controls", () => {

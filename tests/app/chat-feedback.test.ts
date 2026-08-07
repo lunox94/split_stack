@@ -168,7 +168,7 @@ describe("result and follow-up feedback", () => {
     );
   });
 
-  it("labels draws and neutral technical endings while retaining scores and H2H", () => {
+  it("labels draws and generic neutral endings while retaining scores and H2H", () => {
     const draw = resultInput("draw");
     draw.seatB.score = draw.seatA.score;
     expect(matchResultFeedback(draw).info).toBe(
@@ -184,11 +184,30 @@ describe("result and follow-up feedback", () => {
       "bob-id": "No result · standings unchanged",
     });
 
+  });
+
+  it("keeps neutral connection-loss cleanup silent while updating the activity summary", () => {
     const connectionLost = resultInput("neutral");
     connectionLost.reason = "connection-lost";
-    expect(matchResultFeedback(connectionLost).info).toBe(
-      "Match ended · connection lost · no result",
-    );
+
+    expect(matchResultFeedback(connectionLost)).toEqual({
+      summary: "2 wait · 3 live",
+    });
+  });
+
+  it("announces a concession once with the conceding player and winner", () => {
+    const concession = resultInput("seat-b");
+    concession.reason = "concession";
+
+    expect(matchResultFeedback(concession)).toEqual({
+      info: "Alice conceded · Bob wins",
+      href: "index.html#result/challenge-1%3Around%3A1",
+      summary: "2 wait · 3 live",
+      notify: {
+        "alice-id": "Alice conceded · Bob wins",
+        "bob-id": "Alice conceded · Bob wins",
+      },
+    });
   });
 
   it("rejects a result that would notify the same seat twice", () => {

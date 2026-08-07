@@ -32,6 +32,18 @@ function challengeCreated(eventId = "create-1"): CompetitionEventV2 {
   };
 }
 
+function matchConceded(eventId = "concede-1"): CompetitionEventV2 {
+  return {
+    schema: COMPETITION_EVENT_SCHEMA_V2,
+    kind: "match-conceded",
+    eventId,
+    logicalClock: 8,
+    actor: { id: "alice@example.test", displayName: "Alice" },
+    matchId: "match-1",
+    startedEventId: "start-1",
+  };
+}
+
 describe("pending chat feedback recovery journal", () => {
   it("survives reload until a durable metadata receipt acknowledges it", () => {
     const storage = new MemoryStorage();
@@ -108,5 +120,26 @@ describe("pending chat feedback recovery journal", () => {
     store.add(challengeCreated(), { kind: "match-result" });
 
     expect(store.entries()).toEqual([]);
+  });
+
+  it("keeps concession feedback pending until its result message is received", () => {
+    const storage = new MemoryStorage();
+    const first = new PendingChatFeedbackStoreV2(
+      storage,
+      "rules-v2",
+      "alice@example.test",
+    );
+
+    first.add(matchConceded(), { kind: "match-result" });
+
+    expect(new PendingChatFeedbackStoreV2(
+      storage,
+      "rules-v2",
+      "alice@example.test",
+    ).entries()).toMatchObject([{
+      payload: { kind: "match-conceded", eventId: "concede-1" },
+      resolver: { kind: "match-result" },
+      resolved: false,
+    }]);
   });
 });
