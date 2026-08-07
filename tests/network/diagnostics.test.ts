@@ -235,4 +235,279 @@ describe("NetworkDiagnostics", () => {
     expect(diagnostics.snapshot().incidents).toEqual([]);
     expect(diagnostics.begin({ kind: "connection-unstable" })).toBe(1);
   });
+
+  it("round-trips cloned incident and clock-sync timeout context", () => {
+    const clock = new ManualClock(7_000);
+    const storage = new MemoryStorage();
+    const diagnostics = new NetworkDiagnostics({ clock, storage });
+    const context = { matchId: "match-7", localSeat: "a" as const };
+    const clockSync = {
+      purpose: "initial" as const,
+      targetSamples: 5,
+      acceptedSamples: 3,
+      retryRounds: 2,
+      pingsSent: 15,
+      pongsReceived: 7,
+      pongOutcomes: {
+        accepted: 3,
+        unknownSample: 1,
+        staleEcho: 1,
+        duplicate: 1,
+        invalidTiming: 1,
+      },
+      elapsedMs: 10_250,
+      deadlineMs: 10_000,
+      lastPongAgeMs: 750,
+    };
+
+    diagnostics.begin({ kind: "clock-sync-timeout", clockSync }, context);
+    context.matchId = "mutated";
+    clockSync.pongOutcomes.accepted = 0;
+
+    const expectedIncident = {
+      incidentId: 1,
+      startedAtMs: 7_000,
+      context: { matchId: "match-7", localSeat: "a" },
+      events: [{
+        kind: "clock-sync-timeout",
+        atMs: 7_000,
+        clockSync: {
+          purpose: "initial",
+          targetSamples: 5,
+          acceptedSamples: 3,
+          retryRounds: 2,
+          pingsSent: 15,
+          pongsReceived: 7,
+          pongOutcomes: {
+            accepted: 3,
+            unknownSample: 1,
+            staleEcho: 1,
+            duplicate: 1,
+            invalidTiming: 1,
+          },
+          elapsedMs: 10_250,
+          deadlineMs: 10_000,
+          lastPongAgeMs: 750,
+        },
+      }],
+    };
+    expect(diagnostics.snapshot().incidents[0]).toEqual(expectedIncident);
+
+    const copy = diagnostics.snapshot();
+    copy.incidents[0]!.context!.matchId = "copy-mutated";
+    copy.incidents[0]!.events[0]!.clockSync!.pongOutcomes.accepted = 0;
+    expect(diagnostics.snapshot().incidents[0]).toEqual(expectedIncident);
+    expect(new NetworkDiagnostics({ clock, storage }).snapshot().incidents[0])
+      .toEqual(expectedIncident);
+  });
+
+  it("round-trips remote tick, pause trigger, and detach reason context", () => {
+    const diagnostics = new NetworkDiagnostics({ clock: new ManualClock(8_000) });
+    const incidentId = diagnostics.begin({
+      kind: "desynchronized",
+      reason: "remote-tick-out-of-range",
+      snapshotsAccepted: 10,
+      snapshotsRejected: 0,
+      remoteTick: {
+        source: "network-pause",
+        localTick: 100,
+        remoteTargetTick: 112,
+        maxAllowedDeltaTicks: 6,
+      },
+    });
+    diagnostics.record(incidentId, {
+      kind: "connection-unstable",
+      pauseTrigger: "peer-network-pause",
+      pauseEpoch: 2,
+    });
+    diagnostics.record(incidentId, {
+      kind: "channel-detached",
+      detachReason: "session-teardown",
+    });
+
+    expect(diagnostics.snapshot().incidents[0]?.events).toEqual([
+      {
+        kind: "desynchronized",
+        atMs: 8_000,
+        reason: "remote-tick-out-of-range",
+        snapshotsAccepted: 10,
+        snapshotsRejected: 0,
+        remoteTick: {
+          source: "network-pause",
+          localTick: 100,
+          remoteTargetTick: 112,
+          maxAllowedDeltaTicks: 6,
+        },
+      },
+      {
+        kind: "connection-unstable",
+        atMs: 8_000,
+        pauseTrigger: "peer-network-pause",
+        pauseEpoch: 2,
+      },
+      {
+        kind: "channel-detached",
+        atMs: 8_000,
+        detachReason: "session-teardown",
+      },
+    ]);
+  });
+
+  it("omits malformed optional v1 extensions while preserving base records", () => {
+    const parsed = parseNetworkDiagnostics(JSON.stringify({
+      schema: "split-stack/network-diagnostics/v1",
+      incidents: [{
+        incidentId: 1,
+        startedAtMs: 9_000,
+        context: { matchId: "contains\nnewline", localSeat: "a" },
+        events: [{
+          kind: "desynchronized",
+          atMs: 9_000,
+          reason: "remote-tick-out-of-range",
+          snapshotsAccepted: 4,
+          snapshotsRejected: 0,
+          remoteTick: {
+            source: "top-out",
+            localTick: 100,
+            remoteTargetTick: 105,
+            maxAllowedDeltaTicks: 6,
+          },
+          pauseTrigger: "not-a-trigger",
+          detachReason: "not-a-reason",
+        }],
+      }],
+    }));
+
+    expect(parsed.incidents).toEqual([{
+      incidentId: 1,
+      startedAtMs: 9_000,
+      events: [{
+        kind: "desynchronized",
+        atMs: 9_000,
+        reason: "remote-tick-out-of-range",
+        snapshotsAccepted: 4,
+        snapshotsRejected: 0,
+      }],
+    }]);
+  });
+
+  it("drops a clock-sync timeout event whose required summary is inconsistent", () => {
+    const parsed = parseNetworkDiagnostics(JSON.stringify({
+      schema: "split-stack/network-diagnostics/v1",
+      incidents: [{
+        incidentId: 1,
+        startedAtMs: 10_000,
+        events: [
+          {
+            kind: "clock-sync-timeout",
+            atMs: 10_000,
+            clockSync: {
+              purpose: "resume",
+              targetSamples: 5,
+              acceptedSamples: 6,
+              retryRounds: 1,
+              pingsSent: 10,
+              pongsReceived: 6,
+              pongOutcomes: {
+                accepted: 6,
+                unknownSample: 0,
+                staleEcho: 0,
+                duplicate: 0,
+                invalidTiming: 0,
+              },
+              elapsedMs: 10_000,
+              deadlineMs: 10_000,
+            },
+          },
+          { kind: "channel-detached", atMs: 10_001 },
+        ],
+      }],
+    }));
+
+    expect(parsed.incidents[0]?.events).toEqual([
+      { kind: "channel-detached", atMs: 10_001 },
+    ]);
+  });
+
+  it("rejects malformed producer context and extensions without consuming an ID", () => {
+    const diagnostics = new NetworkDiagnostics({ clock: new ManualClock(11_000) });
+    const validClockSync = {
+      purpose: "resume" as const,
+      targetSamples: 5,
+      acceptedSamples: 4,
+      retryRounds: 1,
+      pingsSent: 10,
+      pongsReceived: 4,
+      pongOutcomes: {
+        accepted: 4,
+        unknownSample: 0,
+        staleEcho: 0,
+        duplicate: 0,
+        invalidTiming: 0,
+      },
+      elapsedMs: 10_000,
+      deadlineMs: 10_000,
+    };
+
+    expect(() => diagnostics.begin(
+      { kind: "clock-sync-timeout", clockSync: validClockSync },
+      { matchId: "", localSeat: "a" },
+    )).toThrow(TypeError);
+    expect(() => diagnostics.begin({
+      kind: "clock-sync-timeout",
+      clockSync: {
+        ...validClockSync,
+        pongsReceived: 3,
+      },
+    })).toThrow(TypeError);
+    expect(() => diagnostics.begin({
+      kind: "desynchronized",
+      reason: "remote-tick-out-of-range",
+      snapshotsAccepted: 0,
+      snapshotsRejected: 0,
+      remoteTick: {
+        source: "top-out",
+        localTick: 100,
+        remoteTargetTick: 106,
+        maxAllowedDeltaTicks: 6,
+      },
+    })).toThrow(TypeError);
+    expect(() => diagnostics.begin({
+      kind: "channel-detached",
+      pauseTrigger: "visibility",
+      detachReason: "invalid" as "unknown",
+    })).toThrow(TypeError);
+    expect(() => diagnostics.begin({
+      kind: "desynchronized",
+      reason: "remote-tick-out-of-range",
+      snapshotsAccepted: 0,
+      snapshotsRejected: 0,
+      pauseTrigger: "visibility",
+    })).toThrow(TypeError);
+    expect(() => diagnostics.begin({
+      kind: "connection-unstable",
+      detachReason: "unknown",
+    })).toThrow(TypeError);
+
+    expect(diagnostics.snapshot().incidents).toEqual([]);
+    expect(diagnostics.begin({ kind: "channel-detached" })).toBe(1);
+  });
+
+  it("continues parsing original v1 JSON without extension fields", () => {
+    const original = {
+      schema: "split-stack/network-diagnostics/v1",
+      incidents: [{
+        incidentId: 4,
+        startedAtMs: 12_000,
+        events: [{
+          kind: "connection-unstable",
+          atMs: 12_010,
+          silenceMs: 531,
+          pauseTick: 0,
+        }],
+      }],
+    };
+
+    expect(parseNetworkDiagnostics(JSON.stringify(original))).toEqual(original);
+  });
 });

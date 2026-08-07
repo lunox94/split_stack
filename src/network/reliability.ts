@@ -23,6 +23,16 @@ interface InboundState {
   stream: StreamRef;
   nextExpected: number;
   buffered: Map<number, RealtimeEnvelope<CriticalKind>>;
+  gapRequest: {
+    fromSeq: number;
+    lastSentMs: number;
+  } | null;
+}
+
+interface GapResendWindow {
+  fromSeq: number;
+  throughSeq: number;
+  lastSentMs: number;
 }
 
 export interface CriticalReliabilityOptions {
@@ -110,6 +120,7 @@ export class CriticalReliability {
   private readonly outbox = new Map<number, OutboxEntry>();
   private readonly outboundEventSeq = new Map<string, number>();
   private readonly inbound = new Map<string, InboundState>();
+  private gapResendWindows: GapResendWindow[] = [];
   private readonly appliedEventIds = new Set<string>();
   private readonly appliedEventOrder: string[] = [];
   private nextSequence = 1;
@@ -246,6 +257,10 @@ export class CriticalReliability {
     const span = envelope.payload.throughSeq - envelope.payload.fromSeq + 1;
     if (span <= 0 || span > this.maxPending) return;
     const now = this.options.clock.now();
+    this.gapResendWindows = this.gapResendWindows.filter(
+      (window) => now - window.lastSentMs < this.retryMs,
+    );
+    const entries: OutboxEntry[] = [];
     for (
       let sequence = envelope.payload.fromSeq;
       sequence <= envelope.payload.throughSeq;
@@ -253,6 +268,29 @@ export class CriticalReliability {
     ) {
       const entry = this.outbox.get(sequence);
       if (entry === undefined) continue;
+      entries.push(entry);
+    }
+    if (entries.length === 0) return;
+    if (this.gapResendWindows.some(
+      (window) =>
+        envelope.payload.fromSeq <= window.throughSeq &&
+        envelope.payload.throughSeq >= window.fromSeq,
+    )) {
+      return;
+    }
+    // Commit the rate limit before crossing a potentially re-entrant transport.
+    // Older peers may request overlapping ranges for every buffered future
+    // frame; remembering every recently covered range prevents those requests
+    // from recursively amplifying one loss into a retransmission storm.
+    this.gapResendWindows.push({
+      fromSeq: envelope.payload.fromSeq,
+      throughSeq: envelope.payload.throughSeq,
+      lastSentMs: now,
+    });
+    while (this.gapResendWindows.length > this.maxPending) {
+      this.gapResendWindows.shift();
+    }
+    for (const entry of entries) {
       entry.lastSentMs = now;
       this.options.send(entry.envelope);
     }
@@ -268,6 +306,7 @@ export class CriticalReliability {
         stream: envelopeStream(envelope),
         nextExpected: 1,
         buffered: new Map(),
+        gapRequest: null,
       };
       this.inbound.set(key, state);
     }
@@ -282,11 +321,7 @@ export class CriticalReliability {
         throw new RangeError("Critical gap buffer capacity exceeded");
       }
       state.buffered.set(sequence, envelope);
-      this.sendControl("GAP_REQUEST", {
-        stream: envelopeStream(envelope),
-        fromSeq: state.nextExpected,
-        throughSeq: sequence - 1,
-      });
+      this.requestMissingPrefix(state);
       return;
     }
 
@@ -301,11 +336,43 @@ export class CriticalReliability {
       if (shouldApply) this.rememberAppliedEvent(eventId);
       acknowledged.push(currentSequence);
       state.nextExpected = currentSequence + 1;
+      state.gapRequest = null;
       state.buffered.delete(currentSequence);
       if (shouldApply) this.options.apply(current);
       current = state.buffered.get(state.nextExpected);
     }
     this.sendAck(envelopeStream(envelope), acknowledged);
+    this.requestMissingPrefix(state);
+  }
+
+  private requestMissingPrefix(state: InboundState): void {
+    let firstBufferedSequence: number | null = null;
+    for (const sequence of state.buffered.keys()) {
+      firstBufferedSequence = Math.min(
+        firstBufferedSequence ?? sequence,
+        sequence,
+      );
+    }
+    if (
+      firstBufferedSequence === null ||
+      firstBufferedSequence <= state.nextExpected
+    ) {
+      state.gapRequest = null;
+      return;
+    }
+    const now = this.options.clock.now();
+    if (
+      state.gapRequest?.fromSeq === state.nextExpected &&
+      now - state.gapRequest.lastSentMs < this.retryMs
+    ) {
+      return;
+    }
+    state.gapRequest = { fromSeq: state.nextExpected, lastSentMs: now };
+    this.sendControl("GAP_REQUEST", {
+      stream: state.stream,
+      fromSeq: state.nextExpected,
+      throughSeq: firstBufferedSequence - 1,
+    });
   }
 
   private sendAck(stream: StreamRef, sequences: number[]): void {
@@ -316,6 +383,16 @@ export class CriticalReliability {
     const entry = this.outbox.get(sequence);
     if (entry === undefined) return;
     this.outbox.delete(sequence);
+    this.gapResendWindows = this.gapResendWindows.filter((window) => {
+      for (
+        let pendingSequence = window.fromSeq;
+        pendingSequence <= window.throughSeq;
+        pendingSequence += 1
+      ) {
+        if (this.outbox.has(pendingSequence)) return true;
+      }
+      return false;
+    });
     this.outboundEventSeq.delete(criticalEventId(entry.envelope));
   }
 

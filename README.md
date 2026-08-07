@@ -149,15 +149,25 @@ invalidate the comparison.
 
 Diagnostics take a compact counter snapshot only when an incident changes
 state; they do not persist a record for every realtime frame. A large
-`pump.maxGapMs` points to the local JavaScript loop being suspended or starved.
-Compare `receive.rawFrames`, `decodedFrames`, and `authenticatedFrames`: raw
-traffic that does not decode suggests invalid or incompatible data, while
-decoded traffic that is not authenticated did not belong to the bound peer
-session. During a silence, `sinceAuthenticated.sentSnapshots` and
-`sentKeepalives` show how much traffic this client attempted to produce.
-`snapshots.gapEvents`, `missing`, and `maxGap` summarize discontinuities among
-accepted snapshot sequence numbers, and `critical.maxPending` is the peak
-reliable-event backlog.
+`pump.maxGapSessionMs` points to the local JavaScript loop being suspended or
+starved. The legacy `pump.maxGapMs` covers only the explicitly reported
+`pump.windowAgeMs` since the latest authenticated peer frame. Compare
+`receive.rawFrames`, `decodedFrames`, and `authenticatedFrames`: raw traffic
+that does not decode suggests invalid or incompatible data, while decoded
+traffic that is not authenticated did not belong to the bound peer session.
+`send` is the session-wide successful outbound total; `sinceAuthenticated`
+covers only the window after the last authenticated frame and reports that
+window's age. `snapshots.gapEvents`, `missing`, and `maxGap` summarize
+discontinuities among accepted snapshot sequence numbers, and
+`critical.maxPending` is the peak reliable-event backlog.
+
+Each new incident includes the match ID and local seat so two voluntarily
+shared copies can be paired without trusting device wall clocks. Clock timeout
+events summarize sent probes and accepted, stale, duplicate, unknown, or
+invalid replies. Remote-tick desynchronizations include the local tick, remote
+target, source message, and permitted delta. Pause and detach events identify
+whether they came from local silence, peer pause, visibility, replacement, or
+ordinary teardown; recovery events also carry the shared pause epoch.
 
 These summaries contain only fixed-size counts, byte totals, timings, and
 sequence-gap statistics. They contain no frame payloads or participant

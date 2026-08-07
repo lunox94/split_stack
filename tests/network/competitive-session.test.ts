@@ -6,6 +6,10 @@ import { getGhostY } from "../../src/domain/movement";
 import type { MatchResultV1 } from "../../src/domain/types";
 import type { ActivePiece, Grid, Rotation } from "../../src/domain/types";
 import type { SimulationEffect } from "../../src/domain/simulation";
+import {
+  CLOCK_SYNC_RETRY_BASE_MS,
+  CLOCK_SYNC_RETRY_MAX_MS,
+} from "../../src/network/clock";
 import { decodeEnvelope, encodeEnvelope } from "../../src/network/codec";
 import { NetworkDiagnostics } from "../../src/network/diagnostics";
 import { InMemoryRealtimeBus, ManualClock } from "../../src/network/in-memory";
@@ -140,6 +144,26 @@ function stabilizeRecovery(pair: ReturnType<typeof createPair>): void {
   advanceBoth(pair, RULES.network.recoveryStabilityMs, 50);
 }
 
+function holdOneResumeCapableFrame(
+  pair: ReturnType<typeof createPair>,
+  kind: "HELLO" | "KEEPALIVE",
+): number {
+  let held = false;
+  return pair.bus.holdMatching("runtime-b", "runtime-a", (data) => {
+    const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+    if (
+      held ||
+      !decoded.ok ||
+      decoded.value.kind !== kind ||
+      !decoded.value.payload.resumeAvailable
+    ) {
+      return false;
+    }
+    held = true;
+    return true;
+  });
+}
+
 function throwNextKind(
   transport: CompetitiveRealtimeTransport,
   kind: RealtimeEnvelope["kind"],
@@ -266,6 +290,41 @@ describe("CompetitiveSession", () => {
 
     expect(pair.a.view().phase).toBe("countdown");
     expect(pair.b.view().phase).toBe("countdown");
+  });
+
+  it("cancels an in-flight initial clock sync when the coordinator is hidden", () => {
+    const onDesynchronization = vi.fn<(reason: string) => void>();
+    const pair = createPair({ onADesynchronization: onDesynchronization });
+    pair.a.start();
+    pair.b.start();
+    pair.a.setReady(true);
+    const heldPongs = pair.bus.holdMatching(
+      "runtime-b",
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        return decoded.ok && decoded.value.kind === "CLOCK_PONG";
+      },
+    );
+    pair.b.setReady(true);
+    expect(pair.a.view().phase).toBe("synchronizing");
+
+    pair.a.setHidden(true);
+    advanceBoth(pair, RULES.network.missingPeerMs, 50);
+    pair.bus.discardHeld(heldPongs);
+
+    expect(pair.a.view()).toMatchObject({
+      phase: "network-pause",
+      localReady: false,
+    });
+    expect(pair.b.view()).toMatchObject({
+      phase: "lobby",
+      peerReady: false,
+    });
+    expect(onDesynchronization).not.toHaveBeenCalled();
+
+    pair.a.setHidden(false);
+    expect(pair.a.view()).toMatchObject({ phase: "lobby", localReady: false });
   });
 
   it("coordinates five pings, agrees a seeded config, counts down, and publishes at 10 Hz", () => {
@@ -481,14 +540,109 @@ describe("CompetitiveSession", () => {
     expect(pair.a.view().phase).toBe("synchronizing");
     expect(pair.a.view().clockSampleIds).toHaveLength(0);
 
-    advanceBoth(pair, RULES.network.retryMs);
+    advanceBoth(pair, CLOCK_SYNC_RETRY_BASE_MS);
 
     expect(pair.a.view().phase).toBe("countdown");
     expect(pair.b.view().phase).toBe("countdown");
     expect(pair.a.view().clockSampleIds).toHaveLength(3);
   });
 
-  it("ends neutrally when the initial clock handshake cannot recover", () => {
+  it("accepts delayed clock replies after sending a retry", () => {
+    const pair = createPair();
+    pair.a.start();
+    pair.b.start();
+    pair.a.setReady(true);
+    const originalSentAt = pair.aClock.now();
+    const originalPings = pair.bus.holdMatching(
+      "runtime-a",
+      "runtime-b",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        return decoded.ok &&
+          decoded.value.kind === "CLOCK_PING" &&
+          decoded.value.payload.coordinatorSentMs === originalSentAt;
+      },
+    );
+    const originalPongs = pair.bus.holdMatching(
+      "runtime-b",
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        return decoded.ok &&
+          decoded.value.kind === "CLOCK_PONG" &&
+          decoded.value.payload.coordinatorSentMs === originalSentAt;
+      },
+    );
+    const retryPongs = pair.bus.holdMatching(
+      "runtime-b",
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        return decoded.ok && decoded.value.kind === "CLOCK_PONG";
+      },
+    );
+    let retryPingsSent = 0;
+    const observeRetryPings = pair.bus.holdMatching(
+      "runtime-a",
+      "runtime-b",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        if (decoded.ok && decoded.value.kind === "CLOCK_PING") {
+          retryPingsSent += 1;
+        }
+        return false;
+      },
+    );
+    pair.b.setReady(true);
+
+    advanceBoth(pair, 300, 50);
+    pair.bus.releaseHeld(originalPings);
+    advanceBoth(pair, 300, 50);
+    pair.bus.releaseHeld(originalPongs);
+    pair.bus.discardHeld(retryPongs);
+    pair.bus.discardHeld(observeRetryPings);
+
+    expect(retryPingsSent).toBeGreaterThan(0);
+    expect(pair.a.view().phase).toBe("countdown");
+    expect(pair.b.view().phase).toBe("countdown");
+    expect(pair.b.view().clockOffsetMs).toBe(25);
+  });
+
+  it("bounds clock probe traffic during a response outage", () => {
+    const pair = createPair();
+    let clockPingsSent = 0;
+    const observePings = pair.bus.holdMatching(
+      "runtime-a",
+      "runtime-b",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        if (decoded.ok && decoded.value.kind === "CLOCK_PING") {
+          clockPingsSent += 1;
+        }
+        return false;
+      },
+    );
+    const heldPongs = pair.bus.holdMatching(
+      "runtime-b",
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        return decoded.ok && decoded.value.kind === "CLOCK_PONG";
+      },
+    );
+    pair.a.start();
+    pair.b.start();
+    pair.a.setReady(true);
+    pair.b.setReady(true);
+
+    advanceBoth(pair, RULES.network.missingPeerMs, 50);
+    pair.bus.discardHeld(observePings);
+    pair.bus.discardHeld(heldPongs);
+
+    expect(clockPingsSent).toBeLessThanOrEqual(20);
+  });
+
+  it("returns the coordinator to readiness when initial clock sync loses the peer", () => {
     const onDesynchronization = vi.fn<(reason: string) => void>();
     const pair = createPair({ onADesynchronization: onDesynchronization });
     pair.a.start();
@@ -502,8 +656,144 @@ describe("CompetitiveSession", () => {
 
     advanceBoth(pair, RULES.network.missingPeerMs);
 
-    expect(pair.a.view().phase).toBe("desynchronized");
-    expect(onDesynchronization).toHaveBeenCalledWith("clock-sync-timeout");
+    expect(pair.a.view()).toMatchObject({
+      phase: "lobby",
+      localReady: false,
+    });
+    expect(onDesynchronization).not.toHaveBeenCalled();
+  });
+
+  it("returns both players to readiness when initial clock sync expires", () => {
+    const onDesynchronization = vi.fn<(reason: string) => void>();
+    const diagnostics = new NetworkDiagnostics({ clock: new ManualClock(10_000) });
+    const pair = createPair({
+      aDiagnostics: diagnostics,
+      onADesynchronization: onDesynchronization,
+    });
+    pair.a.start();
+    pair.b.start();
+    pair.a.setReady(true);
+    const heldPongs = pair.bus.holdMatching(
+      "runtime-b",
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        return decoded.ok && decoded.value.kind === "CLOCK_PONG";
+      },
+    );
+    pair.b.setReady(true);
+
+    advanceBoth(pair, RULES.network.missingPeerMs, 50);
+    pair.bus.discardHeld(heldPongs);
+
+    expect(pair.a.view()).toMatchObject({
+      phase: "lobby",
+      localReady: false,
+      peerReady: true,
+    });
+    expect(pair.b.view()).toMatchObject({
+      phase: "lobby",
+      localReady: true,
+      peerReady: false,
+    });
+    expect(onDesynchronization).not.toHaveBeenCalled();
+    expect(diagnostics.snapshot().incidents[0]).toMatchObject({
+      context: { matchId: "match-1", localSeat: "a" },
+      events: [{
+        kind: "clock-sync-timeout",
+        clockSync: {
+          purpose: "initial",
+          targetSamples: 5,
+          acceptedSamples: 0,
+          retryRounds: 3,
+          pingsSent: 20,
+          pongsReceived: 0,
+          pongOutcomes: {
+            accepted: 0,
+            unknownSample: 0,
+            staleEcho: 0,
+            duplicate: 0,
+            invalidTiming: 0,
+          },
+          elapsedMs: RULES.network.missingPeerMs,
+          deadlineMs: RULES.network.missingPeerMs,
+        },
+        telemetry: expect.any(Object),
+      }],
+    });
+  });
+
+  it("classifies rejected clock replies in the timeout diagnostic", () => {
+    const diagnostics = new NetworkDiagnostics({ clock: new ManualClock(11_000) });
+    const pair = createPair({ aDiagnostics: diagnostics });
+    pair.a.start();
+    pair.b.start();
+    pair.a.setReady(true);
+    const initialPongs = pair.bus.holdMatching(
+      "runtime-b",
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        return decoded.ok && decoded.value.kind === "CLOCK_PONG";
+      },
+    );
+    pair.b.setReady(true);
+    pair.bus.discardHeld(initialPongs);
+
+    const sendPong = (
+      sampleId: number,
+      coordinatorSentMs: number,
+      peerReceivedMs = pair.bClock.now(),
+      peerSentMs = peerReceivedMs,
+    ): void => {
+      pair.bEndpoint.send(encodeEnvelope({
+        protocol: 1,
+        matchId: "match-1",
+        senderId: "player-b",
+        sessionId: "session-b",
+        kind: "CLOCK_PONG",
+        matchTick: 0,
+        sentAtMonotonicMs: pair.bClock.now(),
+        payload: {
+          sampleId,
+          coordinatorSentMs,
+          peerReceivedMs,
+          peerSentMs,
+        },
+      }));
+    };
+    sendPong(999, pair.aClock.now());
+    sendPong(1, pair.aClock.now() + 1);
+    sendPong(2, pair.aClock.now(), pair.bClock.now() + 1, pair.bClock.now());
+    sendPong(3, pair.aClock.now());
+    sendPong(3, pair.aClock.now());
+
+    const retryPongs = pair.bus.holdMatching(
+      "runtime-b",
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        return decoded.ok && decoded.value.kind === "CLOCK_PONG";
+      },
+    );
+    advanceBoth(pair, RULES.network.missingPeerMs, 50);
+    pair.bus.discardHeld(retryPongs);
+
+    expect(diagnostics.snapshot().incidents[0]?.events[0]?.clockSync)
+      .toMatchObject({
+        acceptedSamples: 1,
+        retryRounds: 3,
+        pingsSent: 17,
+        pongsReceived: 5,
+        pongOutcomes: {
+          accepted: 1,
+          unknownSample: 1,
+          staleEcho: 1,
+          duplicate: 1,
+          invalidTiming: 1,
+        },
+        lastPongAgeMs: RULES.network.missingPeerMs,
+      });
   });
 
   it("retries a missing clock commit before accepting the match config", () => {
@@ -792,7 +1082,9 @@ describe("CompetitiveSession", () => {
   it("stops neutrally instead of advancing through an implausible remote target tick", () => {
     const onDesynchronization = vi.fn<(reason: string) => void>();
     const onResult = vi.fn<(result: MatchResultV1) => void>();
+    const diagnostics = new NetworkDiagnostics({ clock: new ManualClock(20_000) });
     const pair = createPair({
+      aDiagnostics: diagnostics,
       onADesynchronization: onDesynchronization,
       onAResultConfirmed: onResult,
     });
@@ -845,6 +1137,20 @@ describe("CompetitiveSession", () => {
       },
     });
     expect(onResult).toHaveBeenCalledOnce();
+    expect(diagnostics.snapshot().incidents[0]).toMatchObject({
+      context: { matchId: "match-1", localSeat: "a" },
+      events: [{
+        kind: "desynchronized",
+        reason: "remote-tick-out-of-range",
+        remoteTick: {
+          source: "network-pause",
+          localTick,
+          remoteTargetTick: remoteTick,
+          maxAllowedDeltaTicks: remoteTick - localTick - 1,
+        },
+        telemetry: expect.any(Object),
+      }],
+    });
   });
 
   it("ignores stale restart proposal and commit frames after play has begun", () => {
@@ -2065,7 +2371,76 @@ describe("CompetitiveSession", () => {
     expect(pair.b.view().phase).toBe("countdown");
   });
 
-  it("retries resume clock sync instead of desynchronizing after three seconds", () => {
+  it.each(["HELLO", "KEEPALIVE"] as const)(
+    "does not let a stale resume-capable %s restart a hidden peer",
+    (kind) => {
+      const pair = createPair();
+      const staleFrame = holdOneResumeCapableFrame(pair, kind);
+      ready(pair);
+      advanceBoth(pair, 3_600, 100);
+
+      pair.b.setHidden(true);
+      expect(pair.a.view().phase).toBe("network-pause");
+      expect(pair.b.view().phase).toBe("network-pause");
+
+      pair.bus.releaseHeld(staleFrame);
+      advanceBoth(pair, RULES.network.keepaliveMs * 2, 50);
+
+      expect(pair.a.view().phase).toBe("network-pause");
+      expect(pair.b.view().phase).toBe("network-pause");
+    },
+  );
+
+  it("recovers after becoming visible following a stale resume probe", () => {
+    const pair = createPair();
+    const staleKeepalive = holdOneResumeCapableFrame(pair, "KEEPALIVE");
+    ready(pair);
+    advanceBoth(pair, 3_600, 100);
+    pair.b.setHidden(true);
+    pair.bus.releaseHeld(staleKeepalive);
+    advanceBoth(pair, RULES.network.keepaliveMs * 2, 50);
+
+    pair.b.setHidden(false);
+    advanceBoth(
+      pair,
+      CLOCK_SYNC_RETRY_MAX_MS + RULES.network.recoveryStabilityMs,
+      50,
+    );
+
+    expect(pair.a.view().phase).toBe("countdown");
+    expect(pair.b.view().phase).toBe("countdown");
+  });
+
+  it("invalidates an in-flight resume when the coordinator becomes hidden", () => {
+    const pair = createPair();
+    ready(pair);
+    advanceBoth(pair, 3_600, 100);
+    pair.b.setHidden(true);
+    const heldPongs = pair.bus.holdMatching(
+      "runtime-b",
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        return decoded.ok && decoded.value.kind === "CLOCK_PONG";
+      },
+    );
+    pair.b.setHidden(false);
+    expect(pair.a.view().phase).toBe("network-pause");
+
+    pair.a.setHidden(true);
+    pair.bus.releaseHeld(heldPongs);
+    advanceBoth(pair, RULES.network.keepaliveMs * 2, 50);
+
+    expect(pair.a.view().phase).toBe("network-pause");
+    expect(pair.b.view().phase).toBe("network-pause");
+
+    pair.a.setHidden(false);
+    advanceBoth(pair, RULES.network.recoveryStabilityMs, 50);
+    expect(pair.a.view().phase).toBe("countdown");
+    expect(pair.b.view().phase).toBe("countdown");
+  });
+
+  it("retries resume clock sync after its bounded deadline", () => {
     const onRecoveryNeeded = vi.fn<() => void>();
     const pair = createPair({ onATransportRecoveryNeeded: onRecoveryNeeded });
     ready(pair);
@@ -2146,6 +2521,18 @@ describe("CompetitiveSession", () => {
 
   it("ends a partial-traffic resume incident at its absolute controller deadline", () => {
     const pair = createPair();
+    let clockPingsSent = 0;
+    const observePings = pair.bus.holdMatching(
+      "runtime-a",
+      "runtime-b",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        if (decoded.ok && decoded.value.kind === "CLOCK_PING") {
+          clockPingsSent += 1;
+        }
+        return false;
+      },
+    );
     ready(pair);
     advanceBoth(pair, 3_600, 100);
     pair.b.setHidden(true);
@@ -2157,6 +2544,21 @@ describe("CompetitiveSession", () => {
     pair.b.setHidden(false);
     advanceBoth(pair, RULES.network.controllerReconnectGraceMs, 1_000);
 
+    expect(pair.a.view()).toMatchObject({
+      phase: "finished",
+      connectionStatus: "lost",
+      terminal: { outcome: "desync", reason: "connection-lost" },
+    });
+
+    const terminalClockPingsSent = clockPingsSent;
+    advanceBoth(
+      pair,
+      RULES.network.missingPeerMs + CLOCK_SYNC_RETRY_MAX_MS,
+      100,
+    );
+    pair.bus.discardHeld(observePings);
+
+    expect(clockPingsSent).toBe(terminalClockPingsSent);
     expect(pair.a.view()).toMatchObject({
       phase: "finished",
       connectionStatus: "lost",
@@ -2238,6 +2640,14 @@ describe("CompetitiveSession", () => {
     });
     expect(onRecoveryNeeded).not.toHaveBeenCalled();
     expect(persistDiagnostic).toHaveBeenCalledTimes(1);
+    expect(diagnostics.snapshot().incidents[0]).toMatchObject({
+      context: { matchId: "match-1", localSeat: "a" },
+      events: [{
+        kind: "connection-unstable",
+        pauseTrigger: "local-silence",
+        pauseEpoch: 1,
+      }],
+    });
 
     advanceBoth(pair, 2_999, 100);
     expect(onRecoveryNeeded).not.toHaveBeenCalled();
@@ -2250,6 +2660,45 @@ describe("CompetitiveSession", () => {
     });
     expect(onRecoveryNeeded).toHaveBeenCalledTimes(1);
     expect(persistDiagnostic).toHaveBeenCalledTimes(2);
+  });
+
+  it("records visibility pauses and ordinary channel teardown distinctly", () => {
+    const diagnostics = new NetworkDiagnostics({ clock: new ManualClock(30_000) });
+    const pair = createPair({ aDiagnostics: diagnostics });
+    pair.a.start();
+    pair.b.start();
+
+    pair.a.setHidden(true);
+    pair.a.disconnect("session-teardown");
+
+    expect(diagnostics.snapshot().incidents[0]).toMatchObject({
+      context: { matchId: "match-1", localSeat: "a" },
+      events: [
+        {
+          kind: "connection-unstable",
+          pauseTrigger: "visibility",
+          pauseEpoch: 1,
+        },
+        { kind: "channel-detached", detachReason: "session-teardown" },
+      ],
+    });
+  });
+
+  it("retains a standalone startup-failure detach diagnostic", () => {
+    const diagnostics = new NetworkDiagnostics({ clock: new ManualClock(31_000) });
+    const pair = createPair({ aDiagnostics: diagnostics });
+    pair.a.start();
+
+    pair.a.disconnect("startup-failure");
+
+    expect(diagnostics.snapshot().incidents[0]).toMatchObject({
+      context: { matchId: "match-1", localSeat: "a" },
+      events: [{
+        kind: "channel-detached",
+        detachReason: "startup-failure",
+        telemetry: expect.any(Object),
+      }],
+    });
   });
 
   it("contains failed replacement callbacks and backs retries off", () => {

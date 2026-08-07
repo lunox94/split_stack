@@ -18,6 +18,9 @@ import type {
 } from "../domain/types";
 import {
   calculateClockSample,
+  CLOCK_SYNC_RETRY_BASE_MS,
+  CLOCK_SYNC_RETRY_MAX_MS,
+  CLOCK_SYNC_SAMPLE_TARGET,
   MatchTickClock,
   selectClockOffset,
   type ClockSample,
@@ -25,9 +28,16 @@ import {
 } from "../network/clock";
 import { decodeEnvelope, encodeEnvelope } from "../network/codec";
 import type {
+  ClockSyncPurpose,
+  ClockSyncTimeoutSummary,
   DesynchronizationReason,
+  DetachReason,
   NetworkDiagnosticEventInput,
+  NetworkDiagnosticIncidentContext,
   NetworkDiagnostics,
+  PauseTrigger,
+  RemoteTickDiagnosticContext,
+  RemoteTickSource,
   SnapshotRejectionReason,
 } from "../network/diagnostics";
 import {
@@ -205,6 +215,13 @@ interface GameplayJournalEntry {
   discarded: boolean;
 }
 
+interface ClockSyncDiagnosticCounters {
+  pingsSent: number;
+  pongsReceived: number;
+  pongOutcomes: ClockSyncTimeoutSummary["pongOutcomes"];
+  lastPongAtMs: number | null;
+}
+
 function cloneStats(stats: PlayerResultStats): PlayerResultStats {
   return { ...stats };
 }
@@ -300,10 +317,12 @@ export class CompetitiveSession {
   private readonly clockSamples = new Map<number, ClockSample>();
   private readonly pingSentAt = new Map<number, number>();
   private nextClockSampleId = 1;
-  private syncPurpose: "initial" | "resume" | null = null;
+  private syncPurpose: ClockSyncPurpose | null = null;
   private clockSyncStartedMs: number | null = null;
   private clockSyncLastAttemptMs: number | null = null;
   private clockSyncDeadlineMs: number | null = null;
+  private clockSyncRetryAttempt = 0;
+  private clockSyncDiagnostic: ClockSyncDiagnosticCounters | null = null;
   private pendingClockCommit: RealtimePayloadMap["CLOCK_COMMIT"] | null = null;
   private clockCommitLastSentMs: number | null = null;
   private clockCommitDeadlineMs: number | null = null;
@@ -504,7 +523,11 @@ export class CompetitiveSession {
       this.setPhase("playing");
       this.publishSnapshotIfDue(undefined, true);
       if (this.pauseEpoch > 0 && this.diagnosticIncidentId !== null) {
-        this.recordDiagnostic({ kind: "resumed", pauseTick: this.currentTick() });
+        this.recordDiagnostic({
+          kind: "resumed",
+          pauseTick: this.currentTick(),
+          pauseEpoch: this.pauseEpoch,
+        });
         this.diagnosticIncidentId = null;
       }
     }
@@ -536,12 +559,22 @@ export class CompetitiveSession {
     }
   }
 
-  public disconnect(): void {
+  public disconnect(detachReason: DetachReason = "unknown"): void {
     if (!this.channelConnected) return;
     this.channelConnected = false;
     this.reliability.setConnected(false);
     this.telemetry.noteChannelDetached();
-    this.recordDiagnostic({ kind: "channel-detached" });
+    const event: NetworkDiagnosticEventInput = {
+      kind: "channel-detached",
+      detachReason,
+      ...(this.pauseEpoch === 0 ? {} : { pauseEpoch: this.pauseEpoch }),
+      telemetry: this.telemetry.snapshot(),
+    };
+    if (this.diagnosticIncidentId === null && detachReason === "startup-failure") {
+      this.options.diagnostics?.begin(event, this.diagnosticContext());
+    } else {
+      this.recordDiagnostic(event);
+    }
     this.transport.leave();
   }
 
@@ -561,7 +594,10 @@ export class CompetitiveSession {
     this.channelConnected = true;
     this.reliability.setConnected(true);
     this.telemetry.noteChannelAttached();
-    this.recordDiagnostic({ kind: "channel-attached" });
+    this.recordDiagnostic({
+      kind: "channel-attached",
+      ...(this.pauseEpoch === 0 ? {} : { pauseEpoch: this.pauseEpoch }),
+    });
     this.sendHello();
     this.sendKeepalive(true);
   }
@@ -570,6 +606,7 @@ export class CompetitiveSession {
     this.recordDiagnostic({
       kind: "channel-replacement-failed",
       silenceMs: Math.floor(this.liveness.silentForMs()),
+      ...(this.pauseEpoch === 0 ? {} : { pauseEpoch: this.pauseEpoch }),
       ...(attempt === undefined ? {} : { attempt }),
     });
   }
@@ -578,6 +615,7 @@ export class CompetitiveSession {
     const wasHidden = this.locallyHidden;
     this.locallyHidden = hidden;
     if (hidden) {
+      if (wasHidden) return;
       this.connectionIncidentStartedMs = null;
       this.enterNetworkPause(true, false);
     } else if (this.phase === "network-pause") {
@@ -695,10 +733,13 @@ export class CompetitiveSession {
     this.scheduledStartLocalMs = null;
   }
 
-  private desynchronize(reason: DesynchronizationReason): void {
+  private desynchronize(
+    reason: DesynchronizationReason,
+    remoteTick?: RemoteTickDiagnosticContext,
+  ): void {
     if (this.phase === "desynchronized") return;
     this.clearPendingStartLifecycle();
-    this.syncPurpose = null;
+    this.clearClockSyncLifecycle();
     this.simulation?.setPaused(true);
     this.localResultConfirmation = null;
     this.peerResultConfirmation = null;
@@ -711,7 +752,7 @@ export class CompetitiveSession {
     });
     const result = this.buildDesynchronizationResult();
     if (result !== null) this.confirmedResult = cloneResult(result);
-    this.recordDesynchronization(reason);
+    this.recordDesynchronization(reason, remoteTick);
     this.setPhase("desynchronized");
     this.options.onDesynchronization?.(reason);
     if (result !== null && !this.durableResultEmitted) {
@@ -942,7 +983,7 @@ export class CompetitiveSession {
     }
   }
 
-  private beginClockSync(purpose: "initial" | "resume"): void {
+  private beginClockSync(purpose: ClockSyncPurpose): void {
     if (this.options.seat !== "a" || this.syncPurpose !== null) return;
     const now = this.options.clock.now();
     this.syncPurpose = purpose;
@@ -950,9 +991,22 @@ export class CompetitiveSession {
     this.clockSyncDeadlineMs = now + RULES.network.missingPeerMs;
     this.clockSamples.clear();
     this.pingSentAt.clear();
+    this.clockSyncRetryAttempt = 0;
+    this.clockSyncDiagnostic = {
+      pingsSent: 0,
+      pongsReceived: 0,
+      pongOutcomes: {
+        accepted: 0,
+        unknownSample: 0,
+        staleEcho: 0,
+        duplicate: 0,
+        invalidTiming: 0,
+      },
+      lastPongAtMs: null,
+    };
     if (purpose === "initial") this.setPhase("synchronizing");
     const pings: RealtimePayloadMap["CLOCK_PING"][] = [];
-    for (let index = 0; index < 5; index += 1) {
+    for (let index = 0; index < CLOCK_SYNC_SAMPLE_TARGET; index += 1) {
       const sampleId = this.nextClockSampleId;
       this.nextClockSampleId += 1;
       const coordinatorSentMs = now;
@@ -963,7 +1017,7 @@ export class CompetitiveSession {
     // send throws after peerReturnNoted was latched, pumpClockSync can still
     // retry all unanswered samples instead of waiting forever.
     this.clockSyncLastAttemptMs = now;
-    for (const ping of pings) this.sendEnvelope("CLOCK_PING", ping);
+    for (const ping of pings) this.sendClockPing(ping);
   }
 
   private pumpClockSync(): void {
@@ -974,8 +1028,13 @@ export class CompetitiveSession {
       this.options.clock.now() >= this.clockSyncDeadlineMs
     ) {
       if (this.syncPurpose === "resume" && this.phase === "network-pause") {
+        this.recordClockSyncTimeout();
         this.restartResumeHandshake();
+      } else if (this.syncPurpose === "initial" && this.phase === "synchronizing") {
+        this.recordClockSyncTimeout();
+        this.returnToReadinessAfterInitialSyncTimeout();
       } else {
+        this.recordClockSyncTimeout();
         this.clockSyncLastAttemptMs = null;
         this.clockSyncDeadlineMs = null;
         this.desynchronize("clock-sync-timeout");
@@ -987,22 +1046,114 @@ export class CompetitiveSession {
       this.options.seat !== "a" ||
       this.syncPurpose === null ||
       this.clockSyncLastAttemptMs === null ||
-      this.options.clock.now() - this.clockSyncLastAttemptMs < RULES.network.retryMs
+      this.options.clock.now() - this.clockSyncLastAttemptMs <
+        this.clockSyncRetryDelayMs()
     ) {
       return;
     }
     this.clockSyncLastAttemptMs = this.options.clock.now();
-    for (const sampleId of this.pingSentAt.keys()) {
-      if (!this.clockSamples.has(sampleId)) {
-        const coordinatorSentMs = this.options.clock.now();
-        this.pingSentAt.set(sampleId, coordinatorSentMs);
-        this.sendEnvelope("CLOCK_PING", { sampleId, coordinatorSentMs });
-      }
+    this.clockSyncRetryAttempt += 1;
+    const missingSamples = CLOCK_SYNC_SAMPLE_TARGET - this.clockSamples.size;
+    for (let index = 0; index < missingSamples; index += 1) {
+      const sampleId = this.nextClockSampleId;
+      this.nextClockSampleId += 1;
+      const coordinatorSentMs = this.options.clock.now();
+      this.pingSentAt.set(sampleId, coordinatorSentMs);
+      this.sendClockPing({ sampleId, coordinatorSentMs });
+    }
+  }
+
+  private sendClockPing(ping: RealtimePayloadMap["CLOCK_PING"]): void {
+    const diagnostic = this.clockSyncDiagnostic;
+    if (diagnostic !== null) diagnostic.pingsSent += 1;
+    try {
+      this.sendEnvelope("CLOCK_PING", ping);
+    } catch (error) {
+      if (diagnostic !== null) diagnostic.pingsSent -= 1;
+      throw error;
+    }
+  }
+
+  private clockSyncRetryDelayMs(): number {
+    return Math.min(
+      CLOCK_SYNC_RETRY_BASE_MS * 2 ** this.clockSyncRetryAttempt,
+      CLOCK_SYNC_RETRY_MAX_MS,
+    );
+  }
+
+  private clearClockSyncLifecycle(): void {
+    this.syncPurpose = null;
+    this.clockSyncStartedMs = null;
+    this.clockSyncLastAttemptMs = null;
+    this.clockSyncDeadlineMs = null;
+    this.clockSamples.clear();
+    this.pingSentAt.clear();
+    this.clockSyncRetryAttempt = 0;
+    this.clockSyncDiagnostic = null;
+  }
+
+  private returnToReadinessAfterInitialSyncTimeout(): void {
+    this.clearClockSyncLifecycle();
+    this.localReady = false;
+    this.setPhase("lobby");
+    this.sendEnvelope("READY", {
+      ready: false,
+      rulesHash: this.options.rulesHash,
+    });
+  }
+
+  private recordClockSyncTimeout(): void {
+    const diagnostics = this.options.diagnostics;
+    const counters = this.clockSyncDiagnostic;
+    const purpose = this.syncPurpose;
+    const startedAtMs = this.clockSyncStartedMs;
+    const deadlineAtMs = this.clockSyncDeadlineMs;
+    if (
+      diagnostics === undefined ||
+      counters === null ||
+      purpose === null ||
+      startedAtMs === null ||
+      deadlineAtMs === null
+    ) return;
+    const now = this.options.clock.now();
+    const clockSync: ClockSyncTimeoutSummary = {
+      purpose,
+      targetSamples: CLOCK_SYNC_SAMPLE_TARGET,
+      acceptedSamples: counters.pongOutcomes.accepted,
+      retryRounds: this.clockSyncRetryAttempt,
+      pingsSent: counters.pingsSent,
+      pongsReceived: counters.pongsReceived,
+      pongOutcomes: { ...counters.pongOutcomes },
+      elapsedMs: Math.floor(Math.max(0, now - startedAtMs)),
+      deadlineMs: Math.floor(Math.max(0, deadlineAtMs - startedAtMs)),
+      ...(counters.lastPongAtMs === null
+        ? {}
+        : {
+            lastPongAgeMs: Math.floor(
+              Math.max(0, now - counters.lastPongAtMs),
+            ),
+          }),
+    };
+    const event: NetworkDiagnosticEventInput = {
+      kind: "clock-sync-timeout",
+      clockSync,
+      ...(purpose === "resume" ? { pauseEpoch: this.pauseEpoch } : {}),
+      telemetry: this.telemetry.snapshot(),
+    };
+    if (purpose === "initial") {
+      diagnostics.begin(event, this.diagnosticContext());
+    } else if (this.diagnosticIncidentId === null) {
+      this.diagnosticIncidentId = diagnostics.begin(
+        event,
+        this.diagnosticContext(),
+      );
+    } else {
+      diagnostics.record(this.diagnosticIncidentId, event);
     }
   }
 
   private receiveClockPing(envelope: RealtimeEnvelope<"CLOCK_PING">): void {
-    if (this.options.seat !== "b") return;
+    if (this.options.seat !== "b" || this.locallyHidden) return;
     const peerReceivedMs = this.options.clock.now();
     const peerSentMs = this.options.clock.now();
     this.sendEnvelope("CLOCK_PONG", {
@@ -1015,12 +1166,23 @@ export class CompetitiveSession {
 
   private receiveClockPong(envelope: RealtimeEnvelope<"CLOCK_PONG">): void {
     if (this.options.seat !== "a" || this.syncPurpose === null) return;
+    const now = this.options.clock.now();
+    const diagnostic = this.clockSyncDiagnostic;
+    if (diagnostic !== null) {
+      diagnostic.pongsReceived += 1;
+      diagnostic.lastPongAtMs = now;
+    }
     const sentAt = this.pingSentAt.get(envelope.payload.sampleId);
-    if (
-      sentAt === undefined ||
-      sentAt !== envelope.payload.coordinatorSentMs ||
-      this.clockSamples.has(envelope.payload.sampleId)
-    ) {
+    if (sentAt === undefined) {
+      if (diagnostic !== null) diagnostic.pongOutcomes.unknownSample += 1;
+      return;
+    }
+    if (sentAt !== envelope.payload.coordinatorSentMs) {
+      if (diagnostic !== null) diagnostic.pongOutcomes.staleEcho += 1;
+      return;
+    }
+    if (this.clockSamples.has(envelope.payload.sampleId)) {
+      if (diagnostic !== null) diagnostic.pongOutcomes.duplicate += 1;
       return;
     }
     let sample: ClockSample;
@@ -1029,18 +1191,23 @@ export class CompetitiveSession {
         sentAt,
         envelope.payload.peerReceivedMs,
         envelope.payload.peerSentMs,
-        this.options.clock.now(),
+        now,
         envelope.payload.sampleId,
       );
     } catch {
+      if (diagnostic !== null) diagnostic.pongOutcomes.invalidTiming += 1;
       return;
     }
+    if (diagnostic !== null) diagnostic.pongOutcomes.accepted += 1;
     this.clockSamples.set(sample.sampleId, sample);
     this.maybeFinishClockSync();
   }
 
   private maybeFinishClockSync(): boolean {
-    if (this.clockSamples.size !== 5 || this.syncPurpose === null) return false;
+    if (
+      this.clockSamples.size !== CLOCK_SYNC_SAMPLE_TARGET ||
+      this.syncPurpose === null
+    ) return false;
     if (this.syncPurpose === "resume") {
       const startedAtMs = this.clockSyncStartedMs;
       const now = this.options.clock.now();
@@ -1063,10 +1230,7 @@ export class CompetitiveSession {
     const selected = selectClockOffset([...this.clockSamples.values()]);
     this.clockOffsetMs = 0;
     this.selectedClockSampleIds = [...selected.selectedSampleIds];
-    this.syncPurpose = null;
-    this.clockSyncStartedMs = null;
-    this.clockSyncLastAttemptMs = null;
-    this.clockSyncDeadlineMs = null;
+    this.clearClockSyncLifecycle();
     this.pendingClockCommit = {
       offsetPeerMinusCoordinatorMs: selected.offsetPeerMinusCoordinatorMs,
       sampleIds: selected.selectedSampleIds,
@@ -1109,7 +1273,7 @@ export class CompetitiveSession {
   }
 
   private receiveClockCommit(envelope: RealtimeEnvelope<"CLOCK_COMMIT">): void {
-    if (this.options.seat !== "b") return;
+    if (this.options.seat !== "b" || this.locallyHidden) return;
     this.clockOffsetMs = envelope.payload.offsetPeerMinusCoordinatorMs;
     this.selectedClockSampleIds = [...envelope.payload.sampleIds];
     this.clockCommitReceived = true;
@@ -1658,7 +1822,7 @@ export class CompetitiveSession {
         // If this client is fractionally behind, resolve its deterministic tick
         // before freezing. That makes two independent top-outs at the same tick
         // converge to a draw regardless of delivery order.
-        if (!this.advanceSimulationTo(message.matchTick)) return;
+        if (!this.advanceSimulationTo(message.matchTick, false, "top-out")) return;
         this.peerTopOutTick = message.matchTick;
         this.peerFinalClaim = {
           stats: cloneStats(message.payload.finalStats),
@@ -1683,7 +1847,13 @@ export class CompetitiveSession {
         const message = envelope as RealtimeEnvelope<"NETWORK_PAUSE">;
         this.peerResumeAvailable = false;
         const adoptedEpoch = Math.max(this.pauseEpoch, message.payload.pauseEpoch);
-        if (!this.advanceSimulationTo(message.payload.proposedPauseTick, true)) return;
+        if (
+          !this.advanceSimulationTo(
+            message.payload.proposedPauseTick,
+            true,
+            "network-pause",
+          )
+        ) return;
         this.enterNetworkPause(
           false,
           message.payload.connectionIssue,
@@ -1788,7 +1958,13 @@ export class CompetitiveSession {
       return;
     }
     if (commit.epoch > 0) {
-      if (!this.advanceSimulationTo(commit.startTick, true)) return;
+      if (
+        !this.advanceSimulationTo(
+          commit.startTick,
+          true,
+          "resume-start-commit",
+        )
+      ) return;
       this.flushPendingGameplayCriticals(commit.startTick);
       this.snapshotScheduler.reset();
       this.publishSnapshotIfDue(this.simulation?.readSnapshot(), true);
@@ -1861,6 +2037,12 @@ export class CompetitiveSession {
     issueStartedMs = this.options.clock.now(),
   ): void {
     if (this.phase === "finished") return;
+    const cancelledInitialSync =
+      this.syncPurpose === "initial" && this.config === null;
+    if (cancelledInitialSync) {
+      this.clearClockSyncLifecycle();
+      this.localReady = false;
+    }
     if (connectionIssue || (!this.locallyHidden && this.channelConnected)) {
       const observedIssueStartedMs = connectionIssue
         ? issueStartedMs
@@ -1872,9 +2054,27 @@ export class CompetitiveSession {
     }
     this.pauseRequiresOrientation ||= !connectionIssue;
     if (this.phase === "network-pause") {
+      let repeatedPauseTrigger: PauseTrigger | null = null;
       if (adoptedEpoch !== undefined && adoptedEpoch > this.pauseEpoch) {
         this.pauseEpoch = adoptedEpoch;
-        this.clearPendingStartLifecycle();
+        repeatedPauseTrigger = "peer-network-pause";
+      } else if (announce && !connectionIssue) {
+        this.pauseEpoch += 1;
+        repeatedPauseTrigger = "visibility";
+      }
+      if (repeatedPauseTrigger !== null) {
+        this.clearResumeHandshakeState();
+        this.recordDiagnostic({
+          kind: "connection-unstable",
+          silenceMs: Math.floor(this.liveness.silentForMs()),
+          pauseTick: this.pauseTick,
+          pauseEpoch: this.pauseEpoch,
+          pauseTrigger: repeatedPauseTrigger,
+          telemetry: this.telemetry.snapshot(),
+        });
+        if (announce && this.channelConnected && this.config !== null) {
+          this.announceNetworkPause(connectionIssue);
+        }
       }
       return;
     }
@@ -1893,37 +2093,60 @@ export class CompetitiveSession {
     this.transportRecoveryRequested = false;
     this.lastTransportRecoveryRequestMs = null;
     this.recoveryAttempt = 0;
+    const pauseTrigger: PauseTrigger = announce
+      ? connectionIssue
+        ? "local-silence"
+        : "visibility"
+      : "peer-network-pause";
     this.diagnosticIncidentId =
       this.options.diagnostics?.begin({
         kind: "connection-unstable",
         silenceMs: Math.floor(this.liveness.silentForMs()),
         pauseTick: this.pauseTick,
+        pauseEpoch: this.pauseEpoch,
+        pauseTrigger,
         telemetry: this.telemetry.snapshot(),
-      }) ?? null;
+      }, this.diagnosticContext()) ?? null;
     this.setPhase("network-pause");
-    if (announce && this.channelConnected && this.config !== null) {
-      this.reliability.sendCritical(
-        "NETWORK_PAUSE",
-        {
-          eventId: this.nextEventId("network-pause"),
-          pauseEpoch: this.pauseEpoch,
-          proposedPauseTick: this.pauseTick,
-          connectionIssue,
-        },
-        this.pauseTick,
-      );
+    if (cancelledInitialSync && this.channelConnected) {
+      this.sendEnvelope("READY", {
+        ready: false,
+        rulesHash: this.options.rulesHash,
+      });
     }
+    if (announce && this.channelConnected && this.config !== null) {
+      this.announceNetworkPause(connectionIssue);
+    }
+  }
+
+  private announceNetworkPause(connectionIssue: boolean): void {
+    this.reliability.sendCritical(
+      "NETWORK_PAUSE",
+      {
+        eventId: this.nextEventId("network-pause"),
+        pauseEpoch: this.pauseEpoch,
+        proposedPauseTick: this.pauseTick,
+        connectionIssue,
+      },
+      this.pauseTick,
+    );
   }
 
   private advanceSimulationTo(
     targetTick: Tick,
-    deferGameplayReplay = false,
+    deferGameplayReplay: boolean,
+    source: RemoteTickSource,
   ): boolean {
     const simulation = this.simulation;
     if (simulation === null) return false;
     const initialTick = simulation.currentTick();
     if (Math.abs(targetTick - initialTick) > MAX_REMOTE_TICK_ADVANCE) {
-      this.desynchronize("remote-tick-out-of-range");
+      this.desynchronize("remote-tick-out-of-range", {
+        source,
+        localTick: initialTick,
+        remoteTargetTick: targetTick,
+        maxAllowedDeltaTicks: MAX_REMOTE_TICK_ADVANCE,
+      });
       return false;
     }
     if (targetTick < initialTick) {
@@ -2021,6 +2244,7 @@ export class CompetitiveSession {
     this.connectionIncidentStartedMs = this.options.clock.now();
     this.recordDiagnostic({
       kind: "peer-traffic-restored",
+      pauseEpoch: this.pauseEpoch,
       telemetry: this.telemetry.snapshot(),
       ...(this.missingSinceMs === null
         ? {}
@@ -2054,6 +2278,7 @@ export class CompetitiveSession {
     this.recordDiagnostic({
       kind: "channel-replacement-requested",
       silenceMs: Math.floor(this.liveness.silentForMs()),
+      pauseEpoch: this.pauseEpoch,
       attempt: this.recoveryAttempt,
       telemetry: this.telemetry.snapshot(),
     });
@@ -2081,22 +2306,22 @@ export class CompetitiveSession {
     );
   }
 
-  private restartResumeHandshake(): void {
-    if (this.phase !== "network-pause") return;
+  private clearResumeHandshakeState(): void {
     this.clearPendingStartLifecycle();
-    this.syncPurpose = null;
-    this.clockSyncStartedMs = null;
-    this.clockSyncLastAttemptMs = null;
-    this.clockSyncDeadlineMs = null;
-    this.clockSamples.clear();
-    this.pingSentAt.clear();
+    this.clearClockSyncLifecycle();
     this.pendingClockCommit = null;
     this.clockCommitLastSentMs = null;
     this.clockCommitDeadlineMs = null;
+    this.clockCommitReceived = false;
     this.localResumeSent = false;
     this.remoteResumeReceived = false;
     this.remoteResumeTick = null;
     this.peerReturnNoted = false;
+  }
+
+  private restartResumeHandshake(): void {
+    if (this.phase !== "network-pause") return;
+    this.clearResumeHandshakeState();
     this.requestTransportRecovery(true);
     if (
       this.phase === "network-pause" &&
@@ -2136,6 +2361,7 @@ export class CompetitiveSession {
     this.recordDiagnostic({
       kind: "resume-state-sent",
       pauseTick: snapshot.tick,
+      pauseEpoch: this.pauseEpoch,
     });
     this.reliability.sendCritical("RESUME_STATE", payload, snapshot.tick);
     this.maybeScheduleResume();
@@ -2215,13 +2441,14 @@ export class CompetitiveSession {
       this.desynchronize("resume-state-tick-mismatch");
       return;
     }
-    if (!this.advanceSimulationTo(commonTick, true)) return;
+    if (!this.advanceSimulationTo(commonTick, true, "resume-common-tick")) return;
     this.flushPendingGameplayCriticals(commonTick);
     this.snapshotScheduler.reset();
     this.publishSnapshotIfDue(this.simulation.readSnapshot(), true);
     this.recordDiagnostic({
       kind: "resume-countdown",
       pauseTick: commonTick,
+      pauseEpoch: this.pauseEpoch,
       rollbackTicks: Math.max(localTick, this.remoteResumeTick) - commonTick,
     });
     const rollbackTicks = Math.max(localTick, this.remoteResumeTick) - commonTick;
@@ -2438,6 +2665,7 @@ export class CompetitiveSession {
     if (this.connectionLossRecorded || this.terminal !== null) return;
     this.connectionLossRecorded = true;
     this.simulation?.setPaused(true);
+    this.clearClockSyncLifecycle();
     this.setTerminal({
       outcome: "desync",
       reason: "connection-lost",
@@ -2448,6 +2676,7 @@ export class CompetitiveSession {
       kind: "connection-lost",
       silenceMs: RULES.network.controllerReconnectGraceMs,
       pauseTick: this.pauseTick,
+      pauseEpoch: this.pauseEpoch,
       telemetry: this.telemetry.snapshot(),
     });
     this.diagnosticIncidentId = null;
@@ -2465,7 +2694,17 @@ export class CompetitiveSession {
     this.options.diagnostics?.record(this.diagnosticIncidentId, event);
   }
 
-  private recordDesynchronization(reason: DesynchronizationReason): void {
+  private diagnosticContext(): NetworkDiagnosticIncidentContext {
+    return {
+      matchId: this.options.matchId,
+      localSeat: this.options.seat,
+    };
+  }
+
+  private recordDesynchronization(
+    reason: DesynchronizationReason,
+    remoteTick?: RemoteTickDiagnosticContext,
+  ): void {
     const diagnostics = this.options.diagnostics;
     if (diagnostics === undefined) return;
     const now = this.options.clock.now();
@@ -2493,9 +2732,11 @@ export class CompetitiveSession {
       ...(this.lastSnapshotRejection === null
         ? {}
         : { lastSnapshotRejection: this.lastSnapshotRejection }),
+      ...(remoteTick === undefined ? {} : { remoteTick }),
+      telemetry: this.telemetry.snapshot(),
     };
     if (this.diagnosticIncidentId === null) {
-      diagnostics.begin(event);
+      diagnostics.begin(event, this.diagnosticContext());
     } else {
       diagnostics.record(this.diagnosticIncidentId, event);
     }

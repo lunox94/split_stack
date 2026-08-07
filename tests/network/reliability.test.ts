@@ -99,6 +99,97 @@ describe("critical realtime reliability", () => {
     expect(appliedB).toHaveLength(2);
   });
 
+  it("bounds retries when a missing prefix leaves later events buffered", () => {
+    const clock = new ManualClock();
+    const streamA: StreamRef = { senderId: "player-a", sessionId: "session-a" };
+    const streamB: StreamRef = { senderId: "player-b", sessionId: "session-b" };
+    let sentByA = 0;
+    let sentByB = 0;
+    let a!: CriticalReliability;
+    let b!: CriticalReliability;
+    a = new CriticalReliability({
+      matchId: "match-1",
+      identity: streamA,
+      peer: streamB,
+      clock,
+      getMatchTick: () => 120,
+      send: (frame) => {
+        sentByA += 1;
+        if (frame.seq === 1) return;
+        b.receive(frame);
+      },
+      apply: () => undefined,
+    });
+    b = new CriticalReliability({
+      matchId: "match-1",
+      identity: streamB,
+      peer: streamA,
+      clock,
+      getMatchTick: () => 120,
+      send: (frame) => {
+        sentByB += 1;
+        a.receive(frame);
+      },
+      apply: () => undefined,
+    });
+
+    for (let index = 1; index <= 8; index += 1) {
+      a.sendCritical(
+        "HOLLOW_CROSS",
+        { eventId: `event-${index}`, targetPlayerId: "player-b" },
+        120 + index,
+      );
+    }
+    const framesBeforeRetry = sentByA + sentByB;
+
+    clock.advance(250);
+    a.pump();
+
+    // One regular resend per pending event, one gap request, and one immediate
+    // resend of the missing prefix. Buffered future events must not recursively
+    // provoke overlapping gap requests and retransmissions.
+    expect(sentByA + sentByB - framesBeforeRetry).toBe(10);
+  });
+
+  it("rate-limits differently anchored overlapping gap ranges from an older peer", () => {
+    const clock = new ManualClock();
+    const streamA: StreamRef = { senderId: "player-a", sessionId: "session-a" };
+    const streamB: StreamRef = { senderId: "player-b", sessionId: "session-b" };
+    const sent: RealtimeEnvelope[] = [];
+    const a = new CriticalReliability({
+      matchId: "match-1",
+      identity: streamA,
+      peer: streamB,
+      clock,
+      getMatchTick: () => 120,
+      send: (frame) => sent.push(frame),
+      apply: () => undefined,
+    });
+    for (let index = 1; index <= 8; index += 1) {
+      a.sendCritical(
+        "HOLLOW_CROSS",
+        { eventId: `event-${index}`, targetPlayerId: "player-b" },
+        120 + index,
+      );
+    }
+    const framesBeforeGapRequests = sent.length;
+
+    for (const [fromSeq, throughSeq] of [[1, 4], [2, 5], [4, 8]] as const) {
+      a.receive({
+        protocol: 1,
+        matchId: "match-1",
+        senderId: streamB.senderId,
+        sessionId: streamB.sessionId,
+        kind: "GAP_REQUEST",
+        matchTick: 120,
+        sentAtMonotonicMs: clock.now(),
+        payload: { stream: streamA, fromSeq, throughSeq },
+      });
+    }
+
+    expect(sent.length - framesBeforeGapRequests).toBe(4);
+  });
+
   it("retries an unacknowledged event after 250 ms while connected", () => {
     const { clock, bus, a, appliedB } = createPair();
     bus.dropNext("a", "b");

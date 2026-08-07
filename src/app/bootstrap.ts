@@ -729,7 +729,7 @@ export async function bootstrap(): Promise<void> {
     // current listener before acquiring its replacement.
     let recovered = false;
     try {
-      session.disconnect();
+      session.disconnect("replacement");
       realtimeHub?.close();
       realtimeHub = null;
       const hub = ensureRealtimeHub();
@@ -1440,7 +1440,7 @@ export async function bootstrap(): Promise<void> {
     audio.stopMusic();
     currentMusicMatchId = null;
     resetPresentation();
-    competitive?.disconnect();
+    competitive?.disconnect("session-teardown");
     competitive = null;
     spectator?.channel.leave?.();
     spectator = null;
@@ -1796,7 +1796,7 @@ export async function bootstrap(): Promise<void> {
 
   const restoreCompletedMatch = (match: ActiveMatch, result: MatchResultV1): void => {
     stopCompetitivePump();
-    competitive?.disconnect();
+    competitive?.disconnect("session-teardown");
     competitive = null;
     spectator?.channel.leave?.();
     spectator = null;
@@ -2328,7 +2328,7 @@ export async function bootstrap(): Promise<void> {
     // Role and runtime-session changes must obey the same one-channel Webxdc
     // lifecycle as liveness recovery: retire before joining the replacement.
     try {
-      previousCompetitive?.disconnect();
+      previousCompetitive?.disconnect("replacement");
     } catch {
       // A failed leave is followed by a contained join attempt below.
     }
@@ -2530,7 +2530,7 @@ export async function bootstrap(): Promise<void> {
     } catch {
       try {
         if (competitive === null) channel.leave?.();
-        else competitive.disconnect();
+        else competitive.disconnect("startup-failure");
       } catch {
         // The failed runtime is already unusable; keep it detached.
       }

@@ -1,5 +1,11 @@
 import type { Tick } from "../domain/types";
 
+// Transport-only clock probe policy. These values do not change deterministic
+// gameplay and intentionally sit outside the hashed rules contract.
+export const CLOCK_SYNC_SAMPLE_TARGET = 5;
+export const CLOCK_SYNC_RETRY_BASE_MS = 500;
+export const CLOCK_SYNC_RETRY_MAX_MS = 2_000;
+
 export interface MonotonicClock {
   now(): number;
 }
@@ -64,10 +70,13 @@ export function calculateClockSample(
 }
 
 export function selectClockOffset(samples: readonly ClockSample[]): ClockSelection {
-  if (samples.length !== 5) {
+  if (samples.length !== CLOCK_SYNC_SAMPLE_TARGET) {
     throw new RangeError("Clock synchronization requires exactly five samples");
   }
-  if (new Set(samples.map((sample) => sample.sampleId)).size !== 5) {
+  if (
+    new Set(samples.map((sample) => sample.sampleId)).size !==
+    CLOCK_SYNC_SAMPLE_TARGET
+  ) {
     throw new RangeError("Clock synchronization requires five distinct sample IDs");
   }
   for (const sample of samples) {

@@ -20,6 +20,14 @@ export interface NetworkTelemetrySummary {
     decodedAgeMs?: number;
     authenticatedAgeMs?: number;
   };
+  send?: {
+    frames: number;
+    bytes: number;
+    snapshots: number;
+    keepalives: number;
+    critical: number;
+    other: number;
+  };
   sinceAuthenticated: {
     sentFrames: number;
     sentBytes: number;
@@ -29,10 +37,13 @@ export interface NetworkTelemetrySummary {
     sentKeepalives: number;
     sentCritical: number;
     sentOther: number;
+    windowAgeMs?: number;
   };
   pump: {
     lastGapMs: number;
     maxGapMs: number;
+    windowAgeMs?: number;
+    maxGapSessionMs?: number;
   };
   snapshots: {
     accepted: number;
@@ -100,10 +111,19 @@ export function parseNetworkTelemetrySummary(
   value: unknown,
 ): NetworkTelemetrySummary | undefined {
   if (!isRecord(value)) return undefined;
-  const { channel, receive, sinceAuthenticated, pump, snapshots, critical } = value;
+  const {
+    channel,
+    receive,
+    send,
+    sinceAuthenticated,
+    pump,
+    snapshots,
+    critical,
+  } = value;
   if (
     !isRecord(channel) ||
     !isRecord(receive) ||
+    (send !== undefined && !isRecord(send)) ||
     !isRecord(sinceAuthenticated) ||
     !isRecord(pump) ||
     !isRecord(snapshots) ||
@@ -128,6 +148,24 @@ export function parseNetworkTelemetrySummary(
   const rawAgeMs = optionalCounter(receive, "rawAgeMs");
   const decodedAgeMs = optionalCounter(receive, "decodedAgeMs");
   const authenticatedAgeMs = optionalCounter(receive, "authenticatedAgeMs");
+  const totalSentFrames = send === undefined
+    ? undefined
+    : readCounter(send.frames);
+  const totalSentBytes = send === undefined
+    ? undefined
+    : readCounter(send.bytes);
+  const totalSentSnapshots = send === undefined
+    ? undefined
+    : readCounter(send.snapshots);
+  const totalSentKeepalives = send === undefined
+    ? undefined
+    : readCounter(send.keepalives);
+  const totalSentCritical = send === undefined
+    ? undefined
+    : readCounter(send.critical);
+  const totalSentOther = send === undefined
+    ? undefined
+    : readCounter(send.other);
   const sentFrames = readCounter(sinceAuthenticated.sentFrames);
   const sentBytes = readCounter(sinceAuthenticated.sentBytes);
   const receivedFrames = readCounter(sinceAuthenticated.receivedFrames);
@@ -136,8 +174,14 @@ export function parseNetworkTelemetrySummary(
   const sentKeepalives = readCounter(sinceAuthenticated.sentKeepalives);
   const sentCritical = readCounter(sinceAuthenticated.sentCritical);
   const sentOther = readCounter(sinceAuthenticated.sentOther);
+  const authenticatedWindowAgeMs = optionalCounter(
+    sinceAuthenticated,
+    "windowAgeMs",
+  );
   const lastPumpGapMs = readCounter(pump.lastGapMs);
   const maxPumpGapMs = readCounter(pump.maxGapMs);
+  const pumpWindowAgeMs = optionalCounter(pump, "windowAgeMs");
+  const maxPumpGapSessionMs = optionalCounter(pump, "maxGapSessionMs");
   const acceptedSnapshots = readCounter(snapshots.accepted);
   const snapshotGapEvents = readCounter(snapshots.gapEvents);
   const missingSnapshots = readCounter(snapshots.missing);
@@ -161,6 +205,15 @@ export function parseNetworkTelemetrySummary(
     rawAgeMs === null ||
     decodedAgeMs === null ||
     authenticatedAgeMs === null ||
+    (send !== undefined &&
+      (
+        totalSentFrames === undefined ||
+        totalSentBytes === undefined ||
+        totalSentSnapshots === undefined ||
+        totalSentKeepalives === undefined ||
+        totalSentCritical === undefined ||
+        totalSentOther === undefined
+      )) ||
     sentFrames === undefined ||
     sentBytes === undefined ||
     receivedFrames === undefined ||
@@ -169,8 +222,11 @@ export function parseNetworkTelemetrySummary(
     sentKeepalives === undefined ||
     sentCritical === undefined ||
     sentOther === undefined ||
+    authenticatedWindowAgeMs === null ||
     lastPumpGapMs === undefined ||
     maxPumpGapMs === undefined ||
+    pumpWindowAgeMs === null ||
+    maxPumpGapSessionMs === null ||
     acceptedSnapshots === undefined ||
     snapshotGapEvents === undefined ||
     missingSnapshots === undefined ||
@@ -183,8 +239,25 @@ export function parseNetworkTelemetrySummary(
   }
   const profiledSentFrames =
     sentSnapshots + sentKeepalives + sentCritical + sentOther;
+  const profiledTotalSentFrames =
+    (totalSentSnapshots ?? 0) +
+    (totalSentKeepalives ?? 0) +
+    (totalSentCritical ?? 0) +
+    (totalSentOther ?? 0);
   if (
     profiledSentFrames !== sentFrames ||
+    (totalSentFrames !== undefined &&
+      (
+        profiledTotalSentFrames !== totalSentFrames ||
+        totalSentFrames < sentFrames ||
+        totalSentBytes! < sentBytes ||
+        totalSentSnapshots! < sentSnapshots ||
+        totalSentKeepalives! < sentKeepalives ||
+        totalSentCritical! < sentCritical ||
+        totalSentOther! < sentOther
+      )) ||
+    (maxPumpGapSessionMs !== undefined &&
+      maxPumpGapSessionMs < maxPumpGapMs) ||
     decodedFrames > rawFrames ||
     authenticatedFrames > decodedFrames ||
     decodedBytes > rawBytes ||
@@ -219,6 +292,18 @@ export function parseNetworkTelemetrySummary(
       ...(decodedAgeMs === undefined ? {} : { decodedAgeMs }),
       ...(authenticatedAgeMs === undefined ? {} : { authenticatedAgeMs }),
     },
+    ...(totalSentFrames === undefined
+      ? {}
+      : {
+          send: {
+            frames: totalSentFrames,
+            bytes: totalSentBytes!,
+            snapshots: totalSentSnapshots!,
+            keepalives: totalSentKeepalives!,
+            critical: totalSentCritical!,
+            other: totalSentOther!,
+          },
+        }),
     sinceAuthenticated: {
       sentFrames,
       sentBytes,
@@ -228,10 +313,19 @@ export function parseNetworkTelemetrySummary(
       sentKeepalives,
       sentCritical,
       sentOther,
+      ...(authenticatedWindowAgeMs === undefined
+        ? {}
+        : { windowAgeMs: authenticatedWindowAgeMs }),
     },
     pump: {
       lastGapMs: lastPumpGapMs,
       maxGapMs: maxPumpGapMs,
+      ...(pumpWindowAgeMs === undefined
+        ? {}
+        : { windowAgeMs: pumpWindowAgeMs }),
+      ...(maxPumpGapSessionMs === undefined
+        ? {}
+        : { maxGapSessionMs: maxPumpGapSessionMs }),
     },
     snapshots: {
       accepted: acceptedSnapshots,
@@ -253,6 +347,7 @@ export function cloneNetworkTelemetrySummary(
   return {
     channel: { ...summary.channel },
     receive: { ...summary.receive },
+    ...(summary.send === undefined ? {} : { send: { ...summary.send } }),
     sinceAuthenticated: { ...summary.sinceAuthenticated },
     pump: { ...summary.pump },
     snapshots: { ...summary.snapshots },
@@ -286,6 +381,13 @@ export class NetworkTelemetry {
   private lastDecodedAtMs: number | null = null;
   private lastAuthenticatedAtMs: number | null = null;
 
+  private sentFrames = 0;
+  private sentBytes = 0;
+  private sentSnapshots = 0;
+  private sentKeepalives = 0;
+  private sentCritical = 0;
+  private sentOther = 0;
+
   private sentFramesSinceAuthenticated = 0;
   private sentBytesSinceAuthenticated = 0;
   private receivedFramesSinceAuthenticated = 0;
@@ -294,11 +396,13 @@ export class NetworkTelemetry {
   private sentKeepalivesSinceAuthenticated = 0;
   private sentCriticalSinceAuthenticated = 0;
   private sentOtherSinceAuthenticated = 0;
+  private sinceAuthenticatedWindowStartedAtMs: number | null = null;
 
   private lastPumpAtMs: number | null = null;
   private pumpWindowStartedAtMs: number | null = null;
   private lastPumpGapMs = 0;
   private maxPumpGapMs = 0;
+  private maxPumpGapSessionMs = 0;
 
   private snapshotsAccepted = 0;
   private snapshotGapEvents = 0;
@@ -341,6 +445,8 @@ export class NetworkTelemetry {
   /** Stage a frame before transport.send; pair a thrown send with noteSendFailed. */
   public noteSent(bytes: number, kind: MessageKind): void {
     requireCounter(bytes, "Sent byte count");
+    this.sentFrames = increment(this.sentFrames);
+    this.sentBytes = increment(this.sentBytes, bytes);
     this.sentFramesSinceAuthenticated = increment(
       this.sentFramesSinceAuthenticated,
     );
@@ -348,12 +454,14 @@ export class NetworkTelemetry {
       this.sentBytesSinceAuthenticated,
       bytes,
     );
-    this.adjustSentKind(kind, 1);
+    this.adjustSentKinds(kind, 1);
   }
 
   /** Roll back a staged send when the transport rejects it by throwing. */
   public noteSendFailed(bytes: number, kind: MessageKind): void {
     requireCounter(bytes, "Rejected send byte count");
+    this.sentFrames = decrement(this.sentFrames);
+    this.sentBytes = decrement(this.sentBytes, bytes);
     this.sentFramesSinceAuthenticated = decrement(
       this.sentFramesSinceAuthenticated,
     );
@@ -361,7 +469,7 @@ export class NetworkTelemetry {
       this.sentBytesSinceAuthenticated,
       bytes,
     );
-    this.adjustSentKind(kind, -1);
+    this.adjustSentKinds(kind, -1);
   }
 
   /** Count every listener callback, before decoding or sender validation. */
@@ -415,6 +523,7 @@ export class NetworkTelemetry {
       );
     }
     this.resetTrafficWindow();
+    this.sinceAuthenticatedWindowStartedAtMs = now;
     this.pumpWindowStartedAtMs = now;
     this.maxPumpGapMs = 0;
   }
@@ -428,6 +537,10 @@ export class NetworkTelemetry {
       return;
     }
     this.lastPumpGapMs = this.elapsed(this.lastPumpAtMs, now);
+    this.maxPumpGapSessionMs = Math.max(
+      this.maxPumpGapSessionMs,
+      this.lastPumpGapMs,
+    );
     const windowStart = Math.max(
       this.lastPumpAtMs,
       this.pumpWindowStartedAtMs ?? this.lastPumpAtMs,
@@ -503,6 +616,14 @@ export class NetworkTelemetry {
               ),
             }),
       },
+      send: {
+        frames: this.sentFrames,
+        bytes: this.sentBytes,
+        snapshots: this.sentSnapshots,
+        keepalives: this.sentKeepalives,
+        critical: this.sentCritical,
+        other: this.sentOther,
+      },
       sinceAuthenticated: {
         sentFrames: this.sentFramesSinceAuthenticated,
         sentBytes: this.sentBytesSinceAuthenticated,
@@ -512,10 +633,27 @@ export class NetworkTelemetry {
         sentKeepalives: this.sentKeepalivesSinceAuthenticated,
         sentCritical: this.sentCriticalSinceAuthenticated,
         sentOther: this.sentOtherSinceAuthenticated,
+        ...(this.sinceAuthenticatedWindowStartedAtMs === null
+          ? {}
+          : {
+              windowAgeMs: this.elapsed(
+                this.sinceAuthenticatedWindowStartedAtMs,
+                now,
+              ),
+            }),
       },
       pump: {
         lastGapMs: this.lastPumpGapMs,
         maxGapMs: this.maxPumpGapMs,
+        ...(this.pumpWindowStartedAtMs === null
+          ? {}
+          : {
+              windowAgeMs: this.elapsed(
+                this.pumpWindowStartedAtMs,
+                now,
+              ),
+            }),
+        maxGapSessionMs: this.maxPumpGapSessionMs,
       },
       snapshots: {
         accepted: this.snapshotsAccepted,
@@ -544,23 +682,27 @@ export class NetworkTelemetry {
     this.sentOtherSinceAuthenticated = 0;
   }
 
-  private adjustSentKind(kind: MessageKind, amount: 1 | -1): void {
+  private adjustSentKinds(kind: MessageKind, amount: 1 | -1): void {
     if (kind === "SNAPSHOT") {
+      this.sentSnapshots = adjust(this.sentSnapshots, amount);
       this.sentSnapshotsSinceAuthenticated = adjust(
         this.sentSnapshotsSinceAuthenticated,
         amount,
       );
     } else if (kind === "KEEPALIVE") {
+      this.sentKeepalives = adjust(this.sentKeepalives, amount);
       this.sentKeepalivesSinceAuthenticated = adjust(
         this.sentKeepalivesSinceAuthenticated,
         amount,
       );
     } else if (isCriticalKind(kind)) {
+      this.sentCritical = adjust(this.sentCritical, amount);
       this.sentCriticalSinceAuthenticated = adjust(
         this.sentCriticalSinceAuthenticated,
         amount,
       );
     } else {
+      this.sentOther = adjust(this.sentOther, amount);
       this.sentOtherSinceAuthenticated = adjust(
         this.sentOtherSinceAuthenticated,
         amount,

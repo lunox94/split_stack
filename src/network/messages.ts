@@ -109,6 +109,8 @@ export interface RealtimePayloadMap {
   };
   STATE_REQUEST: { targetPlayerIds?: PlayerId[] };
   READY: { ready: boolean; rulesHash: string };
+  // A sample ID names one transmission attempt. Retries use a fresh ID and
+  // preserve this attempt's exact send time so delayed replies remain valid.
   CLOCK_PING: { sampleId: number; coordinatorSentMs: number };
   CLOCK_PONG: {
     sampleId: number;

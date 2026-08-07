@@ -166,6 +166,11 @@ rules version 2 and must change together with the peer rules hash.
   events in local storage and may be copied or cleared by the player. Frame and
   byte telemetry uses fixed-cardinality arithmetic on the hot path; compact
   summaries are allocated and persisted only on existing incident transitions.
+  Incident context carries only the match ID and local seat for cross-device
+  correlation. Clock deadlines and remote-tick failures capture fixed-size
+  reason counters and tick bounds, while pause and detach events carry bounded
+  trigger enums; raw frames, payloads, event IDs, and player identities remain
+  excluded.
 - If the wall-clock pump catches up across several regular snapshot intervals,
   it publishes only the newest state. Forced terminal snapshots are never
   coalesced. This prevents a brief main-thread stall from creating a burst of
@@ -177,8 +182,20 @@ rules version 2 and must change together with the peer rules hash.
   rolling checkpoint window accepts earlier terminal events without replaying
   from match start; events outside either bound finish neutrally as a desync.
 - Initial clock samples, config acknowledgements, and critical frames retry on
-  bounded timers. Results require identical peer hashes, with a 20-second
-  consensus deadline and a canonical neutral result on failure.
+  bounded timers. Each clock retry is a fresh timed probe with a fresh sample
+  ID, while delayed replies to earlier probes remain eligible for the current
+  lifecycle. Missing clock samples back off from 500 ms to a two-second cap;
+  an initial five-second deadline returns both players to readiness instead of
+  leaving one player in a terminal state, while resume deadlines restart the
+  recovery handshake. A new visibility pause advances the pause epoch and
+  invalidates any in-flight resume before hidden peers can enter countdown.
+  Terminal connection loss clears every remaining probe.
+  Results require identical peer hashes, with a 20-second consensus deadline
+  and a canonical neutral result on failure.
+- Reliable gap recovery coalesces duplicate requests for the same missing
+  prefix and rate-limits overlapping ranges before any re-entrant send. A
+  single lost critical frame therefore causes one targeted prefix resend per
+  retry window instead of a recursive request/resend burst.
 - An explicit forfeit carries a canonical self-loss result. The receiver queues
   that exact hash-validated result before acknowledging; Leave pumps retries for
   the three-second presence window and queues the same durable fallback once if
