@@ -458,16 +458,33 @@ export function isPlayerSnapshot(value: unknown): value is PlayerSnapshotV1 {
 
 export class SnapshotScheduler {
   private lastPublishedTick: Tick | null = null;
+  private intervalTicks: Tick | null;
 
   public constructor(
-    private readonly intervalTicks: Tick | null = RULES.network.snapshotTicks,
+    intervalTicks: Tick | null = RULES.network.snapshotTicks,
   ) {
+    this.intervalTicks = this.assertInterval(intervalTicks);
+  }
+
+  public get currentIntervalTicks(): Tick | null {
+    return this.intervalTicks;
+  }
+
+  public setIntervalTicks(intervalTicks: Tick | null): void {
+    const next = this.assertInterval(intervalTicks);
+    if (next === this.intervalTicks) return;
+    this.intervalTicks = next;
+    this.reset();
+  }
+
+  private assertInterval(intervalTicks: Tick | null): Tick | null {
     if (
       intervalTicks !== null &&
       (!Number.isSafeInteger(intervalTicks) || intervalTicks <= 0)
     ) {
       throw new RangeError("Snapshot interval must be a positive integer");
     }
+    return intervalTicks;
   }
 
   public claim(tick: Tick, simulationActive: boolean): boolean {

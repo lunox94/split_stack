@@ -1,10 +1,13 @@
 import { RULES } from "../config/rules";
 import type { Tick } from "../domain/types";
 import type { MonotonicClock } from "./clock";
+import { RoundTripEstimator } from "./rtt-estimator";
 import {
   envelopeStream,
   isCriticalKind,
   streamKey,
+  type CriticalApplicationOutcome,
+  type CriticalApplicationReceipt,
   type CriticalKind,
   type CriticalPayload,
   type MessageKind,
@@ -16,7 +19,10 @@ import {
 
 interface OutboxEntry {
   envelope: RealtimeEnvelope<CriticalKind>;
+  firstSentMs: number;
   lastSentMs: number;
+  retryAfterMs: number;
+  retransmitted: boolean;
 }
 
 interface InboundState {
@@ -27,12 +33,25 @@ interface InboundState {
     fromSeq: number;
     lastSentMs: number;
   } | null;
+  applicationReceipts: Map<number, CriticalApplicationReceipt>;
+  applicationReceiptOrder: number[];
 }
 
 interface GapResendWindow {
   fromSeq: number;
   throughSeq: number;
   lastSentMs: number;
+}
+
+export interface CriticalAcknowledgement {
+  readonly eventId: string;
+  readonly sequence: number;
+  readonly kind: CriticalKind;
+  readonly source: "ack" | "cursor";
+  /** Peer's monotonic send time for the ACK or cursor-bearing envelope. */
+  readonly peerAcknowledgedAtMonotonicMs?: number;
+  /** Receiver's original semantic decision for critical kinds that require it. */
+  readonly applicationReceipt?: CriticalApplicationReceipt;
 }
 
 export interface CriticalReliabilityOptions {
@@ -42,7 +61,16 @@ export interface CriticalReliabilityOptions {
   clock: MonotonicClock;
   getMatchTick: () => Tick;
   send: (envelope: RealtimeEnvelope) => void;
-  apply: (envelope: RealtimeEnvelope<CriticalKind>) => void;
+  apply: (
+    envelope: RealtimeEnvelope<CriticalKind>,
+    processedAtMonotonicMs: number,
+  ) => CriticalApplicationOutcome | void;
+  onAcknowledged?: (acknowledgement: CriticalAcknowledgement) => void;
+  onRoundTrip?: (milliseconds: number) => void;
+  onRetransmit?: () => void;
+  onGapRequest?: () => void;
+  /** Kinds whose outbox entries cannot be retired by a cumulative cursor. */
+  requireApplicationReceiptKinds?: readonly CriticalKind[];
   maxPending?: number;
   retryMs?: number;
 }
@@ -61,6 +89,12 @@ function sameStream(left: StreamRef, right: StreamRef): boolean {
 function criticalEventId(envelope: RealtimeEnvelope<CriticalKind>): string {
   return (envelope.payload as CriticalPayload).eventId;
 }
+
+// A conservative first RTO lets a high-latency path produce one unambiguous
+// sample; subsequent entries use the estimator below instead of a fixed timer.
+export const CRITICAL_INITIAL_RETRANSMIT_MS = 1_000;
+const MAX_RETRANSMIT_MS = 8_000;
+const DEFAULT_RESEND_BUDGET_PER_PUMP = 16;
 
 export class PeerLiveness {
   private peer: StreamRef;
@@ -128,11 +162,19 @@ export class CriticalReliability {
   private peer: StreamRef;
   private readonly maxPending: number;
   private readonly retryMs: number;
+  private readonly roundTripEstimator = new RoundTripEstimator();
+  private retransmitTimeoutMs = CRITICAL_INITIAL_RETRANSMIT_MS;
+  private lastResentSequence = 0;
+  private resendBudgetRemaining = DEFAULT_RESEND_BUDGET_PER_PUMP;
+  private requireApplicationReceiptKinds: ReadonlySet<CriticalKind>;
 
   public constructor(private readonly options: CriticalReliabilityOptions) {
     this.peer = options.peer;
     this.maxPending = options.maxPending ?? RULES.network.maxPendingCritical;
     this.retryMs = options.retryMs ?? RULES.network.retryMs;
+    this.requireApplicationReceiptKinds = new Set(
+      options.requireApplicationReceiptKinds ?? [],
+    );
   }
 
   public get pendingCount(): number {
@@ -148,6 +190,12 @@ export class CriticalReliability {
     this.connected = connected;
   }
 
+  public setRequiredApplicationReceiptKinds(
+    kinds: readonly CriticalKind[],
+  ): void {
+    this.requireApplicationReceiptKinds = new Set(kinds);
+  }
+
   public pendingEnvelopes(): readonly RealtimeEnvelope<CriticalKind>[] {
     return [...this.outbox.entries()]
       .sort(([left], [right]) => left - right)
@@ -161,13 +209,33 @@ export class CriticalReliability {
     }));
   }
 
-  public acknowledgeCursor(cursor: StreamCursor): void {
+  public acknowledgeCursor(
+    cursor: StreamCursor,
+    peerAcknowledgedAtMonotonicMs?: number,
+  ): void {
     if (!sameStream(cursor.stream, this.options.identity)) return;
     if (!Number.isSafeInteger(cursor.contiguousThrough) || cursor.contiguousThrough < 0) {
       return;
     }
+    const acknowledged: CriticalAcknowledgement[] = [];
     for (const sequence of [...this.outbox.keys()]) {
-      if (sequence <= cursor.contiguousThrough) this.acknowledgeSequence(sequence);
+      if (sequence > cursor.contiguousThrough) continue;
+      const entry = this.outbox.get(sequence);
+      if (
+        entry !== undefined &&
+        this.requireApplicationReceiptKinds.has(entry.envelope.kind)
+      ) {
+        continue;
+      }
+      const notification = this.acknowledgeSequence(
+        sequence,
+        "cursor",
+        peerAcknowledgedAtMonotonicMs,
+      );
+      if (notification !== null) acknowledged.push(notification);
+    }
+    for (const notification of acknowledged) {
+      this.options.onAcknowledged?.(notification);
     }
   }
 
@@ -206,9 +274,13 @@ export class CriticalReliability {
     } as RealtimeEnvelope<K>;
     this.nextSequence += 1;
     const erased = envelope as RealtimeEnvelope<CriticalKind>;
+    const firstSentMs = this.options.clock.now();
     this.outbox.set(envelope.seq!, {
       envelope: erased,
-      lastSentMs: this.options.clock.now(),
+      firstSentMs,
+      lastSentMs: firstSentMs,
+      retryAfterMs: Math.max(this.retransmitTimeoutMs, this.retryMs),
+      retransmitted: false,
     });
     this.outboundEventSeq.set(eventId, envelope.seq!);
     this.options.send(envelope);
@@ -238,17 +310,56 @@ export class CriticalReliability {
   public pump(): void {
     if (!this.connected) return;
     const now = this.options.clock.now();
-    for (const entry of this.outbox.values()) {
-      if (now - entry.lastSentMs < this.retryMs) continue;
-      entry.lastSentMs = now;
-      this.options.send(entry.envelope);
+    this.resendBudgetRemaining = DEFAULT_RESEND_BUDGET_PER_PUMP;
+    const pending = [...this.outbox.entries()];
+    const firstAfterCursor = pending.findIndex(
+      ([sequence]) => sequence > this.lastResentSequence,
+    );
+    const ordered =
+      firstAfterCursor <= 0
+        ? pending
+        : [
+            ...pending.slice(firstAfterCursor),
+            ...pending.slice(0, firstAfterCursor),
+          ];
+    for (const [sequence, entry] of ordered) {
+      if (now - entry.lastSentMs < entry.retryAfterMs) continue;
+      if (this.resendBudgetRemaining === 0) break;
+      this.resendBudgetRemaining -= 1;
+      this.retransmit(entry, now);
+      this.lastResentSequence = sequence;
     }
   }
 
   private receiveAck(envelope: RealtimeEnvelope<"ACK">): void {
     if (!sameStream(envelope.payload.stream, this.options.identity)) return;
+    const applicationReceipts = new Map(
+      (envelope.payload.applicationReceipts ?? []).map((receipt) => [
+        receipt.sequence,
+        receipt,
+      ]),
+    );
+    const acknowledged: CriticalAcknowledgement[] = [];
     for (const sequence of envelope.payload.seqs) {
-      this.acknowledgeSequence(sequence);
+      const entry = this.outbox.get(sequence);
+      const applicationReceipt = applicationReceipts.get(sequence);
+      if (
+        entry !== undefined &&
+        this.requireApplicationReceiptKinds.has(entry.envelope.kind) &&
+        applicationReceipt === undefined
+      ) {
+        continue;
+      }
+      const notification = this.acknowledgeSequence(
+        sequence,
+        "ack",
+        envelope.sentAtMonotonicMs,
+        applicationReceipt,
+      );
+      if (notification !== null) acknowledged.push(notification);
+    }
+    for (const notification of acknowledged) {
+      this.options.onAcknowledged?.(notification);
     }
   }
 
@@ -282,18 +393,33 @@ export class CriticalReliability {
     // Older peers may request overlapping ranges for every buffered future
     // frame; remembering every recently covered range prevents those requests
     // from recursively amplifying one loss into a retransmission storm.
+    const batch = entries.slice(0, this.resendBudgetRemaining);
+    const first = batch[0];
+    const last = batch[batch.length - 1];
+    if (first === undefined || last === undefined) return;
+    this.resendBudgetRemaining -= batch.length;
     this.gapResendWindows.push({
-      fromSeq: envelope.payload.fromSeq,
-      throughSeq: envelope.payload.throughSeq,
+      fromSeq: first.envelope.seq!,
+      throughSeq: last.envelope.seq!,
       lastSentMs: now,
     });
     while (this.gapResendWindows.length > this.maxPending) {
       this.gapResendWindows.shift();
     }
-    for (const entry of entries) {
-      entry.lastSentMs = now;
-      this.options.send(entry.envelope);
+    for (const entry of batch) {
+      this.retransmit(entry, now);
     }
+  }
+
+  private retransmit(entry: OutboxEntry, now: number): void {
+    entry.lastSentMs = now;
+    entry.retransmitted = true;
+    entry.retryAfterMs = Math.min(
+      entry.retryAfterMs * 2,
+      MAX_RETRANSMIT_MS,
+    );
+    this.options.send(entry.envelope);
+    this.options.onRetransmit?.();
   }
 
   private receiveCritical(envelope: RealtimeEnvelope<CriticalKind>): void {
@@ -307,12 +433,19 @@ export class CriticalReliability {
         nextExpected: 1,
         buffered: new Map(),
         gapRequest: null,
+        applicationReceipts: new Map(),
+        applicationReceiptOrder: [],
       };
       this.inbound.set(key, state);
     }
 
     if (sequence < state.nextExpected) {
-      this.sendAck(envelopeStream(envelope), [sequence]);
+      const receipt = state.applicationReceipts.get(sequence);
+      this.sendAck(
+        envelopeStream(envelope),
+        [sequence],
+        receipt === undefined ? [] : [receipt],
+      );
       return;
     }
     if (sequence > state.nextExpected) {
@@ -326,11 +459,13 @@ export class CriticalReliability {
     }
 
     const acknowledged: number[] = [];
+    const applicationReceipts: CriticalApplicationReceipt[] = [];
     let current: RealtimeEnvelope<CriticalKind> | undefined = envelope;
     while (current !== undefined) {
       const currentSequence = current.seq!;
       const eventId = criticalEventId(current);
       const shouldApply = !this.appliedEventIds.has(eventId);
+      const processedAtMonotonicMs = this.options.clock.now();
       // Commit the cursor and semantic ID before invoking application code. A
       // synchronous broadcast transport may re-enter receive() from callbacks.
       if (shouldApply) this.rememberAppliedEvent(eventId);
@@ -338,10 +473,25 @@ export class CriticalReliability {
       state.nextExpected = currentSequence + 1;
       state.gapRequest = null;
       state.buffered.delete(currentSequence);
-      if (shouldApply) this.options.apply(current);
+      if (shouldApply) {
+        const outcome = this.options.apply(current, processedAtMonotonicMs);
+        if (outcome !== undefined) {
+          const receipt: CriticalApplicationReceipt = {
+            sequence: currentSequence,
+            outcome,
+            processedAtMonotonicMs,
+          };
+          this.rememberApplicationReceipt(state, receipt);
+          applicationReceipts.push(receipt);
+        }
+      }
       current = state.buffered.get(state.nextExpected);
     }
-    this.sendAck(envelopeStream(envelope), acknowledged);
+    this.sendAck(
+      envelopeStream(envelope),
+      acknowledged,
+      applicationReceipts,
+    );
     this.requestMissingPrefix(state);
   }
 
@@ -373,15 +523,35 @@ export class CriticalReliability {
       fromSeq: state.nextExpected,
       throughSeq: firstBufferedSequence - 1,
     });
+    this.options.onGapRequest?.();
   }
 
-  private sendAck(stream: StreamRef, sequences: number[]): void {
-    this.sendControl("ACK", { stream, seqs: sequences });
+  private sendAck(
+    stream: StreamRef,
+    sequences: number[],
+    applicationReceipts: CriticalApplicationReceipt[] = [],
+  ): void {
+    this.sendControl("ACK", {
+      stream,
+      seqs: sequences,
+      ...(applicationReceipts.length === 0
+        ? {}
+        : { applicationReceipts }),
+    });
   }
 
-  private acknowledgeSequence(sequence: number): void {
+  private acknowledgeSequence(
+    sequence: number,
+    source: CriticalAcknowledgement["source"],
+    peerAcknowledgedAtMonotonicMs?: number,
+    applicationReceipt?: CriticalApplicationReceipt,
+  ): CriticalAcknowledgement | null {
     const entry = this.outbox.get(sequence);
-    if (entry === undefined) return;
+    if (entry === undefined) return null;
+    const eventId = criticalEventId(entry.envelope);
+    // Karn's rule: an ACK after any retransmission cannot identify which send it
+    // measured, so it must not influence the shared RTT estimator.
+    if (!entry.retransmitted) this.observeRoundTrip(entry);
     this.outbox.delete(sequence);
     this.gapResendWindows = this.gapResendWindows.filter((window) => {
       for (
@@ -393,7 +563,34 @@ export class CriticalReliability {
       }
       return false;
     });
-    this.outboundEventSeq.delete(criticalEventId(entry.envelope));
+    this.outboundEventSeq.delete(eventId);
+    return {
+      eventId,
+      sequence,
+      kind: entry.envelope.kind,
+      source,
+      ...(peerAcknowledgedAtMonotonicMs === undefined
+        ? {}
+        : { peerAcknowledgedAtMonotonicMs }),
+      ...(applicationReceipt === undefined
+        ? {}
+        : { applicationReceipt: { ...applicationReceipt } }),
+    };
+  }
+
+  private observeRoundTrip(entry: OutboxEntry): void {
+    const sampleMs = Math.max(0, this.options.clock.now() - entry.firstSentMs);
+    this.options.onRoundTrip?.(sampleMs);
+    const estimate = this.roundTripEstimator.observe(sampleMs);
+    this.retransmitTimeoutMs = Math.min(
+      MAX_RETRANSMIT_MS,
+      Math.max(
+        this.retryMs,
+        Math.ceil(
+          estimate.smoothedMs + Math.max(1, estimate.variationMs * 4),
+        ),
+      ),
+    );
   }
 
   private rememberAppliedEvent(eventId: string): void {
@@ -403,6 +600,19 @@ export class CriticalReliability {
     while (this.appliedEventOrder.length > maximum) {
       const expired = this.appliedEventOrder.shift();
       if (expired !== undefined) this.appliedEventIds.delete(expired);
+    }
+  }
+
+  private rememberApplicationReceipt(
+    state: InboundState,
+    receipt: CriticalApplicationReceipt,
+  ): void {
+    state.applicationReceipts.set(receipt.sequence, receipt);
+    state.applicationReceiptOrder.push(receipt.sequence);
+    const maximum = this.maxPending * 4;
+    while (state.applicationReceiptOrder.length > maximum) {
+      const expired = state.applicationReceiptOrder.shift();
+      if (expired !== undefined) state.applicationReceipts.delete(expired);
     }
   }
 

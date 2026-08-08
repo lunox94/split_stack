@@ -22,6 +22,17 @@ export interface CriticalPayload {
   eventId: string;
 }
 
+export type CriticalApplicationOutcome =
+  | "accepted"
+  | "expired"
+  | "rejected";
+
+export interface CriticalApplicationReceipt {
+  sequence: number;
+  outcome: CriticalApplicationOutcome;
+  processedAtMonotonicMs: number;
+}
+
 export interface MatchConfigPayload extends CriticalPayload {
   rulesVersion: 2;
   rulesHash: string;
@@ -108,7 +119,12 @@ export interface RealtimePayloadMap {
     resumeAvailable: boolean;
   };
   STATE_REQUEST: { targetPlayerIds?: PlayerId[] };
-  READY: { ready: boolean; rulesHash: string };
+  READY: {
+    ready: boolean;
+    rulesHash: string;
+    /** Advertises receiver-stamped START_COMMIT decisions. */
+    supportsStartCommitReceipts?: boolean;
+  };
   // A sample ID names one transmission attempt. Retries use a fresh ID and
   // preserve this attempt's exact send time so delayed replies remain valid.
   CLOCK_PING: { sampleId: number; coordinatorSentMs: number };
@@ -123,12 +139,23 @@ export interface RealtimePayloadMap {
     sampleIds: number[];
   };
   CONFIG_ACK: { configHash: string; accepted: boolean; reason?: string };
-  ACK: { stream: StreamRef; seqs: number[] };
+  ACK: {
+    stream: StreamRef;
+    seqs: number[];
+    /** Semantic decisions that cursors alone cannot safely infer. */
+    applicationReceipts?: CriticalApplicationReceipt[];
+  };
   GAP_REQUEST: { stream: StreamRef; fromSeq: number; throughSeq: number };
   KEEPALIVE: {
     activeSessionId: SessionId;
     resumeAvailable: boolean;
     lastSnapshotSeq: number;
+    /** Latest snapshot from the receiver that this sender has accepted. */
+    lastAcceptedSnapshotSeq?: number;
+    /** Monotonic delivery probe originated by this sender. */
+    probeSeq?: number;
+    /** Latest delivery probe received from the peer. */
+    echoProbeSeq?: number;
     inboundCritical: StreamCursor[];
   };
   SNAPSHOT: PlayerSnapshotV1;

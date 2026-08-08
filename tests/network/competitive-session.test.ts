@@ -7,13 +7,16 @@ import type { MatchResultV1 } from "../../src/domain/types";
 import type { ActivePiece, Grid, Rotation } from "../../src/domain/types";
 import type { SimulationEffect } from "../../src/domain/simulation";
 import {
+  CLOCK_SYNC_PROBE_SPACING_MS,
   CLOCK_SYNC_RETRY_BASE_MS,
   CLOCK_SYNC_RETRY_MAX_MS,
+  CLOCK_SYNC_SAMPLE_TARGET,
 } from "../../src/network/clock";
 import { decodeEnvelope, encodeEnvelope } from "../../src/network/codec";
 import { NetworkDiagnostics } from "../../src/network/diagnostics";
 import { InMemoryRealtimeBus, ManualClock } from "../../src/network/in-memory";
 import type { RealtimeEnvelope } from "../../src/network/messages";
+import { CRITICAL_INITIAL_RETRANSMIT_MS } from "../../src/network/reliability";
 import {
   CompetitiveSession,
   type CompetitiveIncomingAttackKind,
@@ -122,6 +125,11 @@ function ready(pair: ReturnType<typeof createPair>): void {
   pair.b.start();
   pair.a.setReady(true);
   pair.b.setReady(true);
+  advanceBoth(
+    pair,
+    CLOCK_SYNC_PROBE_SPACING_MS * (CLOCK_SYNC_SAMPLE_TARGET - 1),
+    CLOCK_SYNC_PROBE_SPACING_MS,
+  );
 }
 
 function advanceBoth(
@@ -176,6 +184,41 @@ function throwNextKind(
       if (armed && decoded.ok && decoded.value.kind === kind) {
         armed = false;
         throw new Error(`injected ${kind} send failure`);
+      }
+      transport.send(data);
+    },
+    leave: () => transport.leave(),
+  };
+}
+
+function emulateLegacyStartCommitPeer(
+  transport: CompetitiveRealtimeTransport,
+): CompetitiveRealtimeTransport {
+  return {
+    setListener: (listener) => transport.setListener(listener),
+    send: (data) => {
+      const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+      if (decoded.ok && decoded.value.kind === "READY") {
+        const envelope: RealtimeEnvelope<"READY"> = {
+          ...decoded.value,
+          payload: {
+            ready: decoded.value.payload.ready,
+            rulesHash: decoded.value.payload.rulesHash,
+          },
+        };
+        transport.send(encodeEnvelope(envelope));
+        return;
+      }
+      if (decoded.ok && decoded.value.kind === "ACK") {
+        const envelope: RealtimeEnvelope<"ACK"> = {
+          ...decoded.value,
+          payload: {
+            stream: decoded.value.payload.stream,
+            seqs: decoded.value.payload.seqs,
+          },
+        };
+        transport.send(encodeEnvelope(envelope));
+        return;
       }
       transport.send(data);
     },
@@ -251,11 +294,25 @@ function steerCurrentPiece(session: CompetitiveSession): void {
 describe("CompetitiveSession", () => {
   it("re-sends lobby presence and readiness after the first ephemeral frames are lost", () => {
     const pair = createPair();
-    pair.bus.dropNext("runtime-b", "runtime-a", 5);
+    const heldPresence = pair.bus.holdMatching(
+      "runtime-b",
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        return decoded.ok &&
+          (decoded.value.kind === "HELLO" || decoded.value.kind === "READY");
+      },
+    );
     ready(pair);
     expect(pair.a.view().phase).toBe("lobby");
 
+    pair.bus.discardHeld(heldPresence);
     advanceBoth(pair, RULES.network.keepaliveMs);
+    advanceBoth(
+      pair,
+      CLOCK_SYNC_PROBE_SPACING_MS * (CLOCK_SYNC_SAMPLE_TARGET - 1),
+      CLOCK_SYNC_PROBE_SPACING_MS,
+    );
 
     expect(pair.a.view().phase).toBe("countdown");
     expect(pair.b.view().phase).toBe("countdown");
@@ -274,6 +331,147 @@ describe("CompetitiveSession", () => {
     expect(onBStartCommitted).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps start negotiation compatible with a peer that predates semantic receipts", () => {
+    const pair = createPair();
+    pair.b.disconnect("replacement");
+    pair.b.attachTransport(
+      emulateLegacyStartCommitPeer(pair.bus.connect("runtime-b-legacy")),
+    );
+
+    ready(pair);
+
+    expect(pair.a.view().phase).toBe("countdown");
+    expect(pair.b.view().phase).toBe("countdown");
+    expect(pair.a.view().countdownTicks).toBe(pair.b.view().countdownTicks);
+  });
+
+  it("keeps both players stopped until an expired start commit is delivered again with a fresh lead", () => {
+    const pair = createPair();
+    const heldCommits = pair.bus.holdMatching(
+      "runtime-a",
+      "runtime-b",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        return decoded.ok && decoded.value.kind === "START_COMMIT";
+      },
+    );
+
+    ready(pair);
+    const beyondDeadlineMs =
+      (RULES.network.initialStartCountdownTicks * 1_000) /
+        RULES.timing.ticksPerSecond +
+      500;
+    pair.aClock.advance(beyondDeadlineMs);
+    pair.bClock.advance(beyondDeadlineMs);
+    pair.b.pump();
+
+    expect(pair.a.view().phase).not.toBe("playing");
+    expect(pair.b.view().phase).not.toBe("playing");
+
+    pair.bus.releaseHeld(heldCommits);
+    advanceBoth(pair, 50, 50);
+
+    expect(pair.a.view().phase).toBe("countdown");
+    expect(pair.b.view().phase).toBe("countdown");
+    expect(pair.a.view().countdownTicks).toBeGreaterThan(120);
+    expect(pair.a.view().countdownTicks).toBe(pair.b.view().countdownTicks);
+
+    advanceBoth(
+      pair,
+      (RULES.network.initialStartCountdownTicks * 1_000) /
+        RULES.timing.ticksPerSecond,
+      50,
+    );
+    expect(pair.a.view().phase).toBe("playing");
+    expect(pair.b.view().phase).toBe("playing");
+  });
+
+  it("keeps an accepted start when its direct acknowledgement is lost and a cursor arrives late", () => {
+    const pair = createPair();
+    let commitSequence: number | null = null;
+    const startEventIds: string[] = [];
+    const observeStarts = pair.bus.holdMatching(
+      "runtime-a",
+      "runtime-b",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        if (!decoded.ok) return false;
+        if (decoded.value.kind === "START") {
+          startEventIds.push(decoded.value.payload.eventId);
+        } else if (decoded.value.kind === "START_COMMIT") {
+          commitSequence ??= decoded.value.seq ?? null;
+        }
+        return false;
+      },
+    );
+    const droppedDirectCommitAck = pair.bus.holdMatching(
+      "runtime-b",
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        const sequence = commitSequence;
+        if (!decoded.ok || sequence === null) return false;
+        return decoded.value.kind === "ACK" &&
+          decoded.value.payload.seqs.includes(sequence);
+      },
+    );
+    const heldEarlyCommitCursors = pair.bus.holdMatching(
+      "runtime-b",
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        const sequence = commitSequence;
+        if (!decoded.ok || sequence === null) return false;
+        return decoded.value.kind === "KEEPALIVE" &&
+          decoded.value.payload.inboundCritical.some(
+            (cursor) => cursor.contiguousThrough >= sequence,
+          );
+      },
+    );
+
+    ready(pair);
+    expect(pair.a.view().phase).toBe("synchronizing");
+    expect(pair.b.view().phase).toBe("countdown");
+    advanceBoth(
+      pair,
+      (RULES.network.initialStartCountdownTicks * 1_000) /
+        RULES.timing.ticksPerSecond +
+        500,
+      50,
+    );
+    expect(pair.b.view().phase).toBe("playing");
+
+    // Throw away every cursor created while the commit was still timely, then
+    // allow only a newly generated post-deadline cursor to reach A.
+    pair.bus.discardHeld(heldEarlyCommitCursors);
+    const heldLateCommitCursor = pair.bus.holdMatching(
+      "runtime-b",
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        const sequence = commitSequence;
+        if (!decoded.ok || sequence === null) return false;
+        return decoded.value.kind === "KEEPALIVE" &&
+          decoded.value.payload.inboundCritical.some(
+            (cursor) => cursor.contiguousThrough >= sequence,
+          );
+      },
+    );
+    pair.aClock.advance(RULES.network.keepaliveMs);
+    pair.bClock.advance(RULES.network.keepaliveMs);
+    pair.b.pump();
+    expect(pair.a.view().phase).toBe("synchronizing");
+
+    pair.bus.discardHeld(droppedDirectCommitAck);
+    pair.bus.releaseHeld(heldLateCommitCursor);
+    pair.a.pump();
+    pair.bus.discardHeld(observeStarts);
+
+    expect(pair.a.view().phase).toBe("playing");
+    expect(new Set(startEventIds).size).toBe(1);
+    expect(pair.a.view().matchTick).toBe(pair.b.view().matchTick);
+  });
+
   it("returns to the lobby after a pre-match visibility interruption and can still ready", () => {
     const pair = createPair();
     pair.a.start();
@@ -287,6 +485,11 @@ describe("CompetitiveSession", () => {
 
     pair.a.setReady(true);
     pair.b.setReady(true);
+    advanceBoth(
+      pair,
+      CLOCK_SYNC_PROBE_SPACING_MS * (CLOCK_SYNC_SAMPLE_TARGET - 1),
+      CLOCK_SYNC_PROBE_SPACING_MS,
+    );
 
     expect(pair.a.view().phase).toBe("countdown");
     expect(pair.b.view().phase).toBe("countdown");
@@ -386,6 +589,86 @@ describe("CompetitiveSession", () => {
       });
     },
   );
+
+  it("answers a targeted state request with one forced snapshot when periodic snapshots are disabled", () => {
+    const pair = createPair({ snapshotIntervalTicks: null });
+    ready(pair);
+    advanceBoth(pair, 3_000, 50);
+    const snapshots: RealtimeEnvelope<"SNAPSHOT">[] = [];
+    const observer = pair.bus.holdMatching(
+      "runtime-a",
+      "runtime-b",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        if (decoded.ok && decoded.value.kind === "SNAPSHOT") {
+          snapshots.push(decoded.value);
+        }
+        return false;
+      },
+    );
+
+    pair.bEndpoint.send(
+      encodeEnvelope({
+        protocol: 1,
+        matchId: "match-1",
+        senderId: "player-b",
+        sessionId: "session-b",
+        kind: "STATE_REQUEST",
+        matchTick: pair.b.view().matchTick,
+        sentAtMonotonicMs: pair.bClock.now(),
+        payload: { targetPlayerIds: ["player-a"] },
+      }),
+    );
+    pair.bus.discardHeld(observer);
+
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]?.payload.stateTick).toBe(pair.a.view().matchTick);
+  });
+
+  it("downshifts periodic snapshots when the peer's accepted cursor remains behind", () => {
+    const pair = createPair();
+    ready(pair);
+    advanceBoth(pair, 3_000, 50);
+    const blockedSnapshots = pair.bus.holdMatching(
+      "runtime-a",
+      "runtime-b",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        return decoded.ok && decoded.value.kind === "SNAPSHOT";
+      },
+    );
+
+    advanceBoth(pair, 4_000, 50);
+
+    expect(pair.a.view()).toMatchObject({ snapshotIntervalTicks: 12 });
+    expect(pair.a.view().phase).toBe("playing");
+    expect(pair.b.view().phase).toBe("playing");
+    pair.bus.discardHeld(blockedSnapshots);
+  });
+
+  it("restores the normal snapshot cadence after sustained delivery recovery", () => {
+    const pair = createPair();
+    ready(pair);
+    advanceBoth(pair, 3_000, 50);
+    const blockedSnapshots = pair.bus.holdMatching(
+      "runtime-a",
+      "runtime-b",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        return decoded.ok && decoded.value.kind === "SNAPSHOT";
+      },
+    );
+    advanceBoth(pair, 4_000, 50);
+    expect(pair.a.view().snapshotIntervalTicks).toBe(12);
+
+    pair.bus.discardHeld(blockedSnapshots);
+    advanceBoth(pair, 31_000, 50);
+
+    expect(pair.a.view().phase).toBe("playing");
+    expect(pair.a.view().snapshotIntervalTicks).toBe(
+      RULES.network.snapshotTicks,
+    );
+  });
 
   it("still publishes a forced resume snapshot with periodic snapshots disabled", () => {
     const pair = createPair({ snapshotIntervalTicks: null });
@@ -529,13 +812,31 @@ describe("CompetitiveSession", () => {
 
   it("retries a missing clock sample during the initial handshake", () => {
     const pair = createPair();
+    let heldOnePong = false;
+    const missingPong = pair.bus.holdMatching(
+      "runtime-b",
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        if (
+          heldOnePong ||
+          !decoded.ok ||
+          decoded.value.kind !== "CLOCK_PONG"
+        ) return false;
+        heldOnePong = true;
+        return true;
+      },
+    );
     pair.a.start();
     pair.b.start();
     pair.a.setReady(true);
-    pair.bus.delayNext("runtime-b", "runtime-a");
     pair.b.setReady(true);
-    pair.bus.dropNext("runtime-b", "runtime-a");
-    pair.bus.releaseDelayed();
+    advanceBoth(
+      pair,
+      CLOCK_SYNC_PROBE_SPACING_MS * (CLOCK_SYNC_SAMPLE_TARGET - 1),
+      CLOCK_SYNC_PROBE_SPACING_MS,
+    );
+    pair.bus.discardHeld(missingPong);
 
     expect(pair.a.view().phase).toBe("synchronizing");
     expect(pair.a.view().clockSampleIds).toHaveLength(0);
@@ -547,59 +848,118 @@ describe("CompetitiveSession", () => {
     expect(pair.a.view().clockSampleIds).toHaveLength(3);
   });
 
-  it("accepts delayed clock replies after sending a retry", () => {
+  it("paces clock probes across the initial synchronization window", () => {
     const pair = createPair();
+    let pingsSent = 0;
+    const observer = pair.bus.holdMatching(
+      "runtime-a",
+      "runtime-b",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        if (decoded.ok && decoded.value.kind === "CLOCK_PING") pingsSent += 1;
+        return false;
+      },
+    );
     pair.a.start();
     pair.b.start();
     pair.a.setReady(true);
-    const originalSentAt = pair.aClock.now();
-    const originalPings = pair.bus.holdMatching(
-      "runtime-a",
-      "runtime-b",
-      (data) => {
-        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
-        return decoded.ok &&
-          decoded.value.kind === "CLOCK_PING" &&
-          decoded.value.payload.coordinatorSentMs === originalSentAt;
-      },
+    pair.b.setReady(true);
+
+    expect(pingsSent).toBe(1);
+    advanceBoth(pair, CLOCK_SYNC_PROBE_SPACING_MS - 1, 1);
+    expect(pingsSent).toBe(1);
+    advanceBoth(pair, 1, 1);
+    expect(pingsSent).toBe(2);
+    advanceBoth(
+      pair,
+      CLOCK_SYNC_PROBE_SPACING_MS * (CLOCK_SYNC_SAMPLE_TARGET - 2),
+      CLOCK_SYNC_PROBE_SPACING_MS,
     );
-    const originalPongs = pair.bus.holdMatching(
-      "runtime-b",
-      "runtime-a",
-      (data) => {
-        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
-        return decoded.ok &&
-          decoded.value.kind === "CLOCK_PONG" &&
-          decoded.value.payload.coordinatorSentMs === originalSentAt;
-      },
-    );
-    const retryPongs = pair.bus.holdMatching(
-      "runtime-b",
-      "runtime-a",
-      (data) => {
-        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
-        return decoded.ok && decoded.value.kind === "CLOCK_PONG";
-      },
-    );
-    let retryPingsSent = 0;
-    const observeRetryPings = pair.bus.holdMatching(
+    pair.bus.discardHeld(observer);
+
+    expect(pingsSent).toBe(CLOCK_SYNC_SAMPLE_TARGET);
+    expect(pair.a.view().phase).toBe("countdown");
+    expect(pair.b.view().phase).toBe("countdown");
+  });
+
+  it("carries a resume clock probe through the stability boundary", () => {
+    const pair = createPair();
+    ready(pair);
+    advanceBoth(pair, 3_000, 50);
+    pair.b.setHidden(true);
+    const probeTimes: number[] = [];
+    const observer = pair.bus.holdMatching(
       "runtime-a",
       "runtime-b",
       (data) => {
         const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
         if (decoded.ok && decoded.value.kind === "CLOCK_PING") {
+          probeTimes.push(decoded.value.payload.coordinatorSentMs);
+        }
+        return false;
+      },
+    );
+
+    pair.b.setHidden(false);
+    advanceBoth(pair, RULES.network.recoveryStabilityMs, 50);
+    pair.bus.discardHeld(observer);
+
+    expect(probeTimes).toHaveLength(CLOCK_SYNC_SAMPLE_TARGET);
+    expect(
+      probeTimes[probeTimes.length - 1]! - probeTimes[0]!,
+    ).toBeGreaterThanOrEqual(
+      RULES.network.recoveryStabilityMs,
+    );
+    expect(pair.a.view().phase).toBe("countdown");
+    expect(pair.b.view().phase).toBe("countdown");
+  });
+
+  it("accepts delayed clock replies after sending a retry", () => {
+    const pair = createPair();
+    let pongsHeld = 0;
+    const delayedPongs = pair.bus.holdMatching(
+      "runtime-b",
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        if (
+          pongsHeld >= 2 ||
+          !decoded.ok ||
+          decoded.value.kind !== "CLOCK_PONG"
+        ) return false;
+        pongsHeld += 1;
+        return true;
+      },
+    );
+    let retryPingsSent = 0;
+    let initialProbeWindowComplete = false;
+    const observeRetryPings = pair.bus.holdMatching(
+      "runtime-a",
+      "runtime-b",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        if (
+          initialProbeWindowComplete &&
+          decoded.ok &&
+          decoded.value.kind === "CLOCK_PING"
+        ) {
           retryPingsSent += 1;
         }
         return false;
       },
     );
+    pair.a.start();
+    pair.b.start();
+    pair.a.setReady(true);
     pair.b.setReady(true);
-
-    advanceBoth(pair, 300, 50);
-    pair.bus.releaseHeld(originalPings);
-    advanceBoth(pair, 300, 50);
-    pair.bus.releaseHeld(originalPongs);
-    pair.bus.discardHeld(retryPongs);
+    advanceBoth(
+      pair,
+      CLOCK_SYNC_PROBE_SPACING_MS * (CLOCK_SYNC_SAMPLE_TARGET - 1),
+      CLOCK_SYNC_PROBE_SPACING_MS,
+    );
+    initialProbeWindowComplete = true;
+    advanceBoth(pair, CLOCK_SYNC_RETRY_BASE_MS, 50);
+    pair.bus.releaseHeld(delayedPongs);
     pair.bus.discardHeld(observeRetryPings);
 
     expect(retryPingsSent).toBeGreaterThan(0);
@@ -697,7 +1057,8 @@ describe("CompetitiveSession", () => {
       peerReady: false,
     });
     expect(onDesynchronization).not.toHaveBeenCalled();
-    expect(diagnostics.snapshot().incidents[0]).toMatchObject({
+    const incident = diagnostics.snapshot().incidents[0];
+    expect(incident).toMatchObject({
       context: { matchId: "match-1", localSeat: "a" },
       events: [{
         kind: "clock-sync-timeout",
@@ -706,7 +1067,7 @@ describe("CompetitiveSession", () => {
           targetSamples: 5,
           acceptedSamples: 0,
           retryRounds: 3,
-          pingsSent: 20,
+          pingsSent: expect.any(Number),
           pongsReceived: 0,
           pongOutcomes: {
             accepted: 0,
@@ -721,11 +1082,26 @@ describe("CompetitiveSession", () => {
         telemetry: expect.any(Object),
       }],
     });
+    const pingsSent = incident?.events[0]?.clockSync?.pingsSent ?? 0;
+    expect(pingsSent).toBeGreaterThanOrEqual(CLOCK_SYNC_SAMPLE_TARGET);
+    expect(pingsSent).toBeLessThanOrEqual(CLOCK_SYNC_SAMPLE_TARGET * 4);
   });
 
   it("classifies rejected clock replies in the timeout diagnostic", () => {
     const diagnostics = new NetworkDiagnostics({ clock: new ManualClock(11_000) });
     const pair = createPair({ aDiagnostics: diagnostics });
+    const sentPings: Array<{ sampleId: number; coordinatorSentMs: number }> = [];
+    const observePings = pair.bus.holdMatching(
+      "runtime-a",
+      "runtime-b",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        if (decoded.ok && decoded.value.kind === "CLOCK_PING") {
+          sentPings.push({ ...decoded.value.payload });
+        }
+        return false;
+      },
+    );
     pair.a.start();
     pair.b.start();
     pair.a.setReady(true);
@@ -738,7 +1114,14 @@ describe("CompetitiveSession", () => {
       },
     );
     pair.b.setReady(true);
+    advanceBoth(
+      pair,
+      CLOCK_SYNC_PROBE_SPACING_MS * (CLOCK_SYNC_SAMPLE_TARGET - 1),
+      CLOCK_SYNC_PROBE_SPACING_MS,
+    );
     pair.bus.discardHeld(initialPongs);
+    pair.bus.discardHeld(observePings);
+    expect(sentPings).toHaveLength(CLOCK_SYNC_SAMPLE_TARGET);
 
     const sendPong = (
       sampleId: number,
@@ -762,11 +1145,19 @@ describe("CompetitiveSession", () => {
         },
       }));
     };
+    const stale = sentPings[0]!;
+    const invalid = sentPings[1]!;
+    const accepted = sentPings[2]!;
     sendPong(999, pair.aClock.now());
-    sendPong(1, pair.aClock.now() + 1);
-    sendPong(2, pair.aClock.now(), pair.bClock.now() + 1, pair.bClock.now());
-    sendPong(3, pair.aClock.now());
-    sendPong(3, pair.aClock.now());
+    sendPong(stale.sampleId, stale.coordinatorSentMs + 1);
+    sendPong(
+      invalid.sampleId,
+      invalid.coordinatorSentMs,
+      pair.bClock.now() + 1,
+      pair.bClock.now(),
+    );
+    sendPong(accepted.sampleId, accepted.coordinatorSentMs);
+    sendPong(accepted.sampleId, accepted.coordinatorSentMs);
 
     const retryPongs = pair.bus.holdMatching(
       "runtime-b",
@@ -776,14 +1167,19 @@ describe("CompetitiveSession", () => {
         return decoded.ok && decoded.value.kind === "CLOCK_PONG";
       },
     );
-    advanceBoth(pair, RULES.network.missingPeerMs, 50);
+    advanceBoth(
+      pair,
+      RULES.network.missingPeerMs -
+        CLOCK_SYNC_PROBE_SPACING_MS * (CLOCK_SYNC_SAMPLE_TARGET - 1),
+      50,
+    );
     pair.bus.discardHeld(retryPongs);
 
     expect(diagnostics.snapshot().incidents[0]?.events[0]?.clockSync)
       .toMatchObject({
         acceptedSamples: 1,
         retryRounds: 3,
-        pingsSent: 17,
+        pingsSent: expect.any(Number),
         pongsReceived: 5,
         pongOutcomes: {
           accepted: 1,
@@ -792,23 +1188,41 @@ describe("CompetitiveSession", () => {
           duplicate: 1,
           invalidTiming: 1,
         },
-        lastPongAgeMs: RULES.network.missingPeerMs,
+        lastPongAgeMs:
+          RULES.network.missingPeerMs -
+          CLOCK_SYNC_PROBE_SPACING_MS * (CLOCK_SYNC_SAMPLE_TARGET - 1),
       });
   });
 
   it("retries a missing clock commit before accepting the match config", () => {
     const pair = createPair();
+    let heldFirstCommit = false;
+    const missingCommit = pair.bus.holdMatching(
+      "runtime-a",
+      "runtime-b",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        if (
+          heldFirstCommit ||
+          !decoded.ok ||
+          decoded.value.kind !== "CLOCK_COMMIT"
+        ) return false;
+        heldFirstCommit = true;
+        return true;
+      },
+    );
     pair.a.start();
     pair.b.start();
     pair.a.setReady(true);
-    pair.bus.delayNext("runtime-b", "runtime-a");
     pair.b.setReady(true);
-    pair.bus.delayNext("runtime-b", "runtime-a", 5);
-    pair.bus.releaseDelayed();
-    pair.bus.dropNext("runtime-a", "runtime-b");
-    pair.bus.releaseDelayed();
+    advanceBoth(
+      pair,
+      CLOCK_SYNC_PROBE_SPACING_MS * (CLOCK_SYNC_SAMPLE_TARGET - 1),
+      CLOCK_SYNC_PROBE_SPACING_MS,
+    );
 
     advanceBoth(pair, RULES.network.retryMs);
+    pair.bus.discardHeld(missingCommit);
 
     expect(pair.a.view().phase).toBe("countdown");
     expect(pair.b.view().phase).toBe("countdown");
@@ -817,19 +1231,36 @@ describe("CompetitiveSession", () => {
 
   it("retries a missing config acknowledgement during the initial handshake", () => {
     const pair = createPair();
+    let heldFirstAck = false;
+    const missingAck = pair.bus.holdMatching(
+      "runtime-b",
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        if (
+          heldFirstAck ||
+          !decoded.ok ||
+          decoded.value.kind !== "CONFIG_ACK"
+        ) return false;
+        heldFirstAck = true;
+        return true;
+      },
+    );
     pair.a.start();
     pair.b.start();
     pair.a.setReady(true);
-    pair.bus.delayNext("runtime-b", "runtime-a");
     pair.b.setReady(true);
-    pair.bus.delayNext("runtime-b", "runtime-a", 6);
-    pair.bus.releaseDelayed();
-    pair.bus.releaseDelayed();
+    advanceBoth(
+      pair,
+      CLOCK_SYNC_PROBE_SPACING_MS * (CLOCK_SYNC_SAMPLE_TARGET - 1),
+      CLOCK_SYNC_PROBE_SPACING_MS,
+    );
 
     expect(pair.a.view().phase).toBe("synchronizing");
     expect(pair.a.view().configHash).toBe(pair.b.view().configHash);
 
     advanceBoth(pair, RULES.network.retryMs);
+    pair.bus.discardHeld(missingAck);
 
     expect(pair.a.view().phase).toBe("countdown");
     expect(pair.b.view().phase).toBe("countdown");
@@ -838,17 +1269,27 @@ describe("CompetitiveSession", () => {
   it("ends neutrally when config acknowledgement retries cannot recover", () => {
     const onDesynchronization = vi.fn<(reason: string) => void>();
     const pair = createPair({ onADesynchronization: onDesynchronization });
+    const heldAcks = pair.bus.holdMatching(
+      "runtime-b",
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        return decoded.ok && decoded.value.kind === "CONFIG_ACK";
+      },
+    );
     pair.a.start();
     pair.b.start();
     pair.a.setReady(true);
-    pair.bus.delayNext("runtime-b", "runtime-a");
     pair.b.setReady(true);
-    pair.bus.delayNext("runtime-b", "runtime-a", 6);
-    pair.bus.releaseDelayed();
-    pair.bus.releaseDelayed();
+    advanceBoth(
+      pair,
+      CLOCK_SYNC_PROBE_SPACING_MS * (CLOCK_SYNC_SAMPLE_TARGET - 1),
+      CLOCK_SYNC_PROBE_SPACING_MS,
+    );
     pair.b.disconnect();
 
     advanceBoth(pair, RULES.network.missingPeerMs);
+    pair.bus.discardHeld(heldAcks);
 
     expect(pair.a.view().phase).toBe("desynchronized");
     expect(onDesynchronization).toHaveBeenCalledWith("config-ack-timeout");
@@ -1505,7 +1946,7 @@ describe("CompetitiveSession", () => {
     advanceBoth(pair, RULES.network.retryMs);
     expect(onAResult).not.toHaveBeenCalled();
 
-    advanceBoth(pair, RULES.network.retryMs);
+    advanceBoth(pair, CRITICAL_INITIAL_RETRANSMIT_MS);
     expect(onAResult).toHaveBeenCalledTimes(1);
   });
 
@@ -1748,6 +2189,49 @@ describe("CompetitiveSession", () => {
     expect(pair.b.view().matchTick).toBe(frozenTick);
   });
 
+  it("extends a fast resume lead when clock probes observe a slow path", () => {
+    const pair = createPair();
+    const heldPongs = pair.bus.holdMatching(
+      "runtime-b",
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        return decoded.ok && decoded.value.kind === "CLOCK_PONG";
+      },
+    );
+
+    pair.a.start();
+    pair.b.start();
+    pair.a.setReady(true);
+    pair.b.setReady(true);
+    advanceBoth(pair, 600, CLOCK_SYNC_PROBE_SPACING_MS);
+    pair.bus.releaseHeld(heldPongs);
+    advanceBoth(pair, 1, 1);
+
+    expect(pair.a.view().phase).toBe("countdown");
+    expect(pair.b.view().phase).toBe("countdown");
+    advanceBoth(
+      pair,
+      (RULES.network.initialStartCountdownTicks * 1_000) /
+        RULES.timing.ticksPerSecond,
+      50,
+    );
+
+    pair.b.setHidden(true);
+    pair.b.setHidden(false);
+    stabilizeRecovery(pair);
+
+    expect(pair.a.view().phase).toBe("countdown");
+    expect(pair.b.view().phase).toBe("countdown");
+    expect(pair.a.view().countdownTicks).toBeGreaterThan(
+      RULES.network.fastResumeCountdownTicks,
+    );
+    expect(pair.a.view().countdownTicks).toBeLessThanOrEqual(
+      RULES.network.initialStartCountdownTicks,
+    );
+    expect(pair.a.view().countdownTicks).toBe(pair.b.view().countdownTicks);
+  });
+
   it("creates a fresh commit lead after a restart proposal is delayed", () => {
     const pair = createPair();
     ready(pair);
@@ -1971,7 +2455,61 @@ describe("CompetitiveSession", () => {
     expect(pair.b.view().phase).toBe("countdown");
   });
 
-  it("applies a queued restart commit on both seats after a beyond-lead stall", () => {
+  it("replays an accepted resume receipt after its forced snapshot and first ACK are lost", () => {
+    const pair = createPair();
+    ready(pair);
+    advanceBoth(pair, 3_600, 100);
+
+    pair.b.setHidden(true);
+    pair.b.disconnect();
+    const replacementId = "runtime-b-throwing-resume-snapshot";
+    const replacement = throwNextKind(
+      pair.bus.connect(replacementId),
+      "SNAPSHOT",
+    );
+    pair.b.attachTransport(replacement);
+
+    let commitSequence: number | null = null;
+    const observeCommit = pair.bus.holdMatching(
+      "runtime-a",
+      replacementId,
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        if (decoded.ok && decoded.value.kind === "START_COMMIT") {
+          commitSequence ??= decoded.value.seq ?? null;
+        }
+        return false;
+      },
+    );
+    const lostCommitAcks = pair.bus.holdMatching(
+      replacementId,
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        const sequence = commitSequence;
+        return decoded.ok &&
+          sequence !== null &&
+          decoded.value.kind === "ACK" &&
+          decoded.value.payload.seqs.includes(sequence);
+      },
+    );
+
+    pair.b.setHidden(false);
+    expect(() => stabilizeRecovery(pair)).not.toThrow();
+    expect(commitSequence).not.toBeNull();
+    expect(pair.a.view().phase).toBe("network-pause");
+    expect(pair.b.view().phase).toBe("countdown");
+
+    pair.bus.discardHeld(lostCommitAcks);
+    advanceBoth(pair, CRITICAL_INITIAL_RETRANSMIT_MS * 2, 50);
+    pair.bus.discardHeld(observeCommit);
+
+    expect(pair.a.view().phase).toBe("playing");
+    expect(pair.b.view().phase).toBe("playing");
+    expect(pair.a.view().matchTick).toBe(pair.b.view().matchTick);
+  });
+
+  it("replaces an expired queued restart commit with a fresh shared lead", () => {
     const pair = createPair();
     ready(pair);
     advanceBoth(pair, 3_600, 100);
@@ -1992,13 +2530,26 @@ describe("CompetitiveSession", () => {
     expect(pair.b.view().phase).toBe("network-pause");
 
     // Simulate the coordinator's event loop remaining stalled beyond the
-    // intended lead. The queued commit must retain one semantic ID, and a
-    // successful retry must move both seats to the same timestamp.
+    // intended lead. Delivery is acknowledged, but both seats discard the
+    // expired semantic deadline and negotiate a fresh shared countdown.
     pair.aClock.advance(2_500);
     pair.bClock.advance(2_500);
     pair.a.pump();
     pair.b.pump();
 
+    expect(pair.a.view().phase).toBe("countdown");
+    expect(pair.b.view().phase).toBe("countdown");
+    expect(pair.a.view().countdownTicks).toBe(pair.b.view().countdownTicks);
+    expect(pair.a.view().countdownTicks).toBeGreaterThanOrEqual(
+      RULES.network.rollbackResumeCountdownTicks,
+    );
+
+    advanceBoth(
+      pair,
+      (RULES.network.initialStartCountdownTicks * 1_000) /
+        RULES.timing.ticksPerSecond,
+      50,
+    );
     expect(pair.a.view().phase).toBe("playing");
     expect(pair.b.view().phase).toBe("playing");
     expect(pair.a.view().matchTick).toBe(pair.b.view().matchTick);
@@ -2023,7 +2574,14 @@ describe("CompetitiveSession", () => {
 
     const replacement = pair.bus.connect("runtime-b-rollback");
     pair.b.attachTransport(replacement);
-    advanceBoth(pair, 500, 50);
+    for (
+      let elapsed = 0;
+      elapsed < RULES.network.missingPeerMs &&
+        pair.a.view().phase !== "countdown";
+      elapsed += 50
+    ) {
+      advanceBoth(pair, 50, 50);
+    }
 
     expect(pair.a.view()).toMatchObject({
       phase: "countdown",
@@ -2592,6 +3150,73 @@ describe("CompetitiveSession", () => {
     expect(pair.a.view().peerMissing).toBe(false);
   });
 
+  it("pauses when outbound delivery loses every probe despite healthy inbound keepalives", () => {
+    const diagnostics = new NetworkDiagnostics();
+    const pair = createPair({ aDiagnostics: diagnostics });
+    ready(pair);
+    advanceBoth(pair, 3_000, 50);
+    expect(pair.a.view().phase).toBe("playing");
+    expect(pair.b.view().phase).toBe("playing");
+
+    const blockedOutbound = pair.bus.holdMatching(
+      "runtime-a",
+      "runtime-b",
+      () => true,
+    );
+    const blockedPeerPause = pair.bus.holdMatching(
+      "runtime-b",
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        return decoded.ok && decoded.value.kind === "NETWORK_PAUSE";
+      },
+    );
+
+    advanceBoth(
+      pair,
+      RULES.network.missingPeerMs + RULES.network.keepaliveMs + 250,
+      50,
+    );
+
+    expect(pair.a.view().phase).toBe("network-pause");
+    expect(pair.b.view().phase).toBe("network-pause");
+    expect(diagnostics.snapshot().incidents[0]?.events[0]).toMatchObject({
+      kind: "connection-unstable",
+      pauseTrigger: "local-delivery-failure",
+      telemetry: expect.any(Object),
+    });
+
+    pair.bus.discardHeld(blockedOutbound);
+    pair.bus.discardHeld(blockedPeerPause);
+  });
+
+  it("accepts advancing snapshot cursors as outbound proof when probe echoes are lost", () => {
+    const pair = createPair();
+    ready(pair);
+    advanceBoth(pair, 3_000, 50);
+    const blockedProbeEchoes = pair.bus.holdMatching(
+      "runtime-b",
+      "runtime-a",
+      (data) => {
+        const decoded = decodeEnvelope(data, { expectedMatchId: "match-1" });
+        return decoded.ok &&
+          decoded.value.kind === "KEEPALIVE" &&
+          decoded.value.payload.echoProbeSeq !== undefined &&
+          decoded.value.payload.probeSeq === undefined;
+      },
+    );
+
+    advanceBoth(
+      pair,
+      RULES.network.missingPeerMs + RULES.network.keepaliveMs,
+      50,
+    );
+    pair.bus.discardHeld(blockedProbeEchoes);
+
+    expect(pair.a.view().phase).toBe("playing");
+    expect(pair.a.view().connectionStatus).toBe("connected");
+  });
+
   it("warns at three seconds, pauses at five, and replaces only after sustained silence", () => {
     const onRecoveryNeeded = vi.fn<() => void>();
     const persistDiagnostic = vi.fn<(key: string, value: string) => void>();
@@ -2763,7 +3388,7 @@ describe("CompetitiveSession", () => {
 
     const replacement = pair.bus.connect("runtime-b-diagnostics");
     pair.b.attachTransport(replacement);
-    advanceBoth(pair, 3_000);
+    advanceBoth(pair, 3_000, 50);
 
     const events = diagnostics.snapshot().incidents[0]?.events ?? [];
     expect(events.map((event) => event.kind)).toEqual([
@@ -2947,7 +3572,9 @@ describe("CompetitiveSession", () => {
     pair.b.disconnect();
     advanceBoth(
       pair,
-      RULES.network.controllerReconnectGraceMs - 1,
+      RULES.network.controllerReconnectGraceMs -
+        RULES.network.keepaliveMs -
+        1,
       1_000,
     );
     expect(onAResult).not.toHaveBeenCalled();
@@ -2964,10 +3591,16 @@ describe("CompetitiveSession", () => {
     expect(pair.b.view().phase).toBe("playing");
 
     pair.b.disconnect();
-    advanceBoth(pair, RULES.network.controllerReconnectGraceMs - 1, 1_000);
+    advanceBoth(
+      pair,
+      RULES.network.controllerReconnectGraceMs -
+        RULES.network.keepaliveMs -
+        1,
+      1_000,
+    );
     expect(onAResult).not.toHaveBeenCalled();
 
-    advanceBoth(pair, 1, 1);
+    advanceBoth(pair, RULES.network.keepaliveMs + 1, 1);
     expect(onAResult).toHaveBeenCalledTimes(1);
   });
 
@@ -3116,7 +3749,7 @@ describe("CompetitiveSession", () => {
     expect(onAResult).not.toHaveBeenCalled();
     expect(onBResult).not.toHaveBeenCalled();
 
-    pair.bClock.advance(RULES.network.retryMs - 1);
+    pair.bClock.advance(CRITICAL_INITIAL_RETRANSMIT_MS - 1);
     pair.b.pump();
     expect(pair.b.forfeitDeliveryStatus()).toBe("pending");
     expect(onAResult).not.toHaveBeenCalled();

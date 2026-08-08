@@ -119,15 +119,23 @@ rules version 2 and must change together with the peer rules hash.
   Failed replacement callbacks are contained and recorded, and the normal
   recovery cadence retries them while the session remains detached.
 - Critical ACKs name `(senderId, sessionId)` explicitly; bare sequence numbers
-  are never treated as globally unique.
+  are never treated as globally unique. `START_COMMIT` additionally carries a
+  bounded receiver-stamped semantic receipt. Cumulative cursors cannot retire
+  that event, and duplicate deliveries repeat the original receipt, so a lost
+  ACK cannot turn a timely accepted start into a later apparent rejection.
+  Support is negotiated additively in `READY`; a legacy peer keeps its original
+  ACK/cursor commit point instead of hanging on a receipt it cannot produce.
 - Realtime `MATCH_CONFIG` is the live acknowledged authority. A compact durable
   mirror carries the round, seed, rules hash, and config hash for recovery and
   late observers.
 - A critical gap is requested immediately. Buffers, ACK lists, and gap ranges
   are bounded by the central network limit so a remote peer cannot amplify an
   unbounded control frame.
-- Every authenticated peer frame proves liveness. Three seconds of silence
-  shows a nonblocking warning while play continues, five seconds freezes the
+- Every authenticated peer frame proves inbound liveness. Additive optional
+  sequence/echo fields on `KEEPALIVE` prove outbound delivery when both peers
+  support them; loss of those echoes can therefore pause a receive-only link
+  even while inbound traffic continues. Three seconds of silence shows a
+  nonblocking warning while play continues, five seconds freezes the
   simulation, and eight seconds requests a replacement channel. The second seat
   waits another 500 ms to reduce simultaneous replacement, and retries back off
   through 3, 6, 12, then 15 seconds while the committed controller's recovery
@@ -137,13 +145,17 @@ rules version 2 and must change together with the peer rules hash.
   three seconds of rollback independently of the longer missing-peer timeout,
   reconciles ledgers, and requires 500 ms of sustained bidirectional traffic.
   A reliable `START` is only a prepared proposal: Seat B remains paused until
-  Seat A observes its delivery and emits one reliable `START_COMMIT` with a
-  fresh full lead. Seat A applies that same commit only after the transport
-  accepts a send. A zero-rollback connection recovery uses a synchronized
-  750 ms lead; rollback and visibility recovery use two seconds so players can
-  reorient. Recovery countdowns stay compact and silent. A checkpoint or hash
-  mismatch ends neutrally as a desynchronization rather than guessing which
-  owner state to rewrite.
+  Seat A receives its acknowledgement and emits a reliable `START_COMMIT` with
+  a fresh full lead. Seat A also remains stopped until that commit is
+  acknowledged with Seat B's explicit accepted, expired, or rejected decision;
+  an expired commit causes Seat A to prepare a new proposal and lead. A
+  zero-rollback connection
+  recovery uses a synchronized lead of at least 750 ms; rollback and visibility
+  recovery use at least two seconds so players can reorient. Measured RTT plus
+  variation can expand either lead, capped by the initial three-second lead.
+  Recovery countdowns stay compact and silent. A checkpoint or hash mismatch
+  ends neutrally as a desynchronization rather than guessing which owner state
+  to rewrite.
 - An exact committed controller may produce the neutral `connection-lost`
   result after twenty seconds only while its app is visible and its realtime
   recovery loop remains active. Hiding invalidates elapsed observation and
@@ -166,15 +178,24 @@ rules version 2 and must change together with the peer rules hash.
   events in local storage and may be copied or cleared by the player. Frame and
   byte telemetry uses fixed-cardinality arithmetic on the hot path; compact
   summaries are allocated and persisted only on existing incident transitions.
-  Incident context carries only the match ID and local seat for cross-device
-  correlation. Clock deadlines and remote-tick failures capture fixed-size
-  reason counters and tick bounds, while pause and detach events carry bounded
-  trigger enums; raw frames, payloads, event IDs, and player identities remain
-  excluded.
+  They distinguish channel and session receive totals, successful bytes by
+  message class, failed sends, bounded RTT and authenticated inter-arrival
+  timing, critical retransmits, and gap requests. Incident context carries only
+  the match ID and local seat for cross-device correlation. Clock deadlines and
+  remote-tick failures capture fixed-size reason counters and tick bounds,
+  while pause and detach events carry bounded trigger enums; raw frames,
+  payloads, event IDs, and player identities remain excluded.
 - If the wall-clock pump catches up across several regular snapshot intervals,
   it publishes only the newest state. Forced terminal snapshots are never
   coalesced. This prevents a brief main-thread stall from creating a burst of
   obsolete full-state frames that prolongs the same stall.
+- Peers optionally report their latest accepted snapshot cursor in
+  `KEEPALIVE`. Sustained sender/receiver lag steps the regular cadence down from
+  10 to 5 to 2 Hz where the selected diagnostic profile permits it; 30 seconds
+  of healthy feedback restores one step. If a peer advertises a newer sent
+  sequence while the receiver's state is stale, a rate-limited targeted
+  `STATE_REQUEST` elicits one forced snapshot, including in the zero-periodic
+  profile.
 - Diagnostic builds can select 10, 5, 2, or 0 regular snapshots per second.
   This transport-only A/B profile sits outside the deterministic rules hash;
   forced initial, recovery, and terminal state still travels in every profile.
@@ -182,20 +203,32 @@ rules version 2 and must change together with the peer rules hash.
   rolling checkpoint window accepts earlier terminal events without replaying
   from match start; events outside either bound finish neutrally as a desync.
 - Initial clock samples, config acknowledgements, and critical frames retry on
-  bounded timers. Each clock retry is a fresh timed probe with a fresh sample
-  ID, while delayed replies to earlier probes remain eligible for the current
-  lifecycle. Missing clock samples back off from 500 ms to a two-second cap;
-  an initial five-second deadline returns both players to readiness instead of
-  leaving one player in a terminal state, while resume deadlines restart the
-  recovery handshake. A new visibility pause advances the pause epoch and
-  invalidates any in-flight resume before hidden peers can enter countdown.
-  Terminal connection loss clears every remaining probe.
+  bounded timers. Each clock synchronization targets five samples, with probes
+  paced 75 ms apart instead of burst-sent. Each missing-sample retry is another
+  paced probe with a fresh sample ID, while delayed replies to earlier probes
+  remain eligible for the current lifecycle. Missing clock samples back off
+  from 500 ms to a two-second cap; an initial five-second deadline returns both
+  players to readiness instead of leaving one player in a terminal state, while
+  resume deadlines restart the recovery handshake. A new visibility pause
+  advances the pause epoch and invalidates any in-flight resume before hidden
+  peers can enter countdown. Terminal connection loss clears every remaining
+  probe.
   Results require identical peer hashes, with a 20-second consensus deadline
   and a canonical neutral result on failure.
+- Critical retransmission starts with a conservative one-second timeout, then
+  uses unambiguous acknowledgements to maintain smoothed RTT and variation.
+  Retransmitted samples follow Karn's rule, each pending entry backs off
+  exponentially to an eight-second cap, and timer- plus gap-triggered work
+  shares a rotating maximum of 16 resends per pump so a backlog cannot
+  monopolize networking.
 - Reliable gap recovery coalesces duplicate requests for the same missing
   prefix and rate-limits overlapping ranges before any re-entrant send. A
   single lost critical frame therefore causes one targeted prefix resend per
   retry window instead of a recursive request/resend burst.
+- `ShapedRealtimeBus` is the deterministic test seam for network resilience.
+  Directional routes combine fixed latency, scripted or seeded jitter and loss,
+  scripted duplication, and token-bucket bandwidth/queue limits. Its manual
+  clock and explicit pump make asymmetric and one-way scenarios reproducible.
 - An explicit forfeit carries a canonical self-loss result. The receiver queues
   that exact hash-validated result before acknowledging; Leave pumps retries for
   the three-second presence window and queues the same durable fallback once if

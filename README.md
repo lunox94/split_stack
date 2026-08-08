@@ -100,7 +100,7 @@ not a replacement for the headed, same-page embedded-instance check above.
 `VITE_SPLIT_STACK_SNAPSHOT_HZ` builds a diagnostic transport profile without
 changing deterministic gameplay rules or the rules hash. Supported values are:
 
-| Value | Regular snapshots | Simulation interval |
+| Value | Initial regular snapshots | Simulation interval |
 | --- | --- | --- |
 | unset or `10` | 10 per second (default) | 6 ticks |
 | `5` | 5 per second | 12 ticks |
@@ -112,9 +112,16 @@ The `0` profile is therefore useful for isolating periodic snapshot load, but
 it is not a normal play mode: the opponent board does not receive continuous
 visual updates between those forced states.
 
+On peers that advertise accepted-snapshot feedback, the sender adapts this
+initial cadence to congestion. Sustained lag steps publication down through
+the available 10, 5, and 2 Hz rates; a sustained healthy cursor steps it back
+up. A peer that advertises a newer snapshot than the receiver has accepted can
+also trigger a rate-limited `STATE_REQUEST`, which produces one forced current
+snapshot even when periodic snapshots are disabled.
+
 Movement and rotation are applied locally and do not emit one realtime frame
-per input action; regular network publication stays on the fixed snapshot
-cadence above. Debouncing rapid controls would therefore not reduce packet
+per input action; regular network publication stays on the snapshot scheduler
+described above. Debouncing rapid controls would therefore not reduce packet
 volume and would make play less responsive. A unit test pins this boundary, and
 the snapshot-rate profiles provide the controlled way to test transport load.
 
@@ -145,6 +152,15 @@ within a match: this experimental setting is intentionally outside the rules
 hash, so a mismatch is not rejected by the compatibility handshake and would
 invalidate the comparison.
 
+### Deterministic slow-network tests
+
+`ShapedRealtimeBus` is the test-only realtime transport for reproducible bad
+network conditions. Each direction can independently apply fixed latency,
+scripted or seeded jitter and loss, scripted duplication, and bandwidth plus
+queue limits. Delivery advances only when the shared manual clock and bus are
+pumped, so tests can replay asymmetric and one-way failures without wall-clock
+timing or random flakes.
+
 ### Reading network telemetry
 
 Diagnostics take a compact counter snapshot only when an incident changes
@@ -157,9 +173,12 @@ that does not decode suggests invalid or incompatible data, while decoded
 traffic that is not authenticated did not belong to the bound peer session.
 `send` is the session-wide successful outbound total; `sinceAuthenticated`
 covers only the window after the last authenticated frame and reports that
-window's age. `snapshots.gapEvents`, `missing`, and `maxGap` summarize
-discontinuities among accepted snapshot sequence numbers, and
-`critical.maxPending` is the peak reliable-event backlog.
+window's age. `receiveSession` survives channel replacement, while
+`send.bytesByKind` and `send.failed` separate successful traffic cost from
+failed writes. Bounded `rtt` and `authenticatedInterarrival` summaries report
+sample counts, range, smoothing, and jitter. `snapshots.gapEvents`, `missing`,
+and `maxGap` summarize discontinuities among accepted snapshot sequence
+numbers; `critical` includes the peak backlog, retransmits, and gap requests.
 
 Each new incident includes the match ID and local seat so two voluntarily
 shared copies can be paired without trusting device wall clocks. Clock timeout
@@ -219,16 +238,24 @@ realtime channel; lobby, seat, and result records use bounded durable Webxdc
 updates. Display names are rendered as text, network messages are bounded and
 validated, and the app does not expose participant addresses.
 
-An authenticated peer frame counts as proof of life. Three seconds of silence
-shows a nonblocking warning while play continues; five seconds freezes the
-match. Channel replacement starts after eight seconds (staggered between the
-two seats) and retries with capped exponential backoff for up to one minute. A
-restored path must carry bidirectional traffic for 500 ms before recovery can
-complete. Both players then restore their last common checkpoint (at most three
-seconds of rollback) and resume after a synchronized 750 ms lead when no
-orientation is needed, or two seconds after rollback or a visibility pause. If
-recovery cannot complete, the match ends neutrally as a connection loss: it
-remains visible in Recent Matches but does not affect head-to-head tallies.
+Authenticated peer frames prove inbound life. Optional sequence/echo probes on
+`KEEPALIVE` also prove that local traffic reaches a capable peer, so a
+receive-only path is treated as a connection failure instead of remaining
+falsely healthy. Three seconds of silence shows a nonblocking warning while
+play continues; five seconds freezes the match. Channel replacement starts
+after eight seconds (staggered between the two seats) and retries with capped
+exponential backoff for up to one minute. A restored path must carry
+bidirectional traffic for 500 ms before recovery can complete.
+
+Initial and resumed starts use reliable prepare/commit delivery: the
+coordinator does not start on a successful local send, and an expired commit is
+replaced with a fresh full lead. After recovery, both players restore their
+last common checkpoint (at most three seconds of rollback). The resume lead is
+at least 750 ms when no orientation is needed or two seconds after rollback or
+a visibility pause, and expands with measured RTT and jitter up to the initial
+three-second lead. If recovery cannot complete, the match ends neutrally as a
+connection loss: it remains visible in Recent Matches but does not affect
+head-to-head tallies.
 Settings also provides copy/clear controls for a bounded, local-only diagnostic
 log whose compact telemetry is captured only at incident transitions.
 

@@ -47,6 +47,14 @@ describe("NetworkTelemetry", () => {
         decodedAgeMs: 50,
         authenticatedAgeMs: 50,
       },
+      receiveSession: {
+        rawFrames: 2,
+        rawBytes: 250,
+        decodedFrames: 1,
+        decodedBytes: 200,
+        authenticatedFrames: 1,
+        authenticatedBytes: 200,
+      },
       send: {
         frames: 4,
         bytes: 1_850,
@@ -54,6 +62,16 @@ describe("NetworkTelemetry", () => {
         keepalives: 1,
         critical: 1,
         other: 1,
+        bytesByKind: {
+          snapshots: 1_600,
+          keepalives: 120,
+          critical: 80,
+          other: 50,
+        },
+        failed: {
+          frames: 0,
+          bytes: 0,
+        },
       },
       sinceAuthenticated: {
         sentFrames: 4,
@@ -72,6 +90,12 @@ describe("NetworkTelemetry", () => {
         windowAgeMs: 50,
         maxGapSessionMs: 45,
       },
+      rtt: {
+        samples: 0,
+      },
+      authenticatedInterarrival: {
+        samples: 0,
+      },
       snapshots: {
         accepted: 0,
         gapEvents: 0,
@@ -81,6 +105,8 @@ describe("NetworkTelemetry", () => {
       critical: {
         pending: 0,
         maxPending: 0,
+        retransmits: 0,
+        gapRequests: 0,
       },
     });
   });
@@ -244,6 +270,116 @@ describe("NetworkTelemetry", () => {
     expect(summary.sinceAuthenticated.windowAgeMs).toBe(50);
   });
 
+  it("retains cumulative receive totals and authenticated inter-arrival timing across channels", () => {
+    const clock = new ManualClock(8_000);
+    const telemetry = new NetworkTelemetry({ clock });
+
+    telemetry.noteChannelAttached();
+    telemetry.noteRawReceived(100);
+    telemetry.noteDecodedReceived(100);
+    telemetry.noteAuthenticatedReceived(100);
+    clock.advance(20);
+    telemetry.noteRawReceived(10);
+    telemetry.noteChannelDetached();
+    telemetry.noteChannelAttached();
+    clock.advance(280);
+    telemetry.noteRawReceived(40);
+    telemetry.noteDecodedReceived(40);
+    telemetry.noteAuthenticatedReceived(40);
+
+    expect(telemetry.snapshot()).toMatchObject({
+      receive: {
+        rawFrames: 1,
+        rawBytes: 40,
+        decodedFrames: 1,
+        decodedBytes: 40,
+        authenticatedFrames: 1,
+        authenticatedBytes: 40,
+      },
+      receiveSession: {
+        rawFrames: 3,
+        rawBytes: 150,
+        decodedFrames: 2,
+        decodedBytes: 140,
+        authenticatedFrames: 2,
+        authenticatedBytes: 140,
+      },
+      authenticatedInterarrival: {
+        samples: 1,
+        latestMs: 300,
+        minMs: 300,
+        maxMs: 300,
+        smoothedMs: 300,
+        jitterMs: 0,
+      },
+    });
+  });
+
+  it("tracks successful bytes by kind separately from rejected sends", () => {
+    const telemetry = new NetworkTelemetry({ clock: new ManualClock(9_000) });
+
+    telemetry.noteSent(1_600, "SNAPSHOT");
+    telemetry.noteSent(120, "KEEPALIVE");
+    telemetry.noteSent(80, "GARBAGE_ATTACK");
+    telemetry.noteSent(50, "ACK");
+    telemetry.noteSendFailed(1_600, "SNAPSHOT");
+
+    expect(telemetry.snapshot().send).toEqual({
+      frames: 3,
+      bytes: 250,
+      snapshots: 0,
+      keepalives: 1,
+      critical: 1,
+      other: 1,
+      bytesByKind: {
+        snapshots: 0,
+        keepalives: 120,
+        critical: 80,
+        other: 50,
+      },
+      failed: {
+        frames: 1,
+        bytes: 1_600,
+      },
+    });
+  });
+
+  it("summarizes round-trip samples with bounded smoothed latency and jitter", () => {
+    const telemetry = new NetworkTelemetry({ clock: new ManualClock(10_000) });
+
+    telemetry.noteRoundTrip(100);
+    telemetry.noteRoundTrip(140);
+    telemetry.noteRoundTrip(80);
+
+    expect(telemetry.snapshot().rtt).toEqual({
+      samples: 3,
+      latestMs: 80,
+      minMs: 80,
+      maxMs: 140,
+      smoothedMs: 102,
+      jitterMs: 14,
+    });
+    expect(() => telemetry.noteRoundTrip(Number.POSITIVE_INFINITY)).toThrow(
+      RangeError,
+    );
+  });
+
+  it("counts reliability retransmits and gap requests without retaining events", () => {
+    const telemetry = new NetworkTelemetry({ clock: new ManualClock(11_000) });
+
+    telemetry.noteCriticalRetransmit();
+    telemetry.noteCriticalRetransmit(2);
+    telemetry.noteGapRequest();
+    telemetry.noteGapRequest(3);
+
+    expect(telemetry.snapshot().critical).toEqual({
+      pending: 0,
+      maxPending: 0,
+      retransmits: 3,
+      gapRequests: 4,
+    });
+  });
+
   it("round-trips and clones additive telemetry scopes", () => {
     const clock = new ManualClock(7_000);
     const telemetry = new NetworkTelemetry({ clock });
@@ -262,7 +398,15 @@ describe("NetworkTelemetry", () => {
     const cloned = cloneNetworkTelemetrySummary(summary);
     expect(cloned).toEqual(summary);
     cloned.send!.frames = 99;
+    cloned.send!.bytesByKind!.snapshots = 99;
+    cloned.receiveSession!.rawFrames = 99;
+    cloned.rtt!.samples = 99;
+    cloned.authenticatedInterarrival!.samples = 99;
     expect(summary.send?.frames).toBe(1);
+    expect(summary.send?.bytesByKind?.snapshots).toBe(0);
+    expect(summary.receiveSession?.rawFrames).toBe(1);
+    expect(summary.rtt?.samples).toBe(0);
+    expect(summary.authenticatedInterarrival?.samples).toBe(0);
   });
 
   it("parses legacy summaries without additive telemetry scopes", () => {

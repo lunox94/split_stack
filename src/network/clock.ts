@@ -3,6 +3,7 @@ import type { Tick } from "../domain/types";
 // Transport-only clock probe policy. These values do not change deterministic
 // gameplay and intentionally sit outside the hashed rules contract.
 export const CLOCK_SYNC_SAMPLE_TARGET = 5;
+export const CLOCK_SYNC_PROBE_SPACING_MS = 75;
 export const CLOCK_SYNC_RETRY_BASE_MS = 500;
 export const CLOCK_SYNC_RETRY_MAX_MS = 2_000;
 

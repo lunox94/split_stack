@@ -153,6 +153,35 @@ function isSequenceList(value: unknown, maximum: number): value is number[] {
   );
 }
 
+function isCriticalApplicationReceipts(
+  value: unknown,
+  acknowledgedSequences: readonly number[],
+): boolean {
+  if (value === undefined) return true;
+  if (!Array.isArray(value) || value.length > acknowledgedSequences.length) {
+    return false;
+  }
+  const acknowledged = new Set(acknowledgedSequences);
+  const seen = new Set<number>();
+  return value.every((receipt) => {
+    if (
+      !isRecord(receipt) ||
+      !isSafeCounter(receipt.sequence, false) ||
+      !acknowledged.has(receipt.sequence) ||
+      seen.has(receipt.sequence) ||
+      (receipt.outcome !== "accepted" &&
+        receipt.outcome !== "expired" &&
+        receipt.outcome !== "rejected") ||
+      !isFiniteNumber(receipt.processedAtMonotonicMs) ||
+      receipt.processedAtMonotonicMs < 0
+    ) {
+      return false;
+    }
+    seen.add(receipt.sequence);
+    return true;
+  });
+}
+
 function hasEventId(payload: Record<string, unknown>): boolean {
   return isBoundedId(payload.eventId);
 }
@@ -180,7 +209,12 @@ function isValidPayload(kind: MessageKind, payload: unknown): boolean {
           payload.targetPlayerIds.every(isBoundedId))
       );
     case "READY":
-      return typeof payload.ready === "boolean" && isBoundedId(payload.rulesHash);
+      return (
+        typeof payload.ready === "boolean" &&
+        isBoundedId(payload.rulesHash) &&
+        (payload.supportsStartCommitReceipts === undefined ||
+          typeof payload.supportsStartCommitReceipts === "boolean")
+      );
     case "CLOCK_PING":
       return isSafeCounter(payload.sampleId) && isFiniteNumber(payload.coordinatorSentMs);
     case "CLOCK_PONG":
@@ -206,7 +240,11 @@ function isValidPayload(kind: MessageKind, payload: unknown): boolean {
     case "ACK":
       return (
         isStream(payload.stream) &&
-        isSequenceList(payload.seqs, RULES.network.maxPendingCritical)
+        isSequenceList(payload.seqs, RULES.network.maxPendingCritical) &&
+        isCriticalApplicationReceipts(
+          payload.applicationReceipts,
+          payload.seqs,
+        )
       );
     case "GAP_REQUEST":
       return (
@@ -221,6 +259,12 @@ function isValidPayload(kind: MessageKind, payload: unknown): boolean {
         isBoundedId(payload.activeSessionId) &&
         typeof payload.resumeAvailable === "boolean" &&
         isSafeCounter(payload.lastSnapshotSeq) &&
+        (payload.lastAcceptedSnapshotSeq === undefined ||
+          isSafeCounter(payload.lastAcceptedSnapshotSeq)) &&
+        (payload.probeSeq === undefined ||
+          isSafeCounter(payload.probeSeq, false)) &&
+        (payload.echoProbeSeq === undefined ||
+          isSafeCounter(payload.echoProbeSeq, false)) &&
         Array.isArray(payload.inboundCritical) &&
         payload.inboundCritical.length <= 16 &&
         payload.inboundCritical.every(

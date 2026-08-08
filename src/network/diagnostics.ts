@@ -79,6 +79,7 @@ export interface RemoteTickDiagnosticContext {
 
 export const PAUSE_TRIGGERS = [
   "local-silence",
+  "local-delivery-failure",
   "peer-network-pause",
   "visibility",
 ] as const;

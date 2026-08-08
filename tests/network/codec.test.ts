@@ -15,6 +15,9 @@ const keepalive: RealtimeEnvelope<"KEEPALIVE"> = {
     activeSessionId: "session-a",
     resumeAvailable: true,
     lastSnapshotSeq: 20,
+    lastAcceptedSnapshotSeq: 18,
+    probeSeq: 7,
+    echoProbeSeq: 6,
     inboundCritical: [],
   },
 };
@@ -27,6 +30,58 @@ describe("realtime envelope codec", () => {
     });
 
     expect(decoded).toEqual({ ok: true, value: keepalive });
+  });
+
+  it("keeps delivery-probe fields optional and rejects invalid counters", () => {
+    const legacy = {
+      ...keepalive,
+      payload: {
+        activeSessionId: keepalive.payload.activeSessionId,
+        resumeAvailable: keepalive.payload.resumeAvailable,
+        lastSnapshotSeq: keepalive.payload.lastSnapshotSeq,
+        inboundCritical: keepalive.payload.inboundCritical,
+      },
+    };
+    expect(decodeEnvelope(encodeEnvelope(legacy))).toMatchObject({ ok: true });
+    expect(
+      decodeEnvelope(
+        new TextEncoder().encode(
+          JSON.stringify({
+            ...keepalive,
+            payload: { ...keepalive.payload, probeSeq: 0 },
+          }),
+        ),
+      ),
+    ).toMatchObject({ ok: false, error: "invalid-envelope" });
+  });
+
+  it("negotiates START_COMMIT receipts through an optional READY capability", () => {
+    const legacyReady = {
+      ...keepalive,
+      kind: "READY",
+      payload: { ready: true, rulesHash: "rules-v2" },
+    };
+    expect(
+      decodeEnvelope(new TextEncoder().encode(JSON.stringify(legacyReady))),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeEnvelope(new TextEncoder().encode(JSON.stringify({
+        ...legacyReady,
+        payload: {
+          ...legacyReady.payload,
+          supportsStartCommitReceipts: true,
+        },
+      }))),
+    ).toMatchObject({ ok: true });
+    expect(
+      decodeEnvelope(new TextEncoder().encode(JSON.stringify({
+        ...legacyReady,
+        payload: {
+          ...legacyReady.payload,
+          supportsStartCommitReceipts: "yes",
+        },
+      }))),
+    ).toMatchObject({ ok: false, error: "invalid-envelope" });
   });
 
   it("rejects invalid UTF-8 and unknown message kinds without throwing", () => {
@@ -109,6 +164,45 @@ describe("realtime envelope codec", () => {
     expect(
       decodeEnvelope(new TextEncoder().encode(JSON.stringify(oversizedAck))),
     ).toMatchObject({ ok: false, error: "invalid-envelope" });
+  });
+
+  it("accepts bounded critical application receipts and legacy ACKs", () => {
+    const legacyAck: RealtimeEnvelope<"ACK"> = {
+      ...keepalive,
+      kind: "ACK",
+      payload: {
+        stream: { senderId: "player-b", sessionId: "session-b" },
+        seqs: [4],
+      },
+    };
+    const receiptAck: RealtimeEnvelope<"ACK"> = {
+      ...legacyAck,
+      payload: {
+        ...legacyAck.payload,
+        applicationReceipts: [
+          {
+            sequence: 4,
+            outcome: "accepted",
+            processedAtMonotonicMs: 1_250.5,
+          },
+        ],
+      },
+    };
+
+    expect(decodeEnvelope(encodeEnvelope(legacyAck))).toMatchObject({ ok: true });
+    expect(decodeEnvelope(encodeEnvelope(receiptAck))).toMatchObject({ ok: true });
+    for (const applicationReceipts of [
+      [{ sequence: 5, outcome: "accepted", processedAtMonotonicMs: 1_250 }],
+      [{ sequence: 4, outcome: "unknown", processedAtMonotonicMs: 1_250 }],
+      [{ sequence: 4, outcome: "accepted", processedAtMonotonicMs: -1 }],
+    ]) {
+      expect(
+        decodeEnvelope(new TextEncoder().encode(JSON.stringify({
+          ...legacyAck,
+          payload: { ...legacyAck.payload, applicationReceipts },
+        }))),
+      ).toMatchObject({ ok: false, error: "invalid-envelope" });
+    }
   });
 
   it("accepts bounded Oversize and Ghost Jam attack messages", () => {

@@ -89,6 +89,21 @@ describe("snapshot scheduling", () => {
     expect(scheduler.claim(0, true)).toBe(false);
     expect(scheduler.claim(60, true)).toBe(false);
   });
+
+  it("changes cadence at runtime and validates every new interval", () => {
+    const scheduler = new SnapshotScheduler(6);
+    expect(scheduler.currentIntervalTicks).toBe(6);
+    expect(scheduler.claim(6, true)).toBe(true);
+
+    scheduler.setIntervalTicks(12);
+    expect(scheduler.currentIntervalTicks).toBe(12);
+    expect(scheduler.claim(6, true)).toBe(false);
+    expect(scheduler.claim(12, true)).toBe(true);
+
+    scheduler.setIntervalTicks(null);
+    expect(scheduler.claim(24, true)).toBe(false);
+    expect(() => scheduler.setIntervalTicks(0)).toThrow(RangeError);
+  });
 });
 
 describe("remote snapshot replacement", () => {

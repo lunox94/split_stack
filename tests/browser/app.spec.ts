@@ -2306,7 +2306,11 @@ test("replaces a silent competitive channel without registering a second listene
     diagnosticEvents
       .filter((event) => event.telemetry !== undefined)
       .map((event) => event.kind),
-  ).toEqual(["connection-unstable", "channel-replacement-requested"]);
+  ).toEqual([
+    "connection-unstable",
+    "channel-replacement-requested",
+    "channel-detached",
+  ]);
   await seatB.close();
 });
 
