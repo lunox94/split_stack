@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { DEVICE_MATRIX } from "./device-matrix";
 
 async function openBoardStatusHarness(
   page: import("@playwright/test").Page,
@@ -13,7 +14,7 @@ async function openBoardStatusHarness(
   await expect(page.getByRole("application", { name: "Your board" })).toBeVisible();
 }
 
-test("keeps Special Pieces readable and cycling without narrow-screen overflow", async ({
+test("keeps Special Pieces readable and cycling without narrow-screen overflow", DEVICE_MATRIX, async ({
   page,
 }) => {
   await page.goto("/#name=Help%20Tester&addr=help%40example.test");
@@ -57,7 +58,7 @@ test("keeps Special Pieces readable and cycling without narrow-screen overflow",
   ).toBe(true);
 });
 
-test("keeps Scramble and Blackout presentation board-local and accessible", async ({
+test("keeps Scramble and Blackout presentation board-local and accessible", DEVICE_MATRIX, async ({
   page,
 }) => {
   await openBoardStatusHarness(page);
@@ -148,7 +149,7 @@ test("keeps Scramble and Blackout presentation board-local and accessible", asyn
   ).toBe("none");
 });
 
-test("reserves a permanent Barrier channel below the board", async ({
+test("reserves a permanent Barrier channel below the board", DEVICE_MATRIX, async ({
   page,
 }) => {
   await openBoardStatusHarness(page);

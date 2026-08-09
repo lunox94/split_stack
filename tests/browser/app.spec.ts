@@ -3,6 +3,7 @@ import { RULES_HASH } from "../../src/config/rules-hash";
 import { RULES } from "../../src/config/rules";
 import { hashCanonicalHex } from "../../src/domain/hashing";
 import { NETWORK_DIAGNOSTICS_STORAGE_KEY } from "../../src/network/diagnostics";
+import { DEVICE_MATRIX } from "./device-matrix";
 
 const APP_ORIGIN = "http://127.0.0.1:3000";
 
@@ -1420,7 +1421,7 @@ test("Home stays compact and opens the sectioned Lobby", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Open challenges" })).toBeHidden();
 });
 
-test("Lobby actions and tables keep their responsive layout", async ({ page }) => {
+test("Lobby actions and tables keep their responsive layout", DEVICE_MATRIX, async ({ page }) => {
   await seedLobbyLayoutData(page);
   await openApp(page, "Layout Viewer");
   await openLobby(page);
@@ -1971,7 +1972,9 @@ test("Home keeps help opt-in and exposes the complete settings surface", async (
   await expect(page.getByText("Diagnostics cleared.")).toBeVisible();
 });
 
-test("gameplay marked cells match the guide badge and soft halo", async ({ page }) => {
+test("gameplay marked cells match the guide badge and soft halo", DEVICE_MATRIX, async ({
+  page,
+}) => {
   await openApp(page);
   const {
     accentGlyphCoverage,
@@ -2200,7 +2203,7 @@ test("gesture controls accept a hard-drop flick over the opponent board", async 
   await seatB.close();
 });
 
-test("replaces a silent competitive channel without registering a second listener", async ({
+test("replaces a silent competitive channel without registering a second listener", DEVICE_MATRIX, async ({
   context,
   page,
 }) => {
@@ -2314,7 +2317,7 @@ test("replaces a silent competitive channel without registering a second listene
   await seatB.close();
 });
 
-test("keeps a healthy realtime channel across a visibility restore", async ({
+test("keeps a healthy realtime channel across a visibility restore", DEVICE_MATRIX, async ({
   context,
   page,
 }) => {
@@ -3713,7 +3716,9 @@ test("leaving an active match records a forfeit before releasing the seat", asyn
   await expect(
     seatA.getByRole("button", { name: "Request rematch", exact: true }),
   ).toBeVisible();
-  await expect(seatB.getByRole("heading", { name: "Split Stack" })).toBeVisible();
+  await expect(seatB.getByRole("heading", { name: "Split Stack" })).toBeVisible({
+    timeout: RULES.network.missingPeerMs + 5_000,
+  });
 
   await seatB.close();
 });

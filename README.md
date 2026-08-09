@@ -217,6 +217,13 @@ npm run test:browser
 npm run check
 ```
 
+The Playwright `desktop` project runs the complete browser suite once. Tests
+tagged `@device-matrix` also run in the `portrait` project when their assertions
+intentionally cover responsive layout or device-dependent rendering. Tests that
+set an exact viewport run once in the desktop project; their declared dimensions
+remain covered there, while tagged default-viewport tests retain Pixel-device
+coverage.
+
 The deterministic engine is under `src/domain`, centralized balance values are
 under `src/config`, realtime/durable protocol code is under `src/network`, and
 the Three.js presentation is under `src/render`. `IMPLEMENTATION_DECISIONS.md`
