@@ -1,0 +1,96 @@
+{
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-5.6-sol",
+  "defaultThinkingLevel": "xhigh",
+  "theme": "split-stack",
+  "packages": [
+    "npm:pi-agents-team@2026.7.18",
+    "npm:@juicesharp/rpiv-ask-user-question@2.1.0",
+    "npm:@juicesharp/rpiv-todo@2.1.0",
+    "git:github.com/chandra447/pi-hermes-memory@26f0acaa7741a81ea28eb992ab7ffcfdb7b50a0c",
+    "git:github.com/omaclaren/pi-markdown-preview@b82fd54f0439e97b66d58c2d5b2ec92555abcea6",
+    "git:github.com/apmantza/pi-lens@c683e996f350516d44da4391ab1a42390737372a",
+    "git:github.com/nicobailon/pi-web-access@7bf05f9acc4a61d9ff50927fa8be7ad3f87d77b6",
+    "git:github.com/nicobailon/pi-mcp-adapter@7dfe06899279832dd320a7c228e48e8a9f503807",
+    "./node_modules/context-mode",
+    "git:github.com/DietrichGebert/ponytail@2ed6c52c9d7e5e56942508591085fd45dea277d3",
+    "git:github.com/nicobailon/pi-powerline-footer@b7735ec548e42bc361467f1e1235d4cda65c133e",
+    "./packages/fixed-layout",
+    "npm:@mrclrchtr/supi-context@4.1.0",
+    "npm:pi-btw-extension@0.2.1",
+    "npm:pi-scroll@0.1.2"
+  ],
+  "skills": [
+    "../.agent/skills",
+    "../.agent/vendor/matt-pocock-skills-selected"
+  ],
+  "powerline": {
+    "preset": "ascii",
+    "separator": "pipe",
+    "fixedEditor": true,
+    "mouseScroll": true,
+    "model": {
+      "display": "name",
+      "showThinkingLevel": false
+    },
+    "context": {
+      "format": "full"
+    },
+    "cache_read": {
+      "format": "percent"
+    },
+    "git": {
+      "showBranch": true,
+      "showStaged": false,
+      "showUnstaged": false,
+      "showUntracked": false
+    },
+    "layout": {
+      "left": [
+        "model",
+        "thinking",
+        "custom:ponytail",
+        "git"
+      ],
+      "right": [
+        "custom:context",
+        "cache_read"
+      ],
+      "secondary": [
+        "custom:agents",
+        "custom:lsp",
+        "custom:mcp"
+      ]
+    },
+    "customItems": [
+      {
+        "id": "ponytail",
+        "statusKey": "ponytail",
+        "position": "left"
+      },
+      {
+        "id": "context",
+        "statusKey": "split-stack-context",
+        "position": "right"
+      },
+      {
+        "id": "agents",
+        "statusKey": "pi-agent-team",
+        "position": "secondary",
+        "prefix": "Mode"
+      },
+      {
+        "id": "lsp",
+        "statusKey": "pi-lens-lsp",
+        "position": "secondary",
+        "prefix": "TS"
+      },
+      {
+        "id": "mcp",
+        "statusKey": "mcp",
+        "position": "secondary",
+        "prefix": "MCP"
+      }
+    ]
+  }
+}

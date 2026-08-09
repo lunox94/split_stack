@@ -1,0 +1,15 @@
+# Permanent build input for generated agent adapters. It is not injected into prompts.
+version: 1
+profiles:
+  - typescript-web
+ci: none
+tracker: github
+team:
+  enabled_after_validation: true
+  max_parallel_workers: 3
+  worker_retry_limit: 1
+models:
+  orchestrator: orchestrator_model
+  high_reasoning: high_reasoning_model
+  coding: coding_model
+  fast: fast_model

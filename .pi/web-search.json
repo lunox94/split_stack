@@ -1,0 +1,9 @@
+{
+  "provider": "exa",
+  "workflow": "summary-review",
+  "curatorTimeoutSeconds": 20,
+  "githubClone": {
+    "baseDir": "/tmp/pi-repos",
+    "maxDepth": 3
+  }
+}

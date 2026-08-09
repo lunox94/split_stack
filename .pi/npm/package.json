@@ -1,0 +1,12 @@
+{
+  "name": "pi-extensions",
+  "private": true,
+  "dependencies": {
+    "@juicesharp/rpiv-ask-user-question": "2.1.0",
+    "@juicesharp/rpiv-todo": "2.1.0",
+    "@mrclrchtr/supi-context": "4.1.0",
+    "pi-agents-team": "2026.7.18",
+    "pi-btw-extension": "0.2.1",
+    "pi-scroll": "0.1.2"
+  }
+}

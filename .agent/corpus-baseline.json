@@ -1,0 +1,59 @@
+{
+  "always": {
+    "bytes": 3254,
+    "estimatedTokens": 814,
+    "files": [
+      "AGENTS.md",
+      "CONTEXT.md"
+    ]
+  },
+  "orchestrator": {
+    "bytes": 7693,
+    "estimatedTokens": 1924,
+    "files": [
+      ".agent/README.md",
+      ".agent/skill-policy.yaml",
+      ".agent/teams.yaml"
+    ]
+  },
+  "worker-bundles": {
+    "bytes": 27916,
+    "estimatedTokens": 6979,
+    "files": [
+      ".pi/agent/bundles/.gitkeep",
+      ".pi/agent/bundles/engineering-lead.md",
+      ".pi/agent/bundles/experience.md",
+      ".pi/agent/bundles/gameplay-rules.md",
+      ".pi/agent/bundles/performance.md",
+      ".pi/agent/bundles/planner.md",
+      ".pi/agent/bundles/planning-lead.md",
+      ".pi/agent/bundles/platform-release.md",
+      ".pi/agent/bundles/qa.md",
+      ".pi/agent/bundles/realtime-webxdc.md",
+      ".pi/agent/bundles/security-privacy.md",
+      ".pi/agent/bundles/validation-lead.md",
+      ".pi/agent/bundles/verifier.md"
+    ]
+  },
+  "on-demand": {
+    "bytes": 16476,
+    "estimatedTokens": 4119,
+    "files": [
+      ".agent/expertise/engineering-lead.md",
+      ".agent/expertise/experience.md",
+      ".agent/expertise/gameplay-rules.md",
+      ".agent/expertise/performance.md",
+      ".agent/expertise/planner.md",
+      ".agent/expertise/planning-lead.md",
+      ".agent/expertise/platform-release.md",
+      ".agent/expertise/qa.md",
+      ".agent/expertise/realtime-webxdc.md",
+      ".agent/expertise/security-privacy.md",
+      ".agent/expertise/validation-lead.md",
+      ".agent/expertise/verifier.md",
+      ".agent/expertise/worker-base.md",
+      "docs/adr/0001-competition-event-lifecycle-module.md",
+      "docs/agents/issue-tracker.md"
+    ]
+  }
+}

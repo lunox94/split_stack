@@ -1,0 +1,220 @@
+{
+  "schemaVersion": 4,
+  "scaffoldVersion": 3,
+  "enabled": true,
+  "routingMode": "solo",
+  "workerAccess": {
+    "allowPathsOutsideProject": true
+  },
+  "display": {
+    "cost": true
+  },
+  "roles": {
+    "planning-lead": {
+      "whenToUse": "Coordinates complex feature scoping and may write only the delegated plans/GH-<issue> or plans/LOCAL-<slug> tree.",
+      "model": "openai-codex/gpt-5.6-sol",
+      "thinkingLevel": "high",
+      "access": {
+        "tools": [
+          "bash",
+          "edit",
+          "find",
+          "grep",
+          "ls",
+          "read",
+          "write"
+        ],
+        "write": true
+      },
+      "prompt": ".pi/agent/bundles/planning-lead.md"
+    },
+    "planner": {
+      "whenToUse": "Investigates or decomposes one bounded planning question and may write only an explicitly delegated plan path.",
+      "model": "openai-codex/gpt-5.6-luna",
+      "thinkingLevel": "low",
+      "access": {
+        "tools": [
+          "bash",
+          "edit",
+          "find",
+          "grep",
+          "ls",
+          "read",
+          "write"
+        ],
+        "write": true
+      },
+      "prompt": ".pi/agent/bundles/planner.md"
+    },
+    "engineering-lead": {
+      "whenToUse": "Coordinates implementation spanning two or more Split Stack architecture seams and assigns disjoint writable files.",
+      "model": "openai-codex/gpt-5.6-sol",
+      "thinkingLevel": "high",
+      "access": {
+        "tools": [
+          "bash",
+          "find",
+          "grep",
+          "ls",
+          "read"
+        ],
+        "write": false
+      },
+      "prompt": ".pi/agent/bundles/engineering-lead.md"
+    },
+    "gameplay-rules": {
+      "whenToUse": "Implements deterministic simulation, scoring, pieces, powers, balance rules, hashes, and their focused tests.",
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinkingLevel": "medium",
+      "access": {
+        "tools": [
+          "bash",
+          "edit",
+          "find",
+          "grep",
+          "ls",
+          "read",
+          "write"
+        ],
+        "write": true
+      },
+      "prompt": ".pi/agent/bundles/gameplay-rules.md"
+    },
+    "realtime-webxdc": {
+      "whenToUse": "Implements Webxdc protocol, durable and realtime convergence, competitive match lifecycle, recovery, and related tests.",
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinkingLevel": "medium",
+      "access": {
+        "tools": [
+          "bash",
+          "edit",
+          "find",
+          "grep",
+          "ls",
+          "read",
+          "write"
+        ],
+        "write": true
+      },
+      "prompt": ".pi/agent/bundles/realtime-webxdc.md"
+    },
+    "experience": {
+      "whenToUse": "Implements Three.js presentation, UI, input, audio, accessibility, responsive behavior, and related tests without changing authoritative simulation timing.",
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinkingLevel": "medium",
+      "access": {
+        "tools": [
+          "bash",
+          "edit",
+          "find",
+          "grep",
+          "ls",
+          "read",
+          "write"
+        ],
+        "write": true
+      },
+      "prompt": ".pi/agent/bundles/experience.md"
+    },
+    "platform-release": {
+      "whenToUse": "Implements TypeScript and Vite tooling, Webxdc manifest and packaging, offline asset closure, archive verification, and release mechanics.",
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinkingLevel": "medium",
+      "access": {
+        "tools": [
+          "bash",
+          "edit",
+          "find",
+          "grep",
+          "ls",
+          "read",
+          "write"
+        ],
+        "write": true
+      },
+      "prompt": ".pi/agent/bundles/platform-release.md"
+    },
+    "validation-lead": {
+      "whenToUse": "Coordinates broad risk-based review across QA, security and privacy, performance, and independent verification.",
+      "model": "openai-codex/gpt-5.6-sol",
+      "thinkingLevel": "high",
+      "access": {
+        "tools": [
+          "bash",
+          "find",
+          "grep",
+          "ls",
+          "read"
+        ],
+        "write": false
+      },
+      "prompt": ".pi/agent/bundles/validation-lead.md"
+    },
+    "qa": {
+      "whenToUse": "Analyzes regressions or adds explicitly scoped behavioral coverage and may edit only delegated test files.",
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinkingLevel": "medium",
+      "access": {
+        "tools": [
+          "bash",
+          "edit",
+          "find",
+          "grep",
+          "ls",
+          "read",
+          "write"
+        ],
+        "write": true
+      },
+      "prompt": ".pi/agent/bundles/qa.md"
+    },
+    "security-privacy": {
+      "whenToUse": "Reviews identity, message validation, storage, telemetry, secrets, offline boundaries, privacy, and unsafe defaults.",
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinkingLevel": "medium",
+      "access": {
+        "tools": [
+          "bash",
+          "find",
+          "grep",
+          "ls",
+          "read"
+        ],
+        "write": false
+      },
+      "prompt": ".pi/agent/bundles/security-privacy.md"
+    },
+    "performance": {
+      "whenToUse": "Reviews simulation cadence, Webxdc queues, rendering and allocation hot paths, audio streaming, startup, and archive-size risks.",
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinkingLevel": "medium",
+      "access": {
+        "tools": [
+          "bash",
+          "find",
+          "grep",
+          "ls",
+          "read"
+        ],
+        "write": false
+      },
+      "prompt": ".pi/agent/bundles/performance.md"
+    },
+    "verifier": {
+      "whenToUse": "Independently verifies requested outcomes, acceptance criteria, sensitive invariants, and claimed command evidence after implementation.",
+      "model": "openai-codex/gpt-5.6-sol",
+      "thinkingLevel": "high",
+      "access": {
+        "tools": [
+          "bash",
+          "find",
+          "grep",
+          "ls",
+          "read"
+        ],
+        "write": false
+      },
+      "prompt": ".pi/agent/bundles/verifier.md"
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "settings": {
+    "toolPrefix": "server",
+    "idleTimeout": 10,
+    "autoAuth": true
+  },
+  "mcpServers": {
+    "context-mode": {
+      "command": "bun",
+      "args": [
+        ".pi/node_modules/context-mode/cli.bundle.mjs"
+      ],
+      "lifecycle": "eager"
+    }
+  }
+}
