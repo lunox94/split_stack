@@ -3,9 +3,12 @@ import type { Tick } from "../domain/types";
 // Transport-only clock probe policy. These values do not change deterministic
 // gameplay and intentionally sit outside the hashed rules contract.
 export const CLOCK_SYNC_SAMPLE_TARGET = 5;
+export const CLOCK_SYNC_RESUME_SAMPLE_TARGET = 3;
 export const CLOCK_SYNC_PROBE_SPACING_MS = 75;
 export const CLOCK_SYNC_RETRY_BASE_MS = 500;
 export const CLOCK_SYNC_RETRY_MAX_MS = 2_000;
+export const CLOCK_SYNC_TRUST_MAX_AGE_MS = 30_000;
+const CLOCK_SYNC_TRUST_MIN_TOLERANCE_MS = 100;
 
 export interface MonotonicClock {
   now(): number;
@@ -107,6 +110,87 @@ export function selectClockOffset(samples: readonly ClockSample[]): ClockSelecti
   return {
     offsetPeerMinusCoordinatorMs: median,
     selectedSampleIds: selected.map((sample) => sample.sampleId),
+  };
+}
+
+/**
+ * Validate a small fresh resume sample against an offset committed earlier in
+ * the same runtime. A high-RTT sample gets a proportionally wider allowance,
+ * while low-latency paths still tolerate ordinary scheduling noise.
+ */
+export function selectTrustedResumeClockOffset(
+  samples: readonly ClockSample[],
+  trustedOffsetPeerMinusCoordinatorMs: number,
+): ClockSelection | null {
+  if (samples.length !== CLOCK_SYNC_RESUME_SAMPLE_TARGET) {
+    throw new RangeError("Trusted resume synchronization requires three samples");
+  }
+  if (!Number.isFinite(trustedOffsetPeerMinusCoordinatorMs)) {
+    throw new RangeError("Trusted clock offset must be finite");
+  }
+  if (
+    new Set(samples.map((sample) => sample.sampleId)).size !==
+    CLOCK_SYNC_RESUME_SAMPLE_TARGET
+  ) {
+    throw new RangeError("Trusted resume samples require distinct IDs");
+  }
+  for (const sample of samples) {
+    if (
+      !Number.isSafeInteger(sample.sampleId) ||
+      sample.sampleId < 0 ||
+      !Number.isFinite(sample.roundTripMs) ||
+      sample.roundTripMs < 0 ||
+      !Number.isFinite(sample.offsetPeerMinusCoordinatorMs)
+    ) {
+      throw new RangeError("Invalid trusted resume clock sample");
+    }
+    const toleranceMs = Math.max(
+      CLOCK_SYNC_TRUST_MIN_TOLERANCE_MS,
+      sample.roundTripMs,
+    );
+    if (
+      Math.abs(
+        sample.offsetPeerMinusCoordinatorMs -
+          trustedOffsetPeerMinusCoordinatorMs,
+      ) > toleranceMs
+    ) {
+      return null;
+    }
+  }
+  for (let leftIndex = 0; leftIndex < samples.length; leftIndex += 1) {
+    const left = samples[leftIndex]!;
+    for (
+      let rightIndex = leftIndex + 1;
+      rightIndex < samples.length;
+      rightIndex += 1
+    ) {
+      const right = samples[rightIndex]!;
+      const toleranceMs = Math.max(
+        CLOCK_SYNC_TRUST_MIN_TOLERANCE_MS,
+        left.roundTripMs,
+        right.roundTripMs,
+      );
+      if (
+        Math.abs(
+          left.offsetPeerMinusCoordinatorMs -
+            right.offsetPeerMinusCoordinatorMs,
+        ) > toleranceMs
+      ) {
+        return null;
+      }
+    }
+  }
+  const ordered = [...samples].sort(
+    (left, right) =>
+      left.offsetPeerMinusCoordinatorMs -
+        right.offsetPeerMinusCoordinatorMs ||
+      left.sampleId - right.sampleId,
+  );
+  return {
+    offsetPeerMinusCoordinatorMs:
+      ordered[1]?.offsetPeerMinusCoordinatorMs ??
+      trustedOffsetPeerMinusCoordinatorMs,
+    selectedSampleIds: ordered.map((sample) => sample.sampleId),
   };
 }
 

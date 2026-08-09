@@ -114,10 +114,14 @@ visual updates between those forced states.
 
 On peers that advertise accepted-snapshot feedback, the sender adapts this
 initial cadence to congestion. Sustained lag steps publication down through
-the available 10, 5, and 2 Hz rates; a sustained healthy cursor steps it back
-up. A peer that advertises a newer snapshot than the receiver has accepted can
-also trigger a rate-limited `STATE_REQUEST`, which produces one forced current
-snapshot even when periodic snapshots are disabled.
+the available 10, 5, 2, and 1 Hz rates; a sustained healthy cursor steps it
+back up. If outbound delivery remains unproven for the three-second warning
+window, periodic snapshots stop temporarily so probes, acknowledgements,
+clock messages, and critical events are not queued behind full state. A fresh
+proof restores the selected cadence. Initial, requested, recovery, and
+terminal snapshots remain forced throughout. A peer that advertises a newer
+snapshot than the receiver has accepted can also trigger a rate-limited
+`STATE_REQUEST`, including while periodic publication is suspended.
 
 Movement and rotation are applied locally and do not emit one realtime frame
 per input action; regular network publication stays on the snapshot scheduler
@@ -171,14 +175,21 @@ starved. The legacy `pump.maxGapMs` covers only the explicitly reported
 `receive.rawFrames`, `decodedFrames`, and `authenticatedFrames`: raw traffic
 that does not decode suggests invalid or incompatible data, while decoded
 traffic that is not authenticated did not belong to the bound peer session.
-`send` is the session-wide successful outbound total; `sinceAuthenticated`
-covers only the window after the last authenticated frame and reports that
-window's age. `receiveSession` survives channel replacement, while
+`send` is the session-wide successful outbound total; `sendChannel` covers the
+active channel generation. `sinceAuthenticated` and `sinceOutboundProof`
+separate receive silence from the failure of local traffic to complete an
+end-to-end round trip. Per-kind authenticated receive counters distinguish
+snapshots, keepalives, clock probes, acknowledgements, critical events, and
+other traffic. `outboundProof` identifies whether progress came from a probe
+echo, critical ACK/cursor, snapshot cursor, or clock pong, and includes bounded
+per-source cursors or sample IDs and ages. `receiveSession` survives channel
+replacement, while
 `send.bytesByKind` and `send.failed` separate successful traffic cost from
 failed writes. Bounded `rtt` and `authenticatedInterarrival` summaries report
-sample counts, range, smoothing, and jitter. `snapshots.gapEvents`, `missing`,
-and `maxGap` summarize discontinuities among accepted snapshot sequence
-numbers; `critical` includes the peak backlog, retransmits, and gap requests.
+sample counts, range, smoothing, and jitter. Snapshot telemetry includes the
+active interval (explicit `null` means emergency suspension), delivery lag,
+accepted gaps, and missing positions; `critical` includes the peak backlog,
+retransmits, and gap requests.
 
 Each new incident includes the match ID and local seat so two voluntarily
 shared copies can be paired without trusting device wall clocks. Clock timeout
@@ -186,7 +197,10 @@ events summarize sent probes and accepted, stale, duplicate, unknown, or
 invalid replies. Remote-tick desynchronizations include the local tick, remote
 target, source message, and permitted delta. Pause and detach events identify
 whether they came from local silence, peer pause, visibility, replacement, or
-ordinary teardown; recovery events also carry the shared pause epoch.
+ordinary teardown; recovery events also carry the shared pause epoch. Resume
+countdowns retain the original pre-adoption pause tick, both proposed resume
+ticks, and the final common tick so rollback is visible even when it happened
+before the final reconciliation step.
 
 These summaries contain only fixed-size counts, byte totals, timings, and
 sequence-gap statistics. They contain no frame payloads or participant
@@ -244,8 +258,25 @@ receive-only path is treated as a connection failure instead of remaining
 falsely healthy. Three seconds of silence shows a nonblocking warning while
 play continues; five seconds freezes the match. Channel replacement starts
 after eight seconds (staggered between the two seats) and retries with capped
-exponential backoff for up to one minute. A restored path must carry
-bidirectional traffic for 500 ms before recovery can complete.
+exponential backoff for up to one minute. A replacement is not considered
+restored until the current channel generation has both authenticated inbound
+traffic and fresh outbound-delivery proof. The first incident requires 500 ms
+of sustained bidirectional traffic; a repeated connection pause within 30
+seconds keeps the 1 Hz degraded profile and raises that stability window to
+2.5 seconds.
+
+Initial clock synchronization still selects from five fresh samples. A resume
+within 30 seconds may validate the previously committed offset with three
+fresh consistent samples; disagreement discards that shortcut and collects a
+new five-sample set. A proven channel gets one bounded same-channel retry when
+resume sampling makes progress, without extending the absolute connection
+recovery deadline. Optional recovery keepalives are coalesced so a narrow host
+queue is not flooded by independent timers. A bounded priority queue admits
+optional and repeatable traffic through a four-frame/250 ms window, with
+ACK/gap responses ahead of presence. Critical and clock/commit retry timers
+advance only after actual transport admission rather than when work was merely
+deferred. Forced state may borrow the window so an authoritative recovery
+snapshot cannot be discarded at the pause-to-countdown boundary.
 
 Initial and resumed starts use reliable prepare/commit delivery: the
 coordinator does not start on a successful local send, and an expired commit is

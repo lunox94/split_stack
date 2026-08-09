@@ -140,6 +140,10 @@ rules version 2 and must change together with the peer rules hash.
   waits another 500 ms to reduce simultaneous replacement, and retries back off
   through 3, 6, 12, then 15 seconds while the committed controller's recovery
   window remains open.
+- Channel replacement invalidates both sides of the recovery proof. Old-channel
+  liveness, visibility restoration, and a cached `resumeAvailable` flag cannot
+  declare the new generation restored; it must first authenticate a frame and
+  complete fresh outbound proof on that generation.
 - Network pause stops each authoritative local simulation immediately. Resume
   restores both owners to their newest common rolling checkpoint, bounded to
   three seconds of rollback independently of the longer missing-peer timeout,
@@ -191,8 +195,10 @@ rules version 2 and must change together with the peer rules hash.
   obsolete full-state frames that prolongs the same stall.
 - Peers optionally report their latest accepted snapshot cursor in
   `KEEPALIVE`. Sustained sender/receiver lag steps the regular cadence down from
-  10 to 5 to 2 Hz where the selected diagnostic profile permits it; 30 seconds
-  of healthy feedback restores one step. If a peer advertises a newer sent
+  10 to 5 to 2 to 1 Hz where the selected diagnostic profile permits it; 30
+  seconds of healthy feedback restores one step. Three seconds without
+  outbound proof temporarily suspends periodic state publication while forced
+  state remains available. If a peer advertises a newer sent
   sequence while the receiver's state is stale, a rate-limited targeted
   `STATE_REQUEST` elicits one forced snapshot, including in the zero-periodic
   profile.
@@ -213,6 +219,21 @@ rules version 2 and must change together with the peer rules hash.
   advances the pause epoch and invalidates any in-flight resume before hidden
   peers can enter countdown. Terminal connection loss clears every remaining
   probe.
+- A recently committed peer-clock offset may shorten resume validation to three
+  fresh agreeing samples. Drift outside the RTT-aware tolerance discards all
+  shortcut samples and requires five entirely fresh samples. A resume lifecycle
+  that has current-generation bidirectional proof or valid sample progress gets
+  one same-channel retry; the original controller deadline is never refreshed.
+  Optional and repeatable recovery traffic shares a four-frame/250 ms transport
+  window backed by a bounded priority queue. ACK/gap responses precede presence
+  traffic and repeated presence coalesces. Critical and clock/commit retry state
+  is updated only after real transport admission, never when work was deferred.
+  Forced state may borrow the window so a pause-to-countdown transition cannot
+  discard the authoritative snapshot.
+- Two connection-related pauses within 30 seconds enter a flapping-link mode:
+  recovery requires 2.5 seconds of sustained bidirectional proof and periodic
+  snapshots remain at 1 Hz until the existing 30-second healthy step-up gate.
+  Visibility-only pauses do not activate this mode.
   Results require identical peer hashes, with a 20-second consensus deadline
   and a canonical neutral result on failure.
 - Critical retransmission starts with a conservative one-second timeout, then

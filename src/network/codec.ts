@@ -199,7 +199,9 @@ function isValidPayload(kind: MessageKind, payload: unknown): boolean {
         typeof payload.displayName === "string" &&
         payload.displayName.length <= 128 &&
         typeof payload.resumeAvailable === "boolean" &&
-        isOptionalBoundedString(payload.targetSessionId)
+        isOptionalBoundedString(payload.targetSessionId) &&
+        (payload.transportGeneration === undefined ||
+          isSafeCounter(payload.transportGeneration, false))
       );
     case "STATE_REQUEST":
       return (
@@ -258,6 +260,8 @@ function isValidPayload(kind: MessageKind, payload: unknown): boolean {
       return (
         isBoundedId(payload.activeSessionId) &&
         typeof payload.resumeAvailable === "boolean" &&
+        (payload.transportGeneration === undefined ||
+          isSafeCounter(payload.transportGeneration, false)) &&
         isSafeCounter(payload.lastSnapshotSeq) &&
         (payload.lastAcceptedSnapshotSeq === undefined ||
           isSafeCounter(payload.lastAcceptedSnapshotSeq)) &&

@@ -21,9 +21,12 @@ import {
   CLOCK_SYNC_PROBE_SPACING_MS,
   CLOCK_SYNC_RETRY_BASE_MS,
   CLOCK_SYNC_RETRY_MAX_MS,
+  CLOCK_SYNC_RESUME_SAMPLE_TARGET,
   CLOCK_SYNC_SAMPLE_TARGET,
+  CLOCK_SYNC_TRUST_MAX_AGE_MS,
   MatchTickClock,
   selectClockOffset,
+  selectTrustedResumeClockOffset,
   type ClockSample,
   type MonotonicClock,
 } from "../network/clock";
@@ -42,6 +45,7 @@ import type {
   SnapshotRejectionReason,
 } from "../network/diagnostics";
 import {
+  isCriticalKind,
   type CriticalApplicationOutcome,
   type CriticalKind,
   type MatchConfigPayload,
@@ -57,7 +61,10 @@ import {
   type CriticalAcknowledgement,
 } from "../network/reliability";
 import { RoundTripEstimator } from "../network/rtt-estimator";
-import { NetworkTelemetry } from "../network/telemetry";
+import {
+  NetworkTelemetry,
+  type OutboundDeliveryProofSource,
+} from "../network/telemetry";
 import {
   createPlayerSnapshot,
   RemoteSnapshotStore,
@@ -230,6 +237,35 @@ interface ClockSyncDiagnosticCounters {
   lastPongAtMs: number | null;
 }
 
+interface EnterNetworkPauseOptions {
+  announce: boolean;
+  connectionIssue: boolean;
+  adoptedEpoch?: number;
+  issueStartedMs?: number;
+  pauseTrigger?: PauseTrigger;
+  originalPauseTick?: Tick;
+}
+
+interface QueuedRecoveryFrame {
+  key: string;
+  priority: number;
+  order: number;
+  envelope: RealtimeEnvelope;
+  encoded: Uint8Array;
+}
+
+interface RecoveryFramePolicy {
+  admission: "queued" | "confirmed" | "forced-state";
+  priority: number;
+  key: string;
+  requiresHandshakeReady?: boolean;
+}
+
+interface SendKeepaliveOptions {
+  force: boolean;
+  flushProbe?: boolean;
+}
+
 function cloneStats(stats: PlayerResultStats): PlayerResultStats {
   return { ...stats };
 }
@@ -286,10 +322,26 @@ const SNAPSHOT_DEGRADE_COOLDOWN_MS = 10_000;
 const SNAPSHOT_RECOVER_AFTER_MS = 30_000;
 const MAX_DELIVERY_PROBE_SAMPLES = 64;
 const RESUME_NETWORK_MARGIN_MS = 250;
+const RECOVERY_OPTIONAL_CONTROL_INTERVAL_MS = 500;
+const RECOVERY_DELIVERY_PROBE_MAX_SILENCE_MS = 1_000;
+const RECOVERY_CONTROL_WINDOW_MS = 250;
+const RECOVERY_CONTROL_BURST_FRAMES = 4;
+const RECOVERY_CONTROL_RESERVED_HANDSHAKE_FRAMES = 2;
+const MAX_QUEUED_RECOVERY_FRAMES = 512;
+const RECOVERY_PRESENCE_PRIORITY = 3;
+const REPEATED_PAUSE_WINDOW_MS = 30_000;
+const DEGRADED_RECOVERY_STABILITY_MS = 2_500;
+const DEGRADED_SNAPSHOT_INTERVAL_TICKS = 60;
 
 function snapshotCadenceIntervals(initial: Tick | null): Tick[] {
   if (initial === null) return [];
-  return [...new Set([initial, 12, 30].filter((value) => value >= initial))];
+  return [
+    ...new Set(
+      [initial, 12, 30, DEGRADED_SNAPSHOT_INTERVAL_TICKS].filter(
+        (value) => value >= initial,
+      ),
+    ),
+  ];
 }
 
 export function competitiveConfigHash(
@@ -309,6 +361,7 @@ export function competitiveConfigHash(
 
 export class CompetitiveSession {
   private transport: CompetitiveRealtimeTransport;
+  private transportGeneration = 0;
   private channelConnected = true;
   private locallyHidden = false;
   private started = false;
@@ -317,6 +370,7 @@ export class CompetitiveSession {
   private peerReady = false;
   private peerPresent = false;
   private peerResumeAvailable = true;
+  private peerTransportGeneration: number | null = null;
   private simulation: Simulation | null = null;
   private readonly tickClock = new MatchTickClock(RULES.timing.ticksPerSecond);
   private readonly reliability: CriticalReliability;
@@ -329,8 +383,10 @@ export class CompetitiveSession {
   private snapshotPressureSinceMs: number | null = null;
   private snapshotHealthySinceMs: number | null = null;
   private lastSnapshotCadenceChangeMs: number | null = null;
+  private periodicSnapshotsShed = false;
   private peerSnapshotFeedbackAvailable = false;
   private peerAcceptedLocalSnapshotSeq = 0;
+  private firstSnapshotSentOnTransportGeneration: number | null = null;
   private snapshotSequence = 0;
   private remoteSnapshotsAccepted = 0;
   private remoteSnapshotsRejected = 0;
@@ -340,14 +396,27 @@ export class CompetitiveSession {
   private lastPeerSnapshotSeq: number | null = null;
   private lastSnapshotRejection: SnapshotRejectionReason | null = null;
   private lastKeepaliveSentMs: number;
+  private lastRecoveryControlSentMs: number | null = null;
+  private recoveryControlWindowStartedMs: number | null = null;
+  private recoveryControlWindowGeneration = 0;
+  private recoveryControlSendOrdinal = 0;
+  private recoveryControlFramesSent = 0;
+  private readonly queuedRecoveryFrames = new Map<string, QueuedRecoveryFrame>();
+  private nextQueuedRecoveryFrameOrder = 0;
+  private drainingRecoveryFrames = false;
   private lastStateRequestResponseMs: number | null = null;
   private lastStateRequestSentMs: number | null = null;
   private nextDeliveryProbeSeq = 1;
   private readonly deliveryProbeSentAt = new Map<number, number>();
+  private readonly criticalSentOnTransportGeneration = new Set<number>();
   private lastPeerDeliveryProbeSeq: number | null = null;
   private lastEchoedDeliveryProbeSeq = 0;
   private deliveryProbeMonitoringStartedMs: number | null = null;
   private lastOutboundDeliveryProofMs: number | null = null;
+  private recoveryInboundProven = false;
+  private recoveryOutboundProven = false;
+  private currentPauseProofEventId: string | null = null;
+  private recoveryHandshakeGenerationReady = true;
   private readonly roundTripEstimator = new RoundTripEstimator();
   private scheduledStartLocalMs: number | null = null;
   private config: MatchConfigPayload | null = null;
@@ -355,15 +424,21 @@ export class CompetitiveSession {
   private selectedClockSampleIds: number[] = [];
   private readonly clockSamples = new Map<number, ClockSample>();
   private readonly pingSentAt = new Map<number, number>();
+  private readonly clockPingTransportGeneration = new Map<number, number>();
   private nextClockSampleId = 1;
   private syncPurpose: ClockSyncPurpose | null = null;
   private clockSyncStartedMs: number | null = null;
+  private clockSyncTargetSamples = CLOCK_SYNC_SAMPLE_TARGET;
+  private clockSyncTrustedOffsetMs: number | null = null;
   private clockSyncLastAttemptMs: number | null = null;
   private clockProbeQueueRemaining = 0;
   private clockLastProbeSentMs: number | null = null;
   private clockSyncDeadlineMs: number | null = null;
   private clockSyncRetryAttempt = 0;
   private clockSyncDiagnostic: ClockSyncDiagnosticCounters | null = null;
+  private trustedPeerClockOffsetMs: number | null = null;
+  private trustedPeerClockOffsetAtMs: number | null = null;
+  private sameChannelClockRetryUsed = false;
   private pendingClockCommit: RealtimePayloadMap["CLOCK_COMMIT"] | null = null;
   private clockCommitLastSentMs: number | null = null;
   private clockCommitDeadlineMs: number | null = null;
@@ -377,7 +452,11 @@ export class CompetitiveSession {
   private pendingRemoteStart: PendingRemoteStart | null = null;
   private pauseEpoch = 0;
   private pauseTick: Tick = 0;
+  private incidentOriginalPauseTick: Tick | null = null;
   private pauseRequiresOrientation = false;
+  private lastNetworkPauseStartedMs: number | null = null;
+  private degradedRecoveryUntilMs: number | null = null;
+  private recoveryStabilityMs: number = RULES.network.recoveryStabilityMs;
   private missingSinceMs: number | null = null;
   private localResumeSent = false;
   private remoteResumeReceived = false;
@@ -422,6 +501,7 @@ export class CompetitiveSession {
       initialSnapshotInterval,
     );
     this.telemetry = new NetworkTelemetry({ clock: options.clock });
+    this.noteSnapshotFlow();
     this.allowedSenders = new Set([options.peer.senderId]);
     this.lastKeepaliveSentMs = options.clock.now();
     this.remoteSnapshots.bind(options.peer.senderId, options.peer.sessionId);
@@ -452,7 +532,7 @@ export class CompetitiveSession {
     if (this.started) return;
     this.started = true;
     this.sendHello();
-    this.sendKeepalive(true);
+    this.sendKeepalive({ force: true });
   }
 
   public setReady(ready: boolean): void {
@@ -543,24 +623,48 @@ export class CompetitiveSession {
     // make us fast-forward the entire foreground stall before freezing.
     const inboundMissing = this.liveness.isMissing();
     const outboundMissing = this.isOutboundDeliveryMissing();
+    if (
+      this.phase === "playing" &&
+      this.outboundDeliverySilentForMs() >= RULES.network.unstablePeerMs
+    ) {
+      this.setPeriodicSnapshotsShed(true);
+    }
     if (this.phase === "playing" && (inboundMissing || outboundMissing)) {
-      this.enterNetworkPause(
-        true,
-        true,
-        undefined,
-        this.options.clock.now() - this.linkSilentForMs(),
-        outboundMissing && !inboundMissing
+      this.enterNetworkPause({
+        announce: true,
+        connectionIssue: true,
+        issueStartedMs: this.options.clock.now() - this.linkSilentForMs(),
+        pauseTrigger: outboundMissing && !inboundMissing
           ? "local-delivery-failure"
           : "local-silence",
-      );
+      });
     }
-    this.sendKeepalive(false);
-    this.reliability.pump();
+    // Flush only already-queued acknowledgements/clock replies before new
+    // producers run. Lower-priority presence/state backlog waits until the
+    // current pump has admitted due critical and handshake work.
+    if (this.phase === "network-pause") this.drainQueuedRecoveryFrames(1);
+    const recovering = this.phase === "network-pause";
+    if (!recovering) this.sendKeepalive({ force: false });
+    if (recovering) {
+      this.reliability.pump(
+        Math.max(
+          0,
+          this.recoveryControlSlotsAvailable() -
+            RECOVERY_CONTROL_RESERVED_HANDSHAKE_FRAMES,
+        ),
+      );
+    } else {
+      this.reliability.pump();
+    }
     this.telemetry.noteCriticalPending(this.reliability.pendingCount);
     this.maybeCommitLocalStart();
     this.pumpClockSync();
     this.pumpClockCommit();
     this.pumpConfigAck();
+    if (this.phase === "network-pause") {
+      this.sendKeepalive({ force: false });
+      this.drainQueuedRecoveryFrames();
+    }
     this.maybeAdaptSnapshotCadence();
 
     if (this.phase === "finished") {
@@ -625,13 +729,14 @@ export class CompetitiveSession {
   public disconnect(detachReason: DetachReason = "unknown"): void {
     if (!this.channelConnected) return;
     this.channelConnected = false;
+    this.queuedRecoveryFrames.clear();
     this.reliability.setConnected(false);
     this.telemetry.noteChannelDetached();
     const event: NetworkDiagnosticEventInput = {
       kind: "channel-detached",
       detachReason,
       ...(this.pauseEpoch === 0 ? {} : { pauseEpoch: this.pauseEpoch }),
-      telemetry: this.telemetry.snapshot(),
+      telemetry: this.captureTelemetry(),
     };
     if (this.diagnosticIncidentId === null && detachReason === "startup-failure") {
       this.options.diagnostics?.begin(event, this.diagnosticContext());
@@ -656,13 +761,39 @@ export class CompetitiveSession {
     }
     this.channelConnected = true;
     this.reliability.setConnected(true);
+    const replacingPausedLifecycle = this.phase === "network-pause";
+    if (replacingPausedLifecycle) {
+      this.invalidateResumeSynchronization();
+    }
+    this.peerResumeAvailable = false;
+    this.resetRecoveryProofEpoch();
+    this.queuedRecoveryFrames.clear();
+    if (!replacingPausedLifecycle && this.syncPurpose !== null) {
+      this.clockSamples.clear();
+      this.pingSentAt.clear();
+      this.clockProbeQueueRemaining = this.clockSyncTargetSamples;
+      this.clockSyncLastAttemptMs = null;
+      this.clockLastProbeSentMs = null;
+      if (this.clockSyncDiagnostic !== null) {
+        this.clockSyncDiagnostic.pingsSent = 0;
+        this.clockSyncDiagnostic.pongsReceived = 0;
+        this.clockSyncDiagnostic.pongOutcomes = {
+          accepted: 0,
+          unknownSample: 0,
+          staleEcho: 0,
+          duplicate: 0,
+          invalidTiming: 0,
+        };
+        this.clockSyncDiagnostic.lastPongAtMs = null;
+      }
+    }
     this.telemetry.noteChannelAttached();
     this.recordDiagnostic({
       kind: "channel-attached",
       ...(this.pauseEpoch === 0 ? {} : { pauseEpoch: this.pauseEpoch }),
     });
     this.sendHello();
-    this.sendKeepalive(true);
+    this.sendKeepalive({ force: true });
   }
 
   public noteTransportRecoveryFailure(attempt?: number): void {
@@ -680,7 +811,7 @@ export class CompetitiveSession {
     if (hidden) {
       if (wasHidden) return;
       this.connectionIncidentStartedMs = null;
-      this.enterNetworkPause(true, false);
+      this.enterNetworkPause({ announce: true, connectionIssue: false });
     } else if (this.phase === "network-pause") {
       if (this.config === null && this.simulation === null) {
         this.pauseEpoch = 0;
@@ -695,7 +826,7 @@ export class CompetitiveSession {
       if (!this.liveness.isMissing() && this.peerResumeAvailable) {
         this.notePeerReturn();
       }
-      this.sendKeepalive(true);
+      this.sendKeepalive({ force: true, flushProbe: true });
     }
   }
 
@@ -786,12 +917,30 @@ export class CompetitiveSession {
   }
 
   private installListener(): void {
-    this.transport.setListener((data) => this.receiveBytes(data));
+    const generation = this.transportGeneration + 1;
+    this.transportGeneration = generation;
+    this.transport.setListener((data) => {
+      if (!this.channelConnected || generation !== this.transportGeneration) {
+        return;
+      }
+      this.receiveBytes(data);
+    });
   }
 
   private setPhase(phase: CompetitivePhase): void {
     if (this.phase === phase) return;
+    const previous = this.phase;
     this.phase = phase;
+    if (phase === "network-pause") {
+      this.recoveryControlWindowStartedMs = this.options.clock.now();
+      this.recoveryControlWindowGeneration += 1;
+      this.recoveryControlFramesSent = 0;
+    } else if (previous === "network-pause") {
+      this.queuedRecoveryFrames.clear();
+      this.recoveryControlWindowStartedMs = null;
+      this.recoveryControlWindowGeneration += 1;
+      this.recoveryControlFramesSent = 0;
+    }
     this.options.onPhaseChange?.(phase);
   }
 
@@ -869,24 +1018,328 @@ export class CompetitiveSession {
       displayName: this.options.identity.displayName,
       targetSessionId: this.options.peer.sessionId,
       resumeAvailable: !this.locallyHidden,
+      transportGeneration: this.transportGeneration,
     });
   }
 
-  private sendEncoded(envelope: RealtimeEnvelope): void {
-    if (!this.channelConnected) return;
+  private sendEncoded(envelope: RealtimeEnvelope): boolean {
+    if (!this.channelConnected) return false;
     const encoded = encodeEnvelope(envelope);
+    if (this.phase === "network-pause") {
+      const policy = this.recoveryFramePolicy(envelope);
+      if (
+        policy.requiresHandshakeReady === true &&
+        !this.recoveryHandshakeGenerationReady
+      ) return false;
+      // Periodic snapshots are suspended while paused, so every recovery
+      // SNAPSHOT is an authoritative/requested state frame. It may borrow the
+      // narrow control window instead of being cleared at the phase boundary.
+      if (policy.admission === "forced-state") {
+        this.transmitEncoded(envelope, encoded);
+        return true;
+      }
+      if (policy.admission === "confirmed") {
+        if (this.recoveryControlSlotsAvailable() === 0) return false;
+        this.transmitEncoded(envelope, encoded);
+        return true;
+      }
+      this.enqueueRecoveryFrame(envelope, encoded, policy);
+      if (policy.priority <= 1) {
+        this.drainQueuedRecoveryFrames(1);
+      }
+      return true;
+    }
+    this.transmitEncoded(envelope, encoded);
+    return true;
+  }
+
+  private enqueueRecoveryFrame(
+    envelope: RealtimeEnvelope,
+    encoded: Uint8Array,
+    policy: RecoveryFramePolicy,
+  ): void {
+    const existing = this.queuedRecoveryFrames.get(policy.key);
+    if (existing !== undefined) {
+      if (
+        existing.envelope.kind === "KEEPALIVE" &&
+        envelope.kind === "KEEPALIVE"
+      ) {
+        const merged: RealtimeEnvelope<"KEEPALIVE"> = {
+          ...envelope,
+          payload: {
+            ...envelope.payload,
+            ...(envelope.payload.probeSeq !== undefined ||
+              existing.envelope.payload.probeSeq === undefined
+              ? {}
+              : { probeSeq: existing.envelope.payload.probeSeq }),
+            ...(envelope.payload.echoProbeSeq !== undefined ||
+              existing.envelope.payload.echoProbeSeq === undefined
+              ? {}
+              : { echoProbeSeq: existing.envelope.payload.echoProbeSeq }),
+          },
+        };
+        existing.envelope = merged;
+        existing.encoded = encodeEnvelope(merged);
+      } else {
+        existing.envelope = envelope;
+        existing.encoded = encoded;
+      }
+      existing.priority = policy.priority;
+      return;
+    }
+    if (this.queuedRecoveryFrames.size >= MAX_QUEUED_RECOVERY_FRAMES) {
+      throw new RangeError("Recovery control queue capacity exceeded");
+    }
+    this.queuedRecoveryFrames.set(policy.key, {
+      key: policy.key,
+      priority: policy.priority,
+      order: this.nextQueuedRecoveryFrameOrder,
+      envelope,
+      encoded,
+    });
+    this.nextQueuedRecoveryFrameOrder += 1;
+  }
+
+  private drainQueuedRecoveryFrames(
+    maxPriority = Number.POSITIVE_INFINITY,
+    reservedSlots = 0,
+  ): void {
+    if (
+      this.drainingRecoveryFrames ||
+      this.phase !== "network-pause" ||
+      !this.channelConnected
+    ) return;
+    this.drainingRecoveryFrames = true;
+    try {
+      while (
+        this.phase === "network-pause" &&
+        this.recoveryControlSlotsAvailable() > reservedSlots
+      ) {
+        const next = [...this.queuedRecoveryFrames.values()]
+          .filter((frame) => frame.priority <= maxPriority)
+          .sort(
+            (left, right) =>
+              left.priority - right.priority || left.order - right.order,
+          )[0];
+        if (next === undefined) return;
+        this.queuedRecoveryFrames.delete(next.key);
+        try {
+          this.transmitEncoded(next.envelope, next.encoded);
+        } catch (error) {
+          if (
+            this.phase === "network-pause" &&
+            this.channelConnected &&
+            !this.queuedRecoveryFrames.has(next.key)
+          ) {
+            this.queuedRecoveryFrames.set(next.key, next);
+          }
+          throw error;
+        }
+      }
+    } finally {
+      this.drainingRecoveryFrames = false;
+    }
+  }
+
+  private recoveryFramePolicy(
+    envelope: RealtimeEnvelope,
+  ): RecoveryFramePolicy {
+    if (isCriticalKind(envelope.kind)) {
+      return {
+        admission: "confirmed",
+        priority: 1,
+        key: `${envelope.kind}:${envelope.seq ?? 0}`,
+        requiresHandshakeReady:
+          envelope.kind === "RESUME_STATE" ||
+          envelope.kind === "START" ||
+          envelope.kind === "START_COMMIT",
+      };
+    }
+    switch (envelope.kind) {
+      case "ACK":
+        return {
+          admission: "queued",
+          priority: 0,
+          key: `ACK:${envelope.payload.seqs.join(",")}`,
+        };
+      case "GAP_REQUEST":
+        return {
+          admission: "queued",
+          priority: 0,
+          key: `GAP_REQUEST:${envelope.payload.fromSeq}:${envelope.payload.throughSeq}`,
+        };
+      case "CLOCK_PING":
+        return {
+          admission: "confirmed",
+          priority: 2,
+          key: `CLOCK_PING:${envelope.payload.sampleId}`,
+        };
+      case "CLOCK_PONG":
+        return {
+          admission: "queued",
+          priority: 1,
+          key: `CLOCK_PONG:${envelope.payload.sampleId}`,
+        };
+      case "CLOCK_COMMIT":
+      case "CONFIG_ACK":
+        return {
+          admission: "confirmed",
+          priority: 1,
+          key: envelope.kind,
+        };
+      case "SNAPSHOT":
+        return {
+          admission: "forced-state",
+          priority: 4,
+          key: "SNAPSHOT",
+        };
+      default:
+        return {
+          admission: "queued",
+          priority: RECOVERY_PRESENCE_PRIORITY,
+          key: envelope.kind,
+        };
+    }
+  }
+
+  private transmitEncoded(
+    envelope: RealtimeEnvelope,
+    encoded: Uint8Array,
+  ): void {
+    const recoveryFrame = this.phase === "network-pause";
+    let stagedCriticalSequence: number | null = null;
+    let criticalSequenceWasCurrent = false;
+    const previousFirstSnapshotSent =
+      this.firstSnapshotSentOnTransportGeneration;
+    let stagedDeliveryProbeSequence: number | null = null;
+    let stagedDeliveryProbeSentAt: number | null = null;
+    let previousDeliveryProbeSentAt: number | undefined;
+    let deliveryProbeAttempt: ReturnType<
+      NetworkTelemetry["noteDeliveryProbeSent"]
+    > | null = null;
+    const clockDiagnostic =
+      envelope.kind === "CLOCK_PING" &&
+        this.pingSentAt.has(envelope.payload.sampleId) &&
+        this.clockPingTransportGeneration.get(envelope.payload.sampleId) ===
+          this.transportGeneration
+        ? this.clockSyncDiagnostic
+        : null;
+    if (isCriticalKind(envelope.kind) && envelope.seq !== undefined) {
+      // Stage before the synchronous transport boundary so an immediate ACK
+      // can prove this attachment rather than being mistaken for a replay from
+      // an older channel generation.
+      stagedCriticalSequence = envelope.seq;
+      criticalSequenceWasCurrent =
+        this.criticalSentOnTransportGeneration.has(envelope.seq);
+      this.criticalSentOnTransportGeneration.add(envelope.seq);
+    } else if (envelope.kind === "SNAPSHOT") {
+      this.firstSnapshotSentOnTransportGeneration ??=
+        envelope.payload.snapshotSeq;
+    } else if (
+      envelope.kind === "KEEPALIVE" &&
+      envelope.payload.probeSeq !== undefined
+    ) {
+      stagedDeliveryProbeSequence = envelope.payload.probeSeq;
+      previousDeliveryProbeSentAt = this.deliveryProbeSentAt.get(
+        stagedDeliveryProbeSequence,
+      );
+      stagedDeliveryProbeSentAt = this.options.clock.now();
+      this.deliveryProbeSentAt.set(
+        stagedDeliveryProbeSequence,
+        stagedDeliveryProbeSentAt,
+      );
+      deliveryProbeAttempt = this.telemetry.noteDeliveryProbeSent(
+        stagedDeliveryProbeSequence,
+      );
+    }
+    let recoveryWindowGeneration = this.recoveryControlWindowGeneration;
+    let recoveryControlSendOrdinal: number | null = null;
+    let previousLastRecoveryControlSentMs: number | null = null;
+    if (recoveryFrame) {
+      const now = this.options.clock.now();
+      this.noteRecoveryControlSent(now);
+      recoveryWindowGeneration = this.recoveryControlWindowGeneration;
+      if (envelope.kind !== "SNAPSHOT") {
+        previousLastRecoveryControlSentMs = this.lastRecoveryControlSentMs;
+        this.recoveryControlSendOrdinal += 1;
+        recoveryControlSendOrdinal = this.recoveryControlSendOrdinal;
+        this.lastRecoveryControlSentMs = now;
+      }
+    }
     // Stage before crossing the synchronous transport boundary: an in-memory
     // or Webxdc host may deliver a peer response reentrantly and reset the
     // since-authenticated telemetry window before send() returns.
-    this.telemetry.noteSent(encoded.byteLength, envelope.kind);
+    const sendAttempt = this.telemetry.noteSent(
+      encoded.byteLength,
+      envelope.kind,
+    );
+    if (clockDiagnostic !== null) clockDiagnostic.pingsSent += 1;
     try {
       this.transport.send(encoded);
     } catch (error) {
-      this.telemetry.noteSendFailed(encoded.byteLength, envelope.kind);
+      this.telemetry.noteSendFailed(
+        encoded.byteLength,
+        envelope.kind,
+        sendAttempt,
+      );
+      if (clockDiagnostic !== null) clockDiagnostic.pingsSent -= 1;
+      if (
+        recoveryFrame &&
+        recoveryWindowGeneration === this.recoveryControlWindowGeneration
+      ) {
+        this.recoveryControlFramesSent = Math.max(
+          0,
+          this.recoveryControlFramesSent - 1,
+        );
+      }
+      if (
+        recoveryControlSendOrdinal !== null &&
+        recoveryWindowGeneration === this.recoveryControlWindowGeneration &&
+        recoveryControlSendOrdinal === this.recoveryControlSendOrdinal
+      ) {
+        this.lastRecoveryControlSentMs = previousLastRecoveryControlSentMs;
+      }
+      if (
+        stagedCriticalSequence !== null &&
+        !criticalSequenceWasCurrent
+      ) {
+        this.criticalSentOnTransportGeneration.delete(stagedCriticalSequence);
+      }
+      this.firstSnapshotSentOnTransportGeneration =
+        previousFirstSnapshotSent;
+      if (
+        stagedDeliveryProbeSequence !== null &&
+        stagedDeliveryProbeSentAt !== null &&
+        this.deliveryProbeSentAt.get(stagedDeliveryProbeSequence) ===
+          stagedDeliveryProbeSentAt
+      ) {
+        if (previousDeliveryProbeSentAt === undefined) {
+          this.deliveryProbeSentAt.delete(stagedDeliveryProbeSequence);
+        } else {
+          this.deliveryProbeSentAt.set(
+            stagedDeliveryProbeSequence,
+            previousDeliveryProbeSentAt,
+          );
+        }
+      }
+      if (deliveryProbeAttempt !== null) {
+        this.telemetry.noteDeliveryProbeSendFailed(deliveryProbeAttempt);
+      }
       throw error;
     }
+    this.trimDeliveryProbeSamples();
     this.noteSuccessfulStartSend(envelope);
     this.telemetry.noteCriticalPending(this.reliability.pendingCount);
+  }
+
+  private trimDeliveryProbeSamples(): void {
+    while (this.deliveryProbeSentAt.size > MAX_DELIVERY_PROBE_SAMPLES) {
+      const oldest = this.deliveryProbeSentAt.keys().next().value as
+        | number
+        | undefined;
+      if (oldest === undefined) return;
+      this.deliveryProbeSentAt.delete(oldest);
+    }
   }
 
   private noteSuccessfulStartSend(envelope: RealtimeEnvelope): void {
@@ -903,7 +1356,31 @@ export class CompetitiveSession {
   private noteCriticalAcknowledged(
     acknowledgement: CriticalAcknowledgement,
   ): void {
-    this.noteOutboundDeliveryProof();
+    if (this.criticalSentOnTransportGeneration.delete(
+      acknowledgement.sequence,
+    )) {
+      const source = acknowledgement.source === "ack"
+        ? "critical-ack"
+        : "critical-cursor";
+      // ACKs and cumulative cursors have no per-transmission nonce. Only the
+      // NETWORK_PAUSE event allocated for this exact recovery epoch is
+      // unambiguous: its event ID did not exist on a departed channel. Other
+      // critical evidence remains useful telemetry but cannot unlock recovery.
+      if (
+        acknowledgement.kind === "NETWORK_PAUSE" &&
+        acknowledgement.eventId === this.currentPauseProofEventId
+      ) {
+        this.noteOutboundDeliveryProof(source, false, {
+          cursor: acknowledgement.sequence,
+        });
+      } else {
+        this.telemetry.noteOutboundDeliveryProof(
+          source,
+          { cursor: acknowledgement.sequence },
+          false,
+        );
+      }
+    }
     const pending = this.pendingLocalStart;
     if (pending === null) return;
     if (
@@ -936,13 +1413,12 @@ export class CompetitiveSession {
     }
     if (outcome === "rejected") {
       this.clearPendingStartLifecycle();
-      this.enterNetworkPause(
-        true,
-        true,
-        undefined,
-        this.options.clock.now(),
-        "peer-network-pause",
-      );
+      this.enterNetworkPause({
+        announce: true,
+        connectionIssue: true,
+        issueStartedMs: this.options.clock.now(),
+        pauseTrigger: "peer-network-pause",
+      });
       return;
     }
     if (outcome === "expired") {
@@ -959,7 +1435,7 @@ export class CompetitiveSession {
   private sendEnvelope<K extends MessageKind>(
     kind: K,
     payload: RealtimePayloadMap[K],
-  ): void {
+  ): boolean {
     const envelope = {
       protocol: 1,
       matchId: this.options.matchId,
@@ -970,7 +1446,7 @@ export class CompetitiveSession {
       sentAtMonotonicMs: this.options.clock.now(),
       payload,
     } as RealtimeEnvelope<K>;
-    this.sendEncoded(envelope);
+    return this.sendEncoded(envelope);
   }
 
   private receiveBytes(data: Uint8Array): void {
@@ -991,7 +1467,19 @@ export class CompetitiveSession {
 
     const peerTrafficObserved = this.liveness.observe(envelope);
     if (peerTrafficObserved) {
-      this.telemetry.noteAuthenticatedReceived(data.byteLength);
+      this.telemetry.noteAuthenticatedReceived(data.byteLength, envelope.kind);
+    }
+    if (
+      peerTrafficObserved &&
+      (envelope.kind === "HELLO" || envelope.kind === "KEEPALIVE") &&
+      !this.observePeerTransportGeneration(
+        envelope.payload.transportGeneration,
+      )
+    ) {
+      return;
+    }
+    if (peerTrafficObserved && this.phase === "network-pause") {
+      this.recoveryInboundProven = true;
     }
     if (peerTrafficObserved) this.peerPresent = true;
     if (envelope.kind === "KEEPALIVE" && peerTrafficObserved) {
@@ -1004,15 +1492,21 @@ export class CompetitiveSession {
       if (keepalive.payload.lastAcceptedSnapshotSeq !== undefined) {
         if (
           keepalive.payload.lastAcceptedSnapshotSeq >
-          this.peerAcceptedLocalSnapshotSeq
+            this.peerAcceptedLocalSnapshotSeq &&
+          this.firstSnapshotSentOnTransportGeneration !== null &&
+          keepalive.payload.lastAcceptedSnapshotSeq >=
+            this.firstSnapshotSentOnTransportGeneration
         ) {
-          this.noteOutboundDeliveryProof();
+          this.noteOutboundDeliveryProof("snapshot-cursor", false, {
+            cursor: keepalive.payload.lastAcceptedSnapshotSeq,
+          });
         }
         this.peerSnapshotFeedbackAvailable = true;
         this.peerAcceptedLocalSnapshotSeq = Math.max(
           this.peerAcceptedLocalSnapshotSeq,
           keepalive.payload.lastAcceptedSnapshotSeq,
         );
+        this.noteSnapshotFlow();
       }
       this.observeDeliveryProbe(keepalive.payload);
       for (const cursor of keepalive.payload.inboundCritical) {
@@ -1059,8 +1553,53 @@ export class CompetitiveSession {
         this.acceptRemoteSnapshot(envelope as RealtimeEnvelope<"SNAPSHOT">);
         return;
       default:
+        if (
+          this.phase === "network-pause" &&
+          !this.recoveryHandshakeGenerationReady &&
+          (envelope.kind === "RESUME_STATE" ||
+            envelope.kind === "START" ||
+            envelope.kind === "START_COMMIT")
+        ) {
+          // Leave the reliable frame unacknowledged until this attachment has
+          // completed fresh clock synchronization. The sender will retry it;
+          // applying a prior-generation commit here could resume one seat
+          // before the replacement has proven a bidirectional path.
+          return;
+        }
         this.reliability.receive(envelope);
     }
+  }
+
+  private observePeerTransportGeneration(
+    generation: number | undefined,
+  ): boolean {
+    // Older peers omit this additive field. They remain interoperable, but
+    // cannot provide the stronger replacement-generation signal.
+    if (generation === undefined) return true;
+    const previous = this.peerTransportGeneration;
+    if (previous !== null && generation < previous) return false;
+    if (previous === null || generation === previous) {
+      this.peerTransportGeneration = generation;
+      return true;
+    }
+
+    this.peerTransportGeneration = generation;
+    if (this.phase === "network-pause") {
+      // A higher peer generation is an idempotent replacement signal. Preserve
+      // reliable resume progress, but invalidate transient proof/clock state so
+      // no prepared commit can cross onto the new path prematurely.
+      this.invalidateResumeSynchronization();
+      this.resetRecoveryProofEpoch();
+      this.recoveryInboundProven = true;
+      this.sendKeepalive({ force: true, flushProbe: true });
+    } else if (
+      this.options.seat === "a" &&
+      this.syncPurpose === "initial"
+    ) {
+      this.clearClockSyncLifecycle();
+      this.beginClockSync("initial");
+    }
+    return true;
   }
 
   private receiveHello(envelope: RealtimeEnvelope<"HELLO">): void {
@@ -1146,11 +1685,31 @@ export class CompetitiveSession {
     const now = this.options.clock.now();
     this.syncPurpose = purpose;
     this.clockSyncStartedMs = now;
-    this.clockSyncDeadlineMs = now + RULES.network.missingPeerMs;
+    const lifecycleDeadlineMs = now + RULES.network.missingPeerMs;
+    const controllerDeadlineMs = this.connectionIncidentStartedMs === null
+      ? null
+      : this.connectionIncidentStartedMs +
+        RULES.network.controllerReconnectGraceMs;
+    this.clockSyncDeadlineMs =
+      purpose === "resume" && controllerDeadlineMs !== null
+        ? Math.min(lifecycleDeadlineMs, controllerDeadlineMs)
+        : lifecycleDeadlineMs;
     this.clockSamples.clear();
     this.pingSentAt.clear();
+    this.clockPingTransportGeneration.clear();
     this.clockSyncRetryAttempt = 0;
-    this.clockProbeQueueRemaining = CLOCK_SYNC_SAMPLE_TARGET;
+    const trustedOffsetAvailable =
+      purpose === "resume" &&
+      this.trustedPeerClockOffsetMs !== null &&
+      this.trustedPeerClockOffsetAtMs !== null &&
+      now - this.trustedPeerClockOffsetAtMs <= CLOCK_SYNC_TRUST_MAX_AGE_MS;
+    this.clockSyncTargetSamples = trustedOffsetAvailable
+      ? CLOCK_SYNC_RESUME_SAMPLE_TARGET
+      : CLOCK_SYNC_SAMPLE_TARGET;
+    this.clockSyncTrustedOffsetMs = trustedOffsetAvailable
+      ? this.trustedPeerClockOffsetMs
+      : null;
+    this.clockProbeQueueRemaining = this.clockSyncTargetSamples;
     this.clockLastProbeSentMs = null;
     this.clockSyncDiagnostic = {
       pingsSent: 0,
@@ -1178,7 +1737,18 @@ export class CompetitiveSession {
     ) {
       if (this.syncPurpose === "resume" && this.phase === "network-pause") {
         this.recordClockSyncTimeout();
-        this.restartResumeHandshake();
+        const controllerDeadlineMs = this.connectionIncidentStartedMs === null
+          ? null
+          : this.connectionIncidentStartedMs +
+            RULES.network.controllerReconnectGraceMs;
+        const canRetrySameChannel =
+          !this.sameChannelClockRetryUsed &&
+          (this.clockSamples.size > 0 ||
+            (this.recoveryInboundProven && this.recoveryOutboundProven)) &&
+          (controllerDeadlineMs === null ||
+            this.options.clock.now() < controllerDeadlineMs);
+        if (canRetrySameChannel) this.sameChannelClockRetryUsed = true;
+        this.restartResumeHandshake(!canRetrySameChannel);
       } else if (this.syncPurpose === "initial" && this.phase === "synchronizing") {
         this.recordClockSyncTimeout();
         this.returnToReadinessAfterInitialSyncTimeout();
@@ -1200,7 +1770,7 @@ export class CompetitiveSession {
           this.clockProbeQueueRemaining !== 1 ||
           this.clockSyncStartedMs === null ||
           this.options.clock.now() >=
-            this.clockSyncStartedMs + RULES.network.recoveryStabilityMs)
+            this.clockSyncStartedMs + this.requiredRecoveryStabilityMs())
       ) {
         this.sendNextClockProbe();
       }
@@ -1217,7 +1787,7 @@ export class CompetitiveSession {
     }
     this.clockSyncRetryAttempt += 1;
     this.clockProbeQueueRemaining =
-      CLOCK_SYNC_SAMPLE_TARGET - this.clockSamples.size;
+      this.clockSyncTargetSamples - this.clockSamples.size;
     this.clockSyncLastAttemptMs = null;
     this.clockLastProbeSentMs = null;
     this.sendNextClockProbe();
@@ -1225,21 +1795,30 @@ export class CompetitiveSession {
 
   private sendNextClockProbe(): void {
     if (this.syncPurpose === null || this.clockProbeQueueRemaining <= 0) return;
+    if (!this.canSendOptionalRecoveryControl()) return;
     const coordinatorSentMs = this.options.clock.now();
     const sampleId = this.nextClockSampleId;
     const previousLastProbeSentMs = this.clockLastProbeSentMs;
     const previousLastAttemptMs = this.clockSyncLastAttemptMs;
     this.nextClockSampleId += 1;
     this.pingSentAt.set(sampleId, coordinatorSentMs);
+    this.clockPingTransportGeneration.set(sampleId, this.transportGeneration);
     this.clockProbeQueueRemaining -= 1;
     this.clockLastProbeSentMs = coordinatorSentMs;
     if (this.clockProbeQueueRemaining === 0) {
       this.clockSyncLastAttemptMs = coordinatorSentMs;
     }
     try {
-      this.sendClockPing({ sampleId, coordinatorSentMs });
+      if (!this.sendClockPing({ sampleId, coordinatorSentMs })) {
+        this.pingSentAt.delete(sampleId);
+        this.clockPingTransportGeneration.delete(sampleId);
+        this.clockProbeQueueRemaining += 1;
+        this.clockLastProbeSentMs = previousLastProbeSentMs;
+        this.clockSyncLastAttemptMs = previousLastAttemptMs;
+      }
     } catch (error) {
       this.pingSentAt.delete(sampleId);
+      this.clockPingTransportGeneration.delete(sampleId);
       this.clockProbeQueueRemaining += 1;
       this.clockLastProbeSentMs = previousLastProbeSentMs;
       this.clockSyncLastAttemptMs = previousLastAttemptMs;
@@ -1247,15 +1826,8 @@ export class CompetitiveSession {
     }
   }
 
-  private sendClockPing(ping: RealtimePayloadMap["CLOCK_PING"]): void {
-    const diagnostic = this.clockSyncDiagnostic;
-    if (diagnostic !== null) diagnostic.pingsSent += 1;
-    try {
-      this.sendEnvelope("CLOCK_PING", ping);
-    } catch (error) {
-      if (diagnostic !== null) diagnostic.pingsSent -= 1;
-      throw error;
-    }
+  private sendClockPing(ping: RealtimePayloadMap["CLOCK_PING"]): boolean {
+    return this.sendEnvelope("CLOCK_PING", ping);
   }
 
   private clockSyncRetryDelayMs(): number {
@@ -1268,12 +1840,15 @@ export class CompetitiveSession {
   private clearClockSyncLifecycle(): void {
     this.syncPurpose = null;
     this.clockSyncStartedMs = null;
+    this.clockSyncTargetSamples = CLOCK_SYNC_SAMPLE_TARGET;
+    this.clockSyncTrustedOffsetMs = null;
     this.clockSyncLastAttemptMs = null;
     this.clockProbeQueueRemaining = 0;
     this.clockLastProbeSentMs = null;
     this.clockSyncDeadlineMs = null;
     this.clockSamples.clear();
     this.pingSentAt.clear();
+    this.clockPingTransportGeneration.clear();
     this.clockSyncRetryAttempt = 0;
     this.clockSyncDiagnostic = null;
   }
@@ -1305,7 +1880,7 @@ export class CompetitiveSession {
     const now = this.options.clock.now();
     const clockSync: ClockSyncTimeoutSummary = {
       purpose,
-      targetSamples: CLOCK_SYNC_SAMPLE_TARGET,
+      targetSamples: this.clockSyncTargetSamples,
       acceptedSamples: counters.pongOutcomes.accepted,
       retryRounds: this.clockSyncRetryAttempt,
       pingsSent: counters.pingsSent,
@@ -1325,7 +1900,7 @@ export class CompetitiveSession {
       kind: "clock-sync-timeout",
       clockSync,
       ...(purpose === "resume" ? { pauseEpoch: this.pauseEpoch } : {}),
-      telemetry: this.telemetry.snapshot(),
+      telemetry: this.captureTelemetry(),
     };
     if (purpose === "initial") {
       diagnostics.begin(event, this.diagnosticContext());
@@ -1360,7 +1935,11 @@ export class CompetitiveSession {
       diagnostic.lastPongAtMs = now;
     }
     const sentAt = this.pingSentAt.get(envelope.payload.sampleId);
-    if (sentAt === undefined) {
+    if (
+      sentAt === undefined ||
+      this.clockPingTransportGeneration.get(envelope.payload.sampleId) !==
+        this.transportGeneration
+    ) {
       if (diagnostic !== null) diagnostic.pongOutcomes.unknownSample += 1;
       return;
     }
@@ -1386,7 +1965,9 @@ export class CompetitiveSession {
       return;
     }
     if (diagnostic !== null) diagnostic.pongOutcomes.accepted += 1;
-    this.noteOutboundDeliveryProof();
+    this.noteOutboundDeliveryProof("clock-pong", false, {
+      sampleId: sample.sampleId,
+    });
     this.observeRoundTrip(sample.roundTripMs);
     this.clockSamples.set(sample.sampleId, sample);
     this.maybeFinishClockSync();
@@ -1394,23 +1975,66 @@ export class CompetitiveSession {
 
   private maybeFinishClockSync(): boolean {
     if (
-      this.clockSamples.size !== CLOCK_SYNC_SAMPLE_TARGET ||
+      this.clockSamples.size !== this.clockSyncTargetSamples ||
       this.syncPurpose === null
     ) return false;
+    if (
+      this.clockSyncTrustedOffsetMs !== null &&
+      selectTrustedResumeClockOffset(
+        [...this.clockSamples.values()],
+        this.clockSyncTrustedOffsetMs,
+      ) === null
+    ) {
+      // The clocks no longer agree with the committed offset. Keep the same
+      // bounded lifecycle, discard the trust shortcut, and gather a full fresh
+      // five-sample selection before allowing recovery to proceed.
+      this.clockSyncTrustedOffsetMs = null;
+      this.clockSyncTargetSamples = CLOCK_SYNC_SAMPLE_TARGET;
+      this.clockSamples.clear();
+      this.pingSentAt.clear();
+      this.clockPingTransportGeneration.clear();
+      this.clockProbeQueueRemaining = CLOCK_SYNC_SAMPLE_TARGET;
+      this.clockSyncLastAttemptMs = null;
+      if (this.clockSyncDiagnostic !== null) {
+        // The fallback is a new five-sample selection phase. Reset its sample
+        // accounting so timeout diagnostics remain internally consistent
+        // (acceptedSamples must never exceed targetSamples) while retaining the
+        // original lifecycle start and absolute controller deadline.
+        this.clockSyncDiagnostic.pingsSent = 0;
+        this.clockSyncDiagnostic.pongsReceived = 0;
+        this.clockSyncDiagnostic.pongOutcomes = {
+          accepted: 0,
+          unknownSample: 0,
+          staleEcho: 0,
+          duplicate: 0,
+          invalidTiming: 0,
+        };
+        this.clockSyncDiagnostic.lastPongAtMs = null;
+      }
+      return false;
+    }
     if (this.syncPurpose === "resume") {
       const startedAtMs = this.clockSyncStartedMs;
       const now = this.options.clock.now();
+      const stabilityMs = this.requiredRecoveryStabilityMs();
       if (
         startedAtMs === null ||
-        now - startedAtMs < RULES.network.recoveryStabilityMs ||
+        now - startedAtMs < stabilityMs ||
         now - this.liveness.silentForMs() <
-          startedAtMs + RULES.network.recoveryStabilityMs ||
+          startedAtMs + stabilityMs ||
         this.lastOutboundDeliveryProofMs === null ||
         this.lastOutboundDeliveryProofMs <
-          startedAtMs + RULES.network.recoveryStabilityMs
+          startedAtMs + stabilityMs
       ) {
         return false;
       }
+      // CLOCK_COMMIT and RESUME_STATE form one ordered decision. Wait until
+      // the shared recovery window can admit both instead of letting an
+      // optional timer burst split them across a congested host queue.
+      if (
+        this.recoveryControlSlotsAvailable() <
+          RECOVERY_CONTROL_RESERVED_HANDSHAKE_FRAMES
+      ) return false;
     }
     this.finishClockSync();
     return true;
@@ -1419,9 +2043,19 @@ export class CompetitiveSession {
   private finishClockSync(): void {
     const purpose = this.syncPurpose;
     if (purpose === null) return;
-    const selected = selectClockOffset([...this.clockSamples.values()]);
+    const samples = [...this.clockSamples.values()];
+    const selected = this.clockSyncTrustedOffsetMs === null
+      ? selectClockOffset(samples)
+      : selectTrustedResumeClockOffset(
+          samples,
+          this.clockSyncTrustedOffsetMs,
+        );
+    if (selected === null) return;
+    this.trustedPeerClockOffsetMs = selected.offsetPeerMinusCoordinatorMs;
+    this.trustedPeerClockOffsetAtMs = this.options.clock.now();
     this.clockOffsetMs = 0;
     this.selectedClockSampleIds = [...selected.selectedSampleIds];
+    if (purpose === "resume") this.recoveryHandshakeGenerationReady = true;
     this.clearClockSyncLifecycle();
     this.pendingClockCommit = {
       offsetPeerMinusCoordinatorMs: selected.offsetPeerMinusCoordinatorMs,
@@ -1433,10 +2067,13 @@ export class CompetitiveSession {
     else this.sendResumeState();
   }
 
-  private sendClockCommit(): void {
-    if (this.pendingClockCommit === null) return;
+  private sendClockCommit(): boolean {
+    if (this.pendingClockCommit === null) return false;
+    if (!this.sendEnvelope("CLOCK_COMMIT", this.pendingClockCommit)) {
+      return false;
+    }
     this.clockCommitLastSentMs = this.options.clock.now();
-    this.sendEnvelope("CLOCK_COMMIT", this.pendingClockCommit);
+    return true;
   }
 
   private pumpClockCommit(): void {
@@ -1458,10 +2095,10 @@ export class CompetitiveSession {
     }
     if (
       this.clockCommitLastSentMs !== null &&
-      this.options.clock.now() - this.clockCommitLastSentMs >= RULES.network.retryMs
-    ) {
-      this.sendClockCommit();
-    }
+      this.options.clock.now() - this.clockCommitLastSentMs < RULES.network.retryMs
+    ) return;
+    if (!this.canSendOptionalRecoveryControl()) return;
+    this.sendClockCommit();
   }
 
   private receiveClockCommit(envelope: RealtimeEnvelope<"CLOCK_COMMIT">): void {
@@ -1470,6 +2107,7 @@ export class CompetitiveSession {
     this.selectedClockSampleIds = [...envelope.payload.sampleIds];
     this.clockCommitReceived = true;
     if (this.phase === "network-pause" && this.config !== null) {
+      this.recoveryHandshakeGenerationReady = true;
       this.sendEnvelope("CONFIG_ACK", {
         configHash: this.config.configHash,
         accepted: true,
@@ -1662,6 +2300,7 @@ export class CompetitiveSession {
     this.configAckLastSentMs = null;
     this.configAckDeadlineMs = null;
     this.snapshotScheduler.reset();
+    this.setPeriodicSnapshotsShed(false);
     if (payload.epoch === 0 && !this.initialStartCommitted) {
       this.initialStartCommitted = true;
       this.options.onStartCommitted?.();
@@ -1708,8 +2347,21 @@ export class CompetitiveSession {
     if (dueSnapshot !== undefined) this.publishSnapshot(dueSnapshot);
   }
 
+  private publishRecoverySnapshotBestEffort(
+    snapshot?: SimulationSnapshot,
+  ): void {
+    try {
+      this.publishSnapshotIfDue(snapshot, true);
+    } catch {
+      // Reliable recovery state may already have advanced its receive cursor.
+      // Keep that accepted decision failure-atomic: STATE_REQUEST can recover
+      // this best-effort state frame without stranding the resume handshake.
+    }
+  }
+
   private publishSnapshot(snapshot: SimulationSnapshot): void {
     this.snapshotSequence += 1;
+    this.noteSnapshotFlow();
     const payload = createPlayerSnapshot({
       player: snapshot.player,
       stateTick: snapshot.tick,
@@ -2042,6 +2694,7 @@ export class CompetitiveSession {
         const message = envelope as RealtimeEnvelope<"NETWORK_PAUSE">;
         this.peerResumeAvailable = false;
         const adoptedEpoch = Math.max(this.pauseEpoch, message.payload.pauseEpoch);
+        const originalPauseTick = this.simulation?.currentTick();
         if (
           !this.advanceSimulationTo(
             message.payload.proposedPauseTick,
@@ -2049,11 +2702,16 @@ export class CompetitiveSession {
             "network-pause",
           )
         ) return;
-        this.enterNetworkPause(
-          false,
-          message.payload.connectionIssue,
+        this.enterNetworkPause({
+          announce: false,
+          connectionIssue: message.payload.connectionIssue,
           adoptedEpoch,
-        );
+          ...(originalPauseTick === undefined ? {} : { originalPauseTick }),
+        });
+        // enterNetworkPause resets recovery proof for the new pause epoch. The
+        // authenticated NETWORK_PAUSE that created that epoch is itself valid
+        // current-generation inbound evidence, so retain it after adoption.
+        if (this.phase === "network-pause") this.recoveryInboundProven = true;
         return;
       }
       case "RESUME_STATE":
@@ -2172,22 +2830,19 @@ export class CompetitiveSession {
       ) return "rejected";
       this.flushPendingGameplayCriticals(commit.startTick);
       this.snapshotScheduler.reset();
-      try {
-        this.publishSnapshotIfDue(this.simulation?.readSnapshot(), true);
-      } catch {
-        // The commit decision must be failure-atomic. A forced state frame is
-        // best effort and can be recovered by STATE_REQUEST; it must not leave
-        // the reliable cursor advanced while the accepted start is unapplied.
-      }
+      this.publishRecoverySnapshotBestEffort(
+        this.simulation?.readSnapshot(),
+      );
     }
     this.applyStart(commit);
     return "accepted";
   }
 
-  private sendConfigAck(): void {
-    if (this.pendingConfigAck === null) return;
+  private sendConfigAck(): boolean {
+    if (this.pendingConfigAck === null) return false;
+    if (!this.sendEnvelope("CONFIG_ACK", this.pendingConfigAck)) return false;
     this.configAckLastSentMs = this.options.clock.now();
-    this.sendEnvelope("CONFIG_ACK", this.pendingConfigAck);
+    return true;
   }
 
   private pumpConfigAck(): void {
@@ -2210,37 +2865,52 @@ export class CompetitiveSession {
     if (
       this.options.seat !== "b" ||
       this.pendingConfigAck === null ||
-      this.configAckLastSentMs === null ||
-      this.options.clock.now() - this.configAckLastSentMs < RULES.network.retryMs
+      !this.clockCommitReceived
     ) {
       return;
     }
+    if (
+      this.configAckLastSentMs !== null &&
+      this.options.clock.now() - this.configAckLastSentMs < RULES.network.retryMs
+    ) return;
+    if (!this.canSendOptionalRecoveryControl()) return;
     this.sendConfigAck();
   }
 
-  private sendKeepalive(force: boolean): void {
+  private sendKeepalive({
+    force,
+    flushProbe = false,
+  }: SendKeepaliveOptions): void {
     if (!this.channelConnected) return;
     const now = this.options.clock.now();
+    const recoveringWithPeer =
+      this.phase === "network-pause" && this.peerReturnNoted;
     const intervalMs =
-      this.phase === "network-pause" && this.peerReturnNoted
-        ? RULES.network.recoveryProbeMs
+      recoveringWithPeer
+        ? Math.max(
+            RULES.network.recoveryProbeMs,
+            RECOVERY_OPTIONAL_CONTROL_INTERVAL_MS,
+          )
         : RULES.network.keepaliveMs;
     if (!force && now - this.lastKeepaliveSentMs < intervalMs) return;
+    if (!force && !this.canSendOptionalRecoveryControl()) return;
+    if (
+      !force &&
+      recoveringWithPeer &&
+      this.lastRecoveryControlSentMs !== null &&
+      now - this.lastRecoveryControlSentMs <
+        RECOVERY_OPTIONAL_CONTROL_INTERVAL_MS &&
+      now - this.lastKeepaliveSentMs <
+        RECOVERY_DELIVERY_PROBE_MAX_SILENCE_MS
+    ) return;
     this.lastKeepaliveSentMs = now;
     const probeSeq = this.nextDeliveryProbeSeq;
     this.nextDeliveryProbeSeq =
       probeSeq >= 0x7fff_ffff ? 1 : probeSeq + 1;
-    this.deliveryProbeSentAt.set(probeSeq, now);
-    while (this.deliveryProbeSentAt.size > MAX_DELIVERY_PROBE_SAMPLES) {
-      const oldest = this.deliveryProbeSentAt.keys().next().value as
-        | number
-        | undefined;
-      if (oldest === undefined) break;
-      this.deliveryProbeSentAt.delete(oldest);
-    }
     this.sendEnvelope("KEEPALIVE", {
       activeSessionId: this.options.identity.sessionId,
       resumeAvailable: !this.locallyHidden,
+      transportGeneration: this.transportGeneration,
       lastSnapshotSeq: this.snapshotSequence,
       lastAcceptedSnapshotSeq: this.lastRemoteSnapshotSeq ?? 0,
       probeSeq,
@@ -2249,6 +2919,12 @@ export class CompetitiveSession {
         : { echoProbeSeq: this.lastPeerDeliveryProbeSeq }),
       inboundCritical: this.reliability.inboundCursors(),
     });
+    if (flushProbe && this.phase === "network-pause") {
+      this.drainQueuedRecoveryFrames(
+        RECOVERY_PRESENCE_PRIORITY,
+        RECOVERY_CONTROL_RESERVED_HANDSHAKE_FRAMES,
+      );
+    }
     if (this.phase === "lobby" || this.phase === "synchronizing") {
       this.sendHello();
       this.sendEnvelope("READY", {
@@ -2279,15 +2955,20 @@ export class CompetitiveSession {
       keepalive.echoProbeSeq > this.lastEchoedDeliveryProbeSeq &&
       keepalive.echoProbeSeq < this.nextDeliveryProbeSeq
     ) {
-      this.lastEchoedDeliveryProbeSeq = keepalive.echoProbeSeq;
       const sentAt = this.deliveryProbeSentAt.get(keepalive.echoProbeSeq);
-      if (sentAt !== undefined) this.observeRoundTrip(now - sentAt);
+      // Attachment resets the outstanding map. A replayed echo may be
+      // authenticated on the new listener, but without a current-generation
+      // send record it is not fresh outbound proof.
+      if (sentAt === undefined) return;
+      this.lastEchoedDeliveryProbeSeq = keepalive.echoProbeSeq;
+      this.observeRoundTrip(now - sentAt);
       for (const sequence of this.deliveryProbeSentAt.keys()) {
         if (sequence <= keepalive.echoProbeSeq) {
           this.deliveryProbeSentAt.delete(sequence);
         }
       }
-      this.noteOutboundDeliveryProof();
+      this.telemetry.noteDeliveryProbeEchoed(keepalive.echoProbeSeq);
+      this.noteOutboundDeliveryProof("delivery-probe-echo", true);
     }
   }
 
@@ -2296,6 +2977,7 @@ export class CompetitiveSession {
     this.sendEnvelope("KEEPALIVE", {
       activeSessionId: this.options.identity.sessionId,
       resumeAvailable: !this.locallyHidden,
+      transportGeneration: this.transportGeneration,
       lastSnapshotSeq: this.snapshotSequence,
       lastAcceptedSnapshotSeq: this.lastRemoteSnapshotSeq ?? 0,
       echoProbeSeq: probeSeq,
@@ -2325,8 +3007,85 @@ export class CompetitiveSession {
     );
   }
 
-  private noteOutboundDeliveryProof(): void {
+  private requiredRecoveryStabilityMs(): number {
+    return this.recoveryStabilityMs;
+  }
+
+  private refreshRecoveryControlWindow(now: number): void {
+    if (this.phase !== "network-pause") return;
+    if (
+      this.recoveryControlWindowStartedMs === null ||
+      now - this.recoveryControlWindowStartedMs >= RECOVERY_CONTROL_WINDOW_MS
+    ) {
+      this.recoveryControlWindowStartedMs = now;
+      this.recoveryControlWindowGeneration += 1;
+      this.recoveryControlFramesSent = 0;
+    }
+  }
+
+  private recoveryControlSlotsAvailable(): number {
+    if (this.phase !== "network-pause") {
+      return RECOVERY_CONTROL_BURST_FRAMES;
+    }
+    this.refreshRecoveryControlWindow(this.options.clock.now());
+    return Math.max(
+      0,
+      RECOVERY_CONTROL_BURST_FRAMES - this.recoveryControlFramesSent,
+    );
+  }
+
+  private canSendOptionalRecoveryControl(): boolean {
+    return this.phase !== "network-pause" ||
+      this.recoveryControlSlotsAvailable() > 0;
+  }
+
+  private noteRecoveryControlSent(now: number): void {
+    this.refreshRecoveryControlWindow(now);
+    this.recoveryControlFramesSent += 1;
+  }
+
+  private markDegradedRecovery(now: number): void {
+    this.degradedRecoveryUntilMs = Math.max(
+      this.degradedRecoveryUntilMs ?? 0,
+      now + REPEATED_PAUSE_WINDOW_MS,
+    );
+    if (this.snapshotCadenceIntervals.length === 0) return;
+    this.snapshotCadenceIndex = this.snapshotCadenceIntervals.length - 1;
+    this.lastSnapshotCadenceChangeMs = now;
+    if (!this.periodicSnapshotsShed) {
+      this.snapshotScheduler.setIntervalTicks(
+        this.snapshotCadenceIntervals[this.snapshotCadenceIndex] ?? null,
+      );
+      this.noteSnapshotFlow();
+    }
+  }
+
+  private resetRecoveryProofEpoch(): void {
+    this.sameChannelClockRetryUsed = false;
+    this.recoveryInboundProven = false;
+    this.recoveryOutboundProven = false;
+    this.deliveryProbeSentAt.clear();
+    this.criticalSentOnTransportGeneration.clear();
+    this.firstSnapshotSentOnTransportGeneration = null;
+    this.clockPingTransportGeneration.clear();
+    this.currentPauseProofEventId = null;
+    this.recoveryHandshakeGenerationReady = false;
+  }
+
+  private noteOutboundDeliveryProof(
+    source: OutboundDeliveryProofSource,
+    telemetryAlreadyRecorded = false,
+    metadata?: { cursor?: number; sampleId?: number },
+  ): void {
+    if (!telemetryAlreadyRecorded) {
+      this.telemetry.noteOutboundDeliveryProof(source, metadata);
+    }
     this.lastOutboundDeliveryProofMs = this.options.clock.now();
+    if (this.phase !== "network-pause") this.setPeriodicSnapshotsShed(false);
+    if (this.phase === "network-pause" && this.channelConnected) {
+      this.recoveryOutboundProven = true;
+      this.notePeerReturn();
+    }
   }
 
   private outboundDeliverySilentForMs(): number {
@@ -2381,6 +3140,7 @@ export class CompetitiveSession {
   private maybeAdaptSnapshotCadence(): void {
     if (
       this.phase !== "playing" ||
+      this.periodicSnapshotsShed ||
       !this.peerSnapshotFeedbackAvailable ||
       this.snapshotCadenceIntervals.length < 2
     ) {
@@ -2409,6 +3169,7 @@ export class CompetitiveSession {
         this.snapshotScheduler.setIntervalTicks(
           this.snapshotCadenceIntervals[this.snapshotCadenceIndex] ?? null,
         );
+        this.noteSnapshotFlow();
         this.lastSnapshotCadenceChangeMs = now;
         this.snapshotPressureSinceMs = now;
       }
@@ -2433,18 +3194,43 @@ export class CompetitiveSession {
       this.snapshotScheduler.setIntervalTicks(
         this.snapshotCadenceIntervals[this.snapshotCadenceIndex] ?? null,
       );
+      this.noteSnapshotFlow();
       this.lastSnapshotCadenceChangeMs = now;
       this.snapshotHealthySinceMs = now;
     }
   }
 
-  private enterNetworkPause(
-    announce: boolean,
-    connectionIssue: boolean,
-    adoptedEpoch?: number,
+  private setPeriodicSnapshotsShed(shed: boolean): void {
+    if (this.periodicSnapshotsShed === shed) return;
+    this.periodicSnapshotsShed = shed;
+    this.snapshotScheduler.setIntervalTicks(
+      shed
+        ? null
+        : (this.snapshotCadenceIntervals[this.snapshotCadenceIndex] ?? null),
+    );
+    this.noteSnapshotFlow();
+  }
+
+  private noteSnapshotFlow(): void {
+    this.telemetry.noteSnapshotFlow(
+      this.snapshotScheduler.currentIntervalTicks,
+      Math.max(0, this.snapshotSequence - this.peerAcceptedLocalSnapshotSeq),
+    );
+  }
+
+  private captureTelemetry(): ReturnType<NetworkTelemetry["snapshot"]> {
+    this.noteSnapshotFlow();
+    return this.telemetry.snapshot();
+  }
+
+  private enterNetworkPause({
+    announce,
+    connectionIssue,
+    adoptedEpoch,
     issueStartedMs = this.options.clock.now(),
-    pauseTriggerOverride?: PauseTrigger,
-  ): void {
+    pauseTrigger,
+    originalPauseTick,
+  }: EnterNetworkPauseOptions): void {
     if (this.phase === "finished") return;
     const cancelledInitialSync =
       this.syncPurpose === "initial" && this.config === null;
@@ -2472,6 +3258,7 @@ export class CompetitiveSession {
         repeatedPauseTrigger = "visibility";
       }
       if (repeatedPauseTrigger !== null) {
+        this.resetRecoveryProofEpoch();
         this.clearResumeHandshakeState();
         this.recordDiagnostic({
           kind: "connection-unstable",
@@ -2479,31 +3266,60 @@ export class CompetitiveSession {
           pauseTick: this.pauseTick,
           pauseEpoch: this.pauseEpoch,
           pauseTrigger: repeatedPauseTrigger,
-          telemetry: this.telemetry.snapshot(),
+          telemetry: this.captureTelemetry(),
         });
         if (announce && this.channelConnected && this.config !== null) {
           this.announceNetworkPause(connectionIssue);
+        } else if (this.channelConnected && this.config !== null) {
+          this.sendKeepalive({ force: true, flushProbe: true });
         }
       }
       return;
     }
+    const pauseStartedAtMs = this.options.clock.now();
+    const repeatedConnectionPause =
+      connectionIssue &&
+      this.lastNetworkPauseStartedMs !== null &&
+      pauseStartedAtMs - this.lastNetworkPauseStartedMs <=
+        REPEATED_PAUSE_WINDOW_MS;
+    const degradedConnectionPause =
+      connectionIssue &&
+      (repeatedConnectionPause ||
+        (this.degradedRecoveryUntilMs !== null &&
+          pauseStartedAtMs < this.degradedRecoveryUntilMs));
+    if (connectionIssue) this.lastNetworkPauseStartedMs = pauseStartedAtMs;
+    if (repeatedConnectionPause) {
+      this.markDegradedRecovery(pauseStartedAtMs);
+    }
+    // Latch the requirement for this pause lifecycle. Crossing the 30-second
+    // flapping-classification boundary while recovery is already under way
+    // must not shorten a promised 2.5-second stability observation to 500 ms.
+    this.recoveryStabilityMs = degradedConnectionPause
+      ? DEGRADED_RECOVERY_STABILITY_MS
+      : RULES.network.recoveryStabilityMs;
     this.clearPendingStartLifecycle();
     const snapshot = this.simulation?.readSnapshot();
     this.pauseEpoch = adoptedEpoch ?? this.pauseEpoch + 1;
     this.pauseTick = snapshot?.tick ?? this.tickClock.pauseAt(this.options.clock.now());
+    this.incidentOriginalPauseTick = originalPauseTick ?? this.pauseTick;
     this.tickClock.pauseAt(this.options.clock.now());
     this.simulation?.setPaused(true);
     this.missingSinceMs = issueStartedMs;
     this.localResumeSent = false;
     this.remoteResumeReceived = false;
     this.remoteResumeTick = null;
+    // A pause opens a new proof epoch even when the host channel object stays
+    // attached. Responses to pre-pause probes, snapshots, and critical sends
+    // cannot satisfy the recovery gate until those items are transmitted
+    // again (or a fresh monotonic probe is echoed).
+    this.resetRecoveryProofEpoch();
     this.startScheduled = false;
     this.clockCommitReceived = false;
     this.transportRecoveryRequested = false;
     this.lastTransportRecoveryRequestMs = null;
     this.recoveryAttempt = 0;
-    const pauseTrigger: PauseTrigger =
-      pauseTriggerOverride ??
+    const resolvedPauseTrigger: PauseTrigger =
+      pauseTrigger ??
       (announce
         ? connectionIssue
           ? "local-silence"
@@ -2515,8 +3331,8 @@ export class CompetitiveSession {
         silenceMs: Math.floor(this.linkSilentForMs()),
         pauseTick: this.pauseTick,
         pauseEpoch: this.pauseEpoch,
-        pauseTrigger,
-        telemetry: this.telemetry.snapshot(),
+        pauseTrigger: resolvedPauseTrigger,
+        telemetry: this.captureTelemetry(),
       }, this.diagnosticContext()) ?? null;
     this.setPhase("network-pause");
     if (cancelledInitialSync && this.channelConnected) {
@@ -2528,14 +3344,24 @@ export class CompetitiveSession {
     }
     if (announce && this.channelConnected && this.config !== null) {
       this.announceNetworkPause(connectionIssue);
+    } else if (this.channelConnected && this.config !== null) {
+      // A peer-initiated pause opens a fresh outbound-proof epoch after the
+      // incoming critical frame has already been acknowledged. Emit a new
+      // probe immediately so recovery does not have to wait for the ordinary
+      // one-second keepalive cadence before clock synchronization can start.
+      this.sendKeepalive({ force: true, flushProbe: true });
     }
   }
 
   private announceNetworkPause(connectionIssue: boolean): void {
+    const eventId = this.nextEventId("network-pause");
+    // Stage the epoch-specific identity before the synchronous send boundary;
+    // an in-memory transport may deliver its ACK before sendCritical returns.
+    this.currentPauseProofEventId = eventId;
     this.reliability.sendCritical(
       "NETWORK_PAUSE",
       {
-        eventId: this.nextEventId("network-pause"),
+        eventId,
         pauseEpoch: this.pauseEpoch,
         proposedPauseTick: this.pauseTick,
         connectionIssue,
@@ -2648,16 +3474,17 @@ export class CompetitiveSession {
     if (
       this.phase !== "network-pause" ||
       this.peerReturnNoted ||
-      this.locallyHidden
-    ) {
-      return;
-    }
+      this.locallyHidden ||
+      !this.peerResumeAvailable ||
+      !this.recoveryInboundProven ||
+      !this.recoveryOutboundProven
+    ) return;
     this.peerReturnNoted = true;
-    this.connectionIncidentStartedMs = this.options.clock.now();
+    this.connectionIncidentStartedMs ??= this.options.clock.now();
     this.recordDiagnostic({
       kind: "peer-traffic-restored",
       pauseEpoch: this.pauseEpoch,
-      telemetry: this.telemetry.snapshot(),
+      telemetry: this.captureTelemetry(),
       ...(this.missingSinceMs === null
         ? {}
         : {
@@ -2671,7 +3498,7 @@ export class CompetitiveSession {
     this.transportRecoveryRequested = false;
     this.lastTransportRecoveryRequestMs = null;
     if (this.options.seat === "a") this.beginClockSync("resume");
-    this.sendKeepalive(true);
+    this.sendKeepalive({ force: true });
   }
 
   private requestTransportRecovery(force = false): void {
@@ -2692,7 +3519,7 @@ export class CompetitiveSession {
       silenceMs: Math.floor(this.linkSilentForMs()),
       pauseEpoch: this.pauseEpoch,
       attempt: this.recoveryAttempt,
-      telemetry: this.telemetry.snapshot(),
+      telemetry: this.captureTelemetry(),
     });
     let failed = false;
     try {
@@ -2719,6 +3546,7 @@ export class CompetitiveSession {
   }
 
   private clearResumeHandshakeState(): void {
+    this.queuedRecoveryFrames.clear();
     this.clearPendingStartLifecycle();
     this.clearClockSyncLifecycle();
     this.pendingClockCommit = null;
@@ -2731,14 +3559,31 @@ export class CompetitiveSession {
     this.peerReturnNoted = false;
   }
 
-  private restartResumeHandshake(): void {
+  private invalidateResumeSynchronization(): void {
+    this.queuedRecoveryFrames.clear();
+    this.clearClockSyncLifecycle();
+    this.pendingClockCommit = null;
+    this.clockCommitLastSentMs = null;
+    this.clockCommitDeadlineMs = null;
+    this.clockCommitReceived = false;
+    this.peerReturnNoted = false;
+    this.recoveryHandshakeGenerationReady = false;
+    // RESUME_STATE and START/START_COMMIT are durable reliable progress. Keep
+    // their local flags and pending semantic state aligned with the outbox and
+    // the peer; the generation gate above prevents any of it from advancing
+    // until this replacement completes fresh synchronization.
+  }
+
+  private restartResumeHandshake(replaceChannel = true): void {
     if (this.phase !== "network-pause") return;
-    this.clearResumeHandshakeState();
-    this.requestTransportRecovery(true);
+    this.invalidateResumeSynchronization();
+    if (replaceChannel) this.requestTransportRecovery(true);
     if (
       this.phase === "network-pause" &&
       this.syncPurpose === null &&
       this.peerResumeAvailable &&
+      this.recoveryInboundProven &&
+      this.recoveryOutboundProven &&
       !this.locallyHidden
     ) {
       this.peerReturnNoted = true;
@@ -2754,6 +3599,7 @@ export class CompetitiveSession {
     // snapshot. Give every authoritative resume snapshot a fresh sequence so
     // RemoteSnapshotStore cannot mistake that newer state for a stale frame.
     this.snapshotSequence += 1;
+    this.noteSnapshotFlow();
     const payload: ResumeStatePayload = {
       eventId: this.nextEventId("resume-state"),
       pauseEpoch: this.pauseEpoch,
@@ -2856,12 +3702,18 @@ export class CompetitiveSession {
     if (!this.advanceSimulationTo(commonTick, true, "resume-common-tick")) return;
     this.flushPendingGameplayCriticals(commonTick);
     this.snapshotScheduler.reset();
-    this.publishSnapshotIfDue(this.simulation.readSnapshot(), true);
+    this.publishRecoverySnapshotBestEffort(this.simulation.readSnapshot());
     this.recordDiagnostic({
       kind: "resume-countdown",
       pauseTick: commonTick,
       pauseEpoch: this.pauseEpoch,
       rollbackTicks: Math.max(localTick, this.remoteResumeTick) - commonTick,
+      rollback: {
+        originalPauseTick: this.incidentOriginalPauseTick ?? this.pauseTick,
+        localResumeTick: localTick,
+        remoteResumeTick: this.remoteResumeTick,
+        finalCommonTick: commonTick,
+      },
     });
     const rollbackTicks = Math.max(localTick, this.remoteResumeTick) - commonTick;
     const baseCountdownTicks =
@@ -3091,7 +3943,7 @@ export class CompetitiveSession {
       silenceMs: RULES.network.controllerReconnectGraceMs,
       pauseTick: this.pauseTick,
       pauseEpoch: this.pauseEpoch,
-      telemetry: this.telemetry.snapshot(),
+      telemetry: this.captureTelemetry(),
     });
     this.diagnosticIncidentId = null;
     const result = this.buildConnectionLostResult();
@@ -3147,7 +3999,7 @@ export class CompetitiveSession {
         ? {}
         : { lastSnapshotRejection: this.lastSnapshotRejection }),
       ...(remoteTick === undefined ? {} : { remoteTick }),
-      telemetry: this.telemetry.snapshot(),
+      telemetry: this.captureTelemetry(),
     };
     if (this.diagnosticIncidentId === null) {
       diagnostics.begin(event, this.diagnosticContext());

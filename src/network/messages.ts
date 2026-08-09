@@ -117,6 +117,8 @@ export interface RealtimePayloadMap {
     displayName: string;
     targetSessionId?: SessionId;
     resumeAvailable: boolean;
+    /** Monotonic per-session transport attachment. */
+    transportGeneration?: number;
   };
   STATE_REQUEST: { targetPlayerIds?: PlayerId[] };
   READY: {
@@ -149,6 +151,8 @@ export interface RealtimePayloadMap {
   KEEPALIVE: {
     activeSessionId: SessionId;
     resumeAvailable: boolean;
+    /** Monotonic per-session transport attachment. */
+    transportGeneration?: number;
     lastSnapshotSeq: number;
     /** Latest snapshot from the receiver that this sender has accepted. */
     lastAcceptedSnapshotSeq?: number;

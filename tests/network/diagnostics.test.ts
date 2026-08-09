@@ -353,6 +353,125 @@ describe("NetworkDiagnostics", () => {
     ]);
   });
 
+  it("round-trips enough rollback context to distinguish pause adoption from resume reconciliation", () => {
+    const clock = new ManualClock(8_500);
+    const storage = new MemoryStorage();
+    const diagnostics = new NetworkDiagnostics({ clock, storage });
+    const incidentId = diagnostics.begin({
+      kind: "connection-unstable",
+      pauseTick: 13_147,
+    });
+    diagnostics.record(incidentId, {
+      kind: "resume-countdown",
+      pauseTick: 13_090,
+      rollbackTicks: 0,
+      rollback: {
+        originalPauseTick: 13_147,
+        localResumeTick: 13_090,
+        remoteResumeTick: 13_090,
+        finalCommonTick: 13_090,
+      },
+    });
+
+    const restored = new NetworkDiagnostics({ clock, storage }).snapshot();
+    expect(restored.incidents[0]?.events[1]).toEqual({
+      kind: "resume-countdown",
+      atMs: 8_500,
+      pauseTick: 13_090,
+      rollbackTicks: 0,
+      rollback: {
+        originalPauseTick: 13_147,
+        localResumeTick: 13_090,
+        remoteResumeTick: 13_090,
+        finalCommonTick: 13_090,
+      },
+    });
+
+    const copy = diagnostics.snapshot();
+    copy.incidents[0]!.events[1]!.rollback!.originalPauseTick = 0;
+    expect(
+      diagnostics.snapshot().incidents[0]?.events[1]?.rollback?.originalPauseTick,
+    ).toBe(13_147);
+  });
+
+  it("round-trips rollback context when an ahead peer advances the local pause tick", () => {
+    const clock = new ManualClock(8_550);
+    const storage = new MemoryStorage();
+    const diagnostics = new NetworkDiagnostics({ clock, storage });
+
+    diagnostics.begin({
+      kind: "resume-countdown",
+      pauseTick: 96,
+      rollbackTicks: 0,
+      rollback: {
+        originalPauseTick: 90,
+        localResumeTick: 96,
+        remoteResumeTick: 96,
+        finalCommonTick: 96,
+      },
+    });
+
+    const produced = diagnostics.snapshot();
+    expect(produced.incidents[0]?.events[0]?.rollback).toEqual({
+      originalPauseTick: 90,
+      localResumeTick: 96,
+      remoteResumeTick: 96,
+      finalCommonTick: 96,
+    });
+    expect(parseNetworkDiagnostics(JSON.stringify(produced))).toEqual(produced);
+    expect(new NetworkDiagnostics({ clock, storage }).snapshot()).toEqual(
+      produced,
+    );
+  });
+
+  it("omits malformed persisted rollback context and rejects malformed producer context", () => {
+    const persisted = {
+      schema: "split-stack/network-diagnostics/v1",
+      incidents: [{
+        incidentId: 1,
+        startedAtMs: 8_600,
+        events: [{
+          kind: "resume-countdown",
+          atMs: 8_600,
+          rollback: {
+            originalPauseTick: 100,
+            localResumeTick: 90,
+            remoteResumeTick: 95,
+            finalCommonTick: 95,
+          },
+        }],
+      }],
+    };
+    expect(parseNetworkDiagnostics(JSON.stringify(persisted))).toEqual({
+      schema: "split-stack/network-diagnostics/v1",
+      incidents: [{
+        incidentId: 1,
+        startedAtMs: 8_600,
+        events: [{ kind: "resume-countdown", atMs: 8_600 }],
+      }],
+    });
+
+    const diagnostics = new NetworkDiagnostics({ clock: new ManualClock(8_600) });
+    expect(() => diagnostics.begin({
+      kind: "resume-countdown",
+      rollback: {
+        originalPauseTick: 100,
+        localResumeTick: 90,
+        remoteResumeTick: 95,
+        finalCommonTick: 95,
+      },
+    })).toThrow(TypeError);
+    expect(() => diagnostics.begin({
+      kind: "connection-unstable",
+      rollback: {
+        originalPauseTick: 100,
+        localResumeTick: 90,
+        remoteResumeTick: 90,
+        finalCommonTick: 90,
+      },
+    })).toThrow(TypeError);
+  });
+
   it("omits malformed optional v1 extensions while preserving base records", () => {
     const parsed = parseNetworkDiagnostics(JSON.stringify({
       schema: "split-stack/network-diagnostics/v1",

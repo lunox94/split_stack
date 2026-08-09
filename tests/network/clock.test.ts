@@ -4,6 +4,7 @@ import {
   MatchTickClock,
   calculateClockSample,
   selectClockOffset,
+  selectTrustedResumeClockOffset,
 } from "../../src/network/clock";
 
 describe("clock synchronization", () => {
@@ -31,6 +32,16 @@ describe("clock synchronization", () => {
       /distinct/i,
     );
     expect(() => calculateClockSample(10, 11, 9, 12, 0)).toThrow(/timestamp/i);
+  });
+
+  it("rejects trusted resume samples that disagree with each other", () => {
+    const samples = [
+      { sampleId: 10, roundTripMs: 20, offsetPeerMinusCoordinatorMs: 0 },
+      { sampleId: 11, roundTripMs: 20, offsetPeerMinusCoordinatorMs: 100 },
+      { sampleId: 12, roundTripMs: 20, offsetPeerMinusCoordinatorMs: 200 },
+    ];
+
+    expect(selectTrustedResumeClockOffset(samples, 100)).toBeNull();
   });
 });
 

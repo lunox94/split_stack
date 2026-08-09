@@ -17,6 +17,101 @@ export interface NetworkReceiveTotals {
   decodedBytes: number;
   authenticatedFrames: number;
   authenticatedBytes: number;
+  byKind?: NetworkReceiveKindTotals;
+}
+
+export interface NetworkReceiveKindTotals {
+  snapshots: number;
+  keepalives: number;
+  clockPings: number;
+  clockPongs: number;
+  acks: number;
+  critical: number;
+  other: number;
+}
+
+export interface NetworkSendTotals {
+  frames: number;
+  bytes: number;
+  snapshots: number;
+  keepalives: number;
+  critical: number;
+  other: number;
+  bytesByKind?: {
+    snapshots: number;
+    keepalives: number;
+    critical: number;
+    other: number;
+  };
+  failed?: {
+    frames: number;
+    bytes: number;
+  };
+}
+
+export interface NetworkTrafficWindow {
+  sentFrames: number;
+  sentBytes: number;
+  receivedFrames: number;
+  receivedBytes: number;
+  sentSnapshots: number;
+  sentKeepalives: number;
+  sentCritical: number;
+  sentOther: number;
+  windowAgeMs?: number;
+}
+
+export const OUTBOUND_DELIVERY_PROOF_SOURCES = [
+  "delivery-probe-echo",
+  "critical-ack",
+  "critical-cursor",
+  "snapshot-cursor",
+  "clock-pong",
+] as const;
+
+export type OutboundDeliveryProofSource =
+  (typeof OUTBOUND_DELIVERY_PROOF_SOURCES)[number];
+
+export interface OutboundDeliveryCursorProofSummary {
+  lastAgeMs: number;
+  lastCursor?: number;
+}
+
+export interface OutboundDeliverySampleProofSummary {
+  lastAgeMs: number;
+  lastSampleId?: number;
+}
+
+export interface OutboundDeliveryProofMetadataMap {
+  "delivery-probe-echo": { cursor?: number };
+  "critical-ack": { cursor?: number };
+  "critical-cursor": { cursor?: number };
+  "snapshot-cursor": { cursor?: number };
+  "clock-pong": { sampleId?: number };
+}
+
+export interface OutboundDeliveryProofSummary {
+  total: number;
+  ageMs?: number;
+  bySource: {
+    deliveryProbeEcho: number;
+    criticalAck: number;
+    criticalCursor: number;
+    snapshotCursor: number;
+    clockPong: number;
+  };
+  deliveryProbe: {
+    sent: number;
+    echoed: number;
+    lastSentSeq?: number;
+    lastSentAgeMs?: number;
+    lastEchoedSeq?: number;
+    lastEchoedAgeMs?: number;
+  };
+  criticalAck?: OutboundDeliveryCursorProofSummary;
+  criticalCursor?: OutboundDeliveryCursorProofSummary;
+  snapshotCursor?: OutboundDeliveryCursorProofSummary;
+  clockPong?: OutboundDeliverySampleProofSummary;
 }
 
 export interface NetworkTelemetrySummary {
@@ -26,6 +121,8 @@ export interface NetworkTelemetrySummary {
     ageMs?: number;
     firstRawFrameMs?: number;
     firstAuthenticatedFrameMs?: number;
+    currentGenerationInbound?: boolean;
+    currentGenerationOutboundProof?: boolean;
   };
   receive: {
     rawFrames: number;
@@ -37,38 +134,17 @@ export interface NetworkTelemetrySummary {
     rawAgeMs?: number;
     decodedAgeMs?: number;
     authenticatedAgeMs?: number;
+    byKind?: NetworkReceiveKindTotals;
   };
   /** Session-wide receive totals; unlike `receive`, these survive channel replacement. */
   receiveSession?: NetworkReceiveTotals;
-  send?: {
-    frames: number;
-    bytes: number;
-    snapshots: number;
-    keepalives: number;
-    critical: number;
-    other: number;
-    bytesByKind?: {
-      snapshots: number;
-      keepalives: number;
-      critical: number;
-      other: number;
-    };
-    failed?: {
-      frames: number;
-      bytes: number;
-    };
-  };
-  sinceAuthenticated: {
-    sentFrames: number;
-    sentBytes: number;
-    receivedFrames: number;
-    receivedBytes: number;
-    sentSnapshots: number;
-    sentKeepalives: number;
-    sentCritical: number;
-    sentOther: number;
-    windowAgeMs?: number;
-  };
+  send?: NetworkSendTotals;
+  /** Successful and rejected writes on only the currently attached channel. */
+  sendChannel?: NetworkSendTotals;
+  sinceAuthenticated: NetworkTrafficWindow;
+  /** Traffic since the most recent end-to-end proof, or monitoring start. */
+  sinceOutboundProof?: NetworkTrafficWindow;
+  outboundProof?: OutboundDeliveryProofSummary;
   pump: {
     lastGapMs: number;
     maxGapMs: number;
@@ -83,6 +159,9 @@ export interface NetworkTelemetrySummary {
     missing: number;
     maxGap: number;
     lastSeq?: number;
+    /** `null` means periodic snapshots are deliberately suspended. */
+    activeIntervalTicks?: number | null;
+    deliveryLag?: number;
   };
   critical: {
     pending: number;
@@ -94,6 +173,28 @@ export interface NetworkTelemetrySummary {
 
 export interface NetworkTelemetryOptions {
   clock?: MonotonicClock;
+}
+
+/** Identifies the exact counter windows staged before a transport send. */
+export interface NetworkSendAttempt {
+  readonly channelGeneration: number;
+  readonly authenticatedWindowGeneration: number;
+  readonly outboundProofWindowGeneration: number;
+}
+
+/** Identifies one delivery probe staged across a synchronous transport send. */
+export interface NetworkDeliveryProbeAttempt {
+  readonly generation: number;
+  readonly previousLastSequence: number | null;
+  readonly previousLastAtMs: number | null;
+  readonly incremented: boolean;
+}
+
+interface SentCounterScopes {
+  readonly lifetime: boolean;
+  readonly channel: boolean;
+  readonly authenticatedWindow: boolean;
+  readonly outboundProofWindow: boolean;
 }
 
 const systemClock: MonotonicClock = { now: () => Date.now() };
@@ -137,6 +238,79 @@ function optionalCounter(
   return readCounter(record[field]) ?? null;
 }
 
+function createReceiveKindTotals(): NetworkReceiveKindTotals {
+  return {
+    snapshots: 0,
+    keepalives: 0,
+    clockPings: 0,
+    clockPongs: 0,
+    acks: 0,
+    critical: 0,
+    other: 0,
+  };
+}
+
+function resetReceiveKindTotals(totals: NetworkReceiveKindTotals): void {
+  totals.snapshots = 0;
+  totals.keepalives = 0;
+  totals.clockPings = 0;
+  totals.clockPongs = 0;
+  totals.acks = 0;
+  totals.critical = 0;
+  totals.other = 0;
+}
+
+function readReceiveKindTotals(
+  value: unknown,
+): NetworkReceiveKindTotals | undefined {
+  if (!isRecord(value)) return undefined;
+  const snapshots = readCounter(value.snapshots);
+  const keepalives = readCounter(value.keepalives);
+  const clockPings = readCounter(value.clockPings);
+  const clockPongs = readCounter(value.clockPongs);
+  const acks = readCounter(value.acks);
+  const critical = readCounter(value.critical);
+  const other = readCounter(value.other);
+  if (
+    snapshots === undefined ||
+    keepalives === undefined ||
+    clockPings === undefined ||
+    clockPongs === undefined ||
+    acks === undefined ||
+    critical === undefined ||
+    other === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    snapshots,
+    keepalives,
+    clockPings,
+    clockPongs,
+    acks,
+    critical,
+    other,
+  };
+}
+
+function receiveKindFrameTotal(totals: NetworkReceiveKindTotals): number {
+  return totals.snapshots + totals.keepalives + totals.clockPings +
+    totals.clockPongs + totals.acks + totals.critical + totals.other;
+}
+
+function receiveKindsFitWithin(
+  subset: NetworkReceiveKindTotals,
+  totals: NetworkReceiveKindTotals,
+): boolean {
+  return subset.snapshots <= totals.snapshots &&
+    subset.keepalives <= totals.keepalives &&
+    subset.clockPings <= totals.clockPings &&
+    subset.clockPongs <= totals.clockPongs &&
+    subset.acks <= totals.acks &&
+    subset.critical <= totals.critical &&
+    subset.other <= totals.other;
+}
+
 function readTimingSummary(value: unknown): NetworkTimingSummary | undefined {
   if (!isRecord(value)) return undefined;
   const samples = readCounter(value.samples);
@@ -173,6 +347,236 @@ function readTimingSummary(value: unknown): NetworkTimingSummary | undefined {
     ...(maxMs === undefined ? {} : { maxMs }),
     ...(smoothedMs === undefined ? {} : { smoothedMs }),
     ...(jitterMs === undefined ? {} : { jitterMs }),
+  };
+}
+
+function readSendTotals(value: unknown): NetworkSendTotals | undefined {
+  if (!isRecord(value)) return undefined;
+  const frames = readCounter(value.frames);
+  const bytes = readCounter(value.bytes);
+  const snapshots = readCounter(value.snapshots);
+  const keepalives = readCounter(value.keepalives);
+  const critical = readCounter(value.critical);
+  const other = readCounter(value.other);
+  const bytesByKind = value.bytesByKind;
+  const failed = value.failed;
+  const snapshotBytes = isRecord(bytesByKind)
+    ? readCounter(bytesByKind.snapshots)
+    : undefined;
+  const keepaliveBytes = isRecord(bytesByKind)
+    ? readCounter(bytesByKind.keepalives)
+    : undefined;
+  const criticalBytes = isRecord(bytesByKind)
+    ? readCounter(bytesByKind.critical)
+    : undefined;
+  const otherBytes = isRecord(bytesByKind)
+    ? readCounter(bytesByKind.other)
+    : undefined;
+  const failedFrames = isRecord(failed) ? readCounter(failed.frames) : undefined;
+  const failedBytes = isRecord(failed) ? readCounter(failed.bytes) : undefined;
+  if (
+    frames === undefined ||
+    bytes === undefined ||
+    snapshots === undefined ||
+    keepalives === undefined ||
+    critical === undefined ||
+    other === undefined ||
+    snapshots + keepalives + critical + other !== frames ||
+    (bytesByKind !== undefined &&
+      (
+        snapshotBytes === undefined ||
+        keepaliveBytes === undefined ||
+        criticalBytes === undefined ||
+        otherBytes === undefined ||
+        snapshotBytes + keepaliveBytes + criticalBytes + otherBytes !== bytes
+      )) ||
+    (failed !== undefined && (failedFrames === undefined || failedBytes === undefined))
+  ) {
+    return undefined;
+  }
+  return {
+    frames,
+    bytes,
+    snapshots,
+    keepalives,
+    critical,
+    other,
+    ...(snapshotBytes === undefined
+      ? {}
+      : {
+          bytesByKind: {
+            snapshots: snapshotBytes,
+            keepalives: keepaliveBytes!,
+            critical: criticalBytes!,
+            other: otherBytes!,
+          },
+        }),
+    ...(failedFrames === undefined
+      ? {}
+      : { failed: { frames: failedFrames, bytes: failedBytes! } }),
+  };
+}
+
+function readTrafficWindow(value: unknown): NetworkTrafficWindow | undefined {
+  if (!isRecord(value)) return undefined;
+  const sentFrames = readCounter(value.sentFrames);
+  const sentBytes = readCounter(value.sentBytes);
+  const receivedFrames = readCounter(value.receivedFrames);
+  const receivedBytes = readCounter(value.receivedBytes);
+  const sentSnapshots = readCounter(value.sentSnapshots);
+  const sentKeepalives = readCounter(value.sentKeepalives);
+  const sentCritical = readCounter(value.sentCritical);
+  const sentOther = readCounter(value.sentOther);
+  const windowAgeMs = optionalCounter(value, "windowAgeMs");
+  if (
+    sentFrames === undefined ||
+    sentBytes === undefined ||
+    receivedFrames === undefined ||
+    receivedBytes === undefined ||
+    sentSnapshots === undefined ||
+    sentKeepalives === undefined ||
+    sentCritical === undefined ||
+    sentOther === undefined ||
+    windowAgeMs === null ||
+    sentSnapshots + sentKeepalives + sentCritical + sentOther !== sentFrames
+  ) {
+    return undefined;
+  }
+  return {
+    sentFrames,
+    sentBytes,
+    receivedFrames,
+    receivedBytes,
+    sentSnapshots,
+    sentKeepalives,
+    sentCritical,
+    sentOther,
+    ...(windowAgeMs === undefined ? {} : { windowAgeMs }),
+  };
+}
+
+function readOutboundCursorProofSummary(
+  value: unknown,
+): OutboundDeliveryCursorProofSummary | undefined {
+  if (!isRecord(value)) return undefined;
+  const lastAgeMs = readCounter(value.lastAgeMs);
+  const lastCursor = optionalCounter(value, "lastCursor");
+  if (lastAgeMs === undefined || lastCursor === null) return undefined;
+  return {
+    lastAgeMs,
+    ...(lastCursor === undefined ? {} : { lastCursor }),
+  };
+}
+
+function readOutboundSampleProofSummary(
+  value: unknown,
+): OutboundDeliverySampleProofSummary | undefined {
+  if (!isRecord(value)) return undefined;
+  const lastAgeMs = readCounter(value.lastAgeMs);
+  const lastSampleId = optionalCounter(value, "lastSampleId");
+  if (lastAgeMs === undefined || lastSampleId === null) return undefined;
+  return {
+    lastAgeMs,
+    ...(lastSampleId === undefined ? {} : { lastSampleId }),
+  };
+}
+
+function readOutboundProofSummary(
+  value: unknown,
+): OutboundDeliveryProofSummary | undefined {
+  if (!isRecord(value) || !isRecord(value.bySource) || !isRecord(value.deliveryProbe)) {
+    return undefined;
+  }
+  const total = readCounter(value.total);
+  const ageMs = optionalCounter(value, "ageMs");
+  const deliveryProbeEcho = readCounter(value.bySource.deliveryProbeEcho);
+  const criticalAck = readCounter(value.bySource.criticalAck);
+  const criticalCursor = readCounter(value.bySource.criticalCursor);
+  const snapshotCursor = readCounter(value.bySource.snapshotCursor);
+  const clockPong = readCounter(value.bySource.clockPong);
+  const sent = readCounter(value.deliveryProbe.sent);
+  const echoed = readCounter(value.deliveryProbe.echoed);
+  const lastSentSeq = optionalCounter(value.deliveryProbe, "lastSentSeq");
+  const lastSentAgeMs = optionalCounter(value.deliveryProbe, "lastSentAgeMs");
+  const lastEchoedSeq = optionalCounter(value.deliveryProbe, "lastEchoedSeq");
+  const lastEchoedAgeMs = optionalCounter(value.deliveryProbe, "lastEchoedAgeMs");
+  const criticalAckDetail = value.criticalAck === undefined
+    ? undefined
+    : readOutboundCursorProofSummary(value.criticalAck);
+  const criticalCursorDetail = value.criticalCursor === undefined
+    ? undefined
+    : readOutboundCursorProofSummary(value.criticalCursor);
+  const snapshotCursorDetail = value.snapshotCursor === undefined
+    ? undefined
+    : readOutboundCursorProofSummary(value.snapshotCursor);
+  const clockPongDetail = value.clockPong === undefined
+    ? undefined
+    : readOutboundSampleProofSummary(value.clockPong);
+  if (
+    total === undefined ||
+    ageMs === null ||
+    deliveryProbeEcho === undefined ||
+    criticalAck === undefined ||
+    criticalCursor === undefined ||
+    snapshotCursor === undefined ||
+    clockPong === undefined ||
+    sent === undefined ||
+    echoed === undefined ||
+    lastSentSeq === null ||
+    lastSentAgeMs === null ||
+    lastEchoedSeq === null ||
+    lastEchoedAgeMs === null ||
+    (value.criticalAck !== undefined && criticalAckDetail === undefined) ||
+    (value.criticalCursor !== undefined && criticalCursorDetail === undefined) ||
+    (value.snapshotCursor !== undefined && snapshotCursorDetail === undefined) ||
+    (value.clockPong !== undefined && clockPongDetail === undefined) ||
+    (criticalAckDetail !== undefined && criticalAck === 0) ||
+    (criticalCursorDetail !== undefined && criticalCursor === 0) ||
+    (snapshotCursorDetail !== undefined && snapshotCursor === 0) ||
+    (clockPongDetail !== undefined && clockPong === 0) ||
+    deliveryProbeEcho + criticalAck + criticalCursor + snapshotCursor + clockPong !== total ||
+    deliveryProbeEcho !== echoed ||
+    echoed > sent ||
+    (total === 0) !== (ageMs === undefined) ||
+    (sent === 0) !== (lastSentSeq === undefined && lastSentAgeMs === undefined) ||
+    (sent > 0) !== (lastSentSeq !== undefined && lastSentAgeMs !== undefined) ||
+    (echoed === 0) !==
+      (lastEchoedSeq === undefined && lastEchoedAgeMs === undefined) ||
+    (echoed > 0) !==
+      (lastEchoedSeq !== undefined && lastEchoedAgeMs !== undefined)
+  ) {
+    return undefined;
+  }
+  return {
+    total,
+    ...(ageMs === undefined ? {} : { ageMs }),
+    bySource: {
+      deliveryProbeEcho,
+      criticalAck,
+      criticalCursor,
+      snapshotCursor,
+      clockPong,
+    },
+    deliveryProbe: {
+      sent,
+      echoed,
+      ...(lastSentSeq === undefined ? {} : { lastSentSeq }),
+      ...(lastSentAgeMs === undefined ? {} : { lastSentAgeMs }),
+      ...(lastEchoedSeq === undefined ? {} : { lastEchoedSeq }),
+      ...(lastEchoedAgeMs === undefined ? {} : { lastEchoedAgeMs }),
+    },
+    ...(criticalAckDetail === undefined
+      ? {}
+      : { criticalAck: criticalAckDetail }),
+    ...(criticalCursorDetail === undefined
+      ? {}
+      : { criticalCursor: criticalCursorDetail }),
+    ...(snapshotCursorDetail === undefined
+      ? {}
+      : { snapshotCursor: snapshotCursorDetail }),
+    ...(clockPongDetail === undefined
+      ? {}
+      : { clockPong: clockPongDetail }),
   };
 }
 
@@ -250,7 +654,10 @@ export function parseNetworkTelemetrySummary(
     receive,
     receiveSession,
     send,
+    sendChannel,
     sinceAuthenticated,
+    sinceOutboundProof,
+    outboundProof,
     pump,
     rtt,
     authenticatedInterarrival,
@@ -262,6 +669,7 @@ export function parseNetworkTelemetrySummary(
     !isRecord(receive) ||
     (receiveSession !== undefined && !isRecord(receiveSession)) ||
     (send !== undefined && !isRecord(send)) ||
+    (sendChannel !== undefined && !isRecord(sendChannel)) ||
     !isRecord(sinceAuthenticated) ||
     !isRecord(pump) ||
     !isRecord(snapshots) ||
@@ -277,6 +685,9 @@ export function parseNetworkTelemetrySummary(
     channel,
     "firstAuthenticatedFrameMs",
   );
+  const currentGenerationInbound = channel.currentGenerationInbound;
+  const currentGenerationOutboundProof =
+    channel.currentGenerationOutboundProof;
   const rawFrames = readCounter(receive.rawFrames);
   const rawBytes = readCounter(receive.rawBytes);
   const decodedFrames = readCounter(receive.decodedFrames);
@@ -286,6 +697,9 @@ export function parseNetworkTelemetrySummary(
   const rawAgeMs = optionalCounter(receive, "rawAgeMs");
   const decodedAgeMs = optionalCounter(receive, "decodedAgeMs");
   const authenticatedAgeMs = optionalCounter(receive, "authenticatedAgeMs");
+  const authenticatedByKind = receive.byKind === undefined
+    ? undefined
+    : readReceiveKindTotals(receive.byKind);
   const sessionRawFrames = receiveSession === undefined
     ? undefined
     : readCounter(receiveSession.rawFrames);
@@ -304,44 +718,31 @@ export function parseNetworkTelemetrySummary(
   const sessionAuthenticatedBytes = receiveSession === undefined
     ? undefined
     : readCounter(receiveSession.authenticatedBytes);
-  const totalSentFrames = send === undefined
+  const sessionAuthenticatedByKind = receiveSession?.byKind === undefined
     ? undefined
-    : readCounter(send.frames);
-  const totalSentBytes = send === undefined
+    : readReceiveKindTotals(receiveSession.byKind);
+  const sendSummary = send === undefined ? undefined : readSendTotals(send);
+  const totalSentFrames = sendSummary?.frames;
+  const totalSentBytes = sendSummary?.bytes;
+  const totalSentSnapshots = sendSummary?.snapshots;
+  const totalSentKeepalives = sendSummary?.keepalives;
+  const totalSentCritical = sendSummary?.critical;
+  const totalSentOther = sendSummary?.other;
+  const sentSnapshotBytes = sendSummary?.bytesByKind?.snapshots;
+  const sentKeepaliveBytes = sendSummary?.bytesByKind?.keepalives;
+  const sentCriticalBytes = sendSummary?.bytesByKind?.critical;
+  const sentOtherBytes = sendSummary?.bytesByKind?.other;
+  const failedSendFrames = sendSummary?.failed?.frames;
+  const failedSendBytes = sendSummary?.failed?.bytes;
+  const channelSendSummary = sendChannel === undefined
     ? undefined
-    : readCounter(send.bytes);
-  const totalSentSnapshots = send === undefined
+    : readSendTotals(sendChannel);
+  const outboundProofWindow = sinceOutboundProof === undefined
     ? undefined
-    : readCounter(send.snapshots);
-  const totalSentKeepalives = send === undefined
+    : readTrafficWindow(sinceOutboundProof);
+  const outboundProofSummary = outboundProof === undefined
     ? undefined
-    : readCounter(send.keepalives);
-  const totalSentCritical = send === undefined
-    ? undefined
-    : readCounter(send.critical);
-  const totalSentOther = send === undefined
-    ? undefined
-    : readCounter(send.other);
-  const sentBytesByKind = send?.bytesByKind;
-  const sentSnapshotBytes = sentBytesByKind === undefined || !isRecord(sentBytesByKind)
-    ? undefined
-    : readCounter(sentBytesByKind.snapshots);
-  const sentKeepaliveBytes = sentBytesByKind === undefined || !isRecord(sentBytesByKind)
-    ? undefined
-    : readCounter(sentBytesByKind.keepalives);
-  const sentCriticalBytes = sentBytesByKind === undefined || !isRecord(sentBytesByKind)
-    ? undefined
-    : readCounter(sentBytesByKind.critical);
-  const sentOtherBytes = sentBytesByKind === undefined || !isRecord(sentBytesByKind)
-    ? undefined
-    : readCounter(sentBytesByKind.other);
-  const failedSend = send?.failed;
-  const failedSendFrames = failedSend === undefined || !isRecord(failedSend)
-    ? undefined
-    : readCounter(failedSend.frames);
-  const failedSendBytes = failedSend === undefined || !isRecord(failedSend)
-    ? undefined
-    : readCounter(failedSend.bytes);
+    : readOutboundProofSummary(outboundProof);
   const sentFrames = readCounter(sinceAuthenticated.sentFrames);
   const sentBytes = readCounter(sinceAuthenticated.sentBytes);
   const receivedFrames = readCounter(sinceAuthenticated.receivedFrames);
@@ -367,6 +768,15 @@ export function parseNetworkTelemetrySummary(
   const missingSnapshots = readCounter(snapshots.missing);
   const maxSnapshotGap = readCounter(snapshots.maxGap);
   const lastSnapshotSeq = optionalCounter(snapshots, "lastSeq");
+  const activeSnapshotIntervalTicks =
+    snapshots.activeIntervalTicks === null
+      ? null
+      : optionalCounter(snapshots, "activeIntervalTicks");
+  const invalidActiveSnapshotInterval =
+    snapshots.activeIntervalTicks !== undefined &&
+    snapshots.activeIntervalTicks !== null &&
+    activeSnapshotIntervalTicks === null;
+  const snapshotDeliveryLag = optionalCounter(snapshots, "deliveryLag");
   const criticalPending = readCounter(critical.pending);
   const maxCriticalPending = readCounter(critical.maxPending);
   const criticalRetransmits = optionalCounter(critical, "retransmits");
@@ -378,6 +788,12 @@ export function parseNetworkTelemetrySummary(
     channelAgeMs === null ||
     firstRawFrameMs === null ||
     firstAuthenticatedFrameMs === null ||
+    (currentGenerationInbound !== undefined &&
+      typeof currentGenerationInbound !== "boolean") ||
+    (currentGenerationOutboundProof !== undefined &&
+      typeof currentGenerationOutboundProof !== "boolean") ||
+    ((currentGenerationInbound === undefined) !==
+      (currentGenerationOutboundProof === undefined)) ||
     rawFrames === undefined ||
     rawBytes === undefined ||
     decodedFrames === undefined ||
@@ -387,6 +803,7 @@ export function parseNetworkTelemetrySummary(
     rawAgeMs === null ||
     decodedAgeMs === null ||
     authenticatedAgeMs === null ||
+    (receive.byKind !== undefined && authenticatedByKind === undefined) ||
     (receiveSession !== undefined &&
       (
         sessionRawFrames === undefined ||
@@ -396,29 +813,12 @@ export function parseNetworkTelemetrySummary(
         sessionAuthenticatedFrames === undefined ||
         sessionAuthenticatedBytes === undefined
       )) ||
-    (send !== undefined &&
-      (
-        totalSentFrames === undefined ||
-        totalSentBytes === undefined ||
-        totalSentSnapshots === undefined ||
-        totalSentKeepalives === undefined ||
-        totalSentCritical === undefined ||
-        totalSentOther === undefined
-      )) ||
-    (send !== undefined && send.bytesByKind !== undefined &&
-      (
-        !isRecord(send.bytesByKind) ||
-        sentSnapshotBytes === undefined ||
-        sentKeepaliveBytes === undefined ||
-        sentCriticalBytes === undefined ||
-        sentOtherBytes === undefined
-      )) ||
-    (send !== undefined && send.failed !== undefined &&
-      (
-        !isRecord(send.failed) ||
-        failedSendFrames === undefined ||
-        failedSendBytes === undefined
-      )) ||
+    (receiveSession?.byKind !== undefined &&
+      sessionAuthenticatedByKind === undefined) ||
+    (send !== undefined && sendSummary === undefined) ||
+    (sendChannel !== undefined && channelSendSummary === undefined) ||
+    (sinceOutboundProof !== undefined && outboundProofWindow === undefined) ||
+    (outboundProof !== undefined && outboundProofSummary === undefined) ||
     sentFrames === undefined ||
     sentBytes === undefined ||
     receivedFrames === undefined ||
@@ -440,6 +840,10 @@ export function parseNetworkTelemetrySummary(
     missingSnapshots === undefined ||
     maxSnapshotGap === undefined ||
     lastSnapshotSeq === null ||
+    invalidActiveSnapshotInterval ||
+    snapshotDeliveryLag === null ||
+    ((activeSnapshotIntervalTicks === undefined) !==
+      (snapshotDeliveryLag === undefined)) ||
     criticalPending === undefined ||
     maxCriticalPending === undefined ||
     criticalRetransmits === null ||
@@ -461,6 +865,15 @@ export function parseNetworkTelemetrySummary(
     (sentOtherBytes ?? 0);
   if (
     profiledSentFrames !== sentFrames ||
+    ((outboundProofWindow === undefined) !==
+      (outboundProofSummary === undefined)) ||
+    (outboundProofWindow?.windowAgeMs !== undefined &&
+      outboundProofSummary?.ageMs !== undefined &&
+      outboundProofWindow.windowAgeMs !== outboundProofSummary.ageMs) ||
+    (currentGenerationInbound !== undefined &&
+      currentGenerationInbound !== (authenticatedFrames > 0)) ||
+    (currentGenerationOutboundProof === true &&
+      (outboundProofSummary?.total ?? 0) === 0) ||
     (totalSentFrames !== undefined &&
       (
         profiledTotalSentFrames !== totalSentFrames ||
@@ -476,16 +889,58 @@ export function parseNetworkTelemetrySummary(
         !Number.isSafeInteger(profiledTotalSentBytes) ||
         profiledTotalSentBytes !== totalSentBytes
       )) ||
+    (channelSendSummary !== undefined &&
+      (
+        totalSentFrames === undefined ||
+        channelSendSummary.frames > totalSentFrames ||
+        channelSendSummary.bytes > totalSentBytes! ||
+        channelSendSummary.snapshots > totalSentSnapshots! ||
+        channelSendSummary.keepalives > totalSentKeepalives! ||
+        channelSendSummary.critical > totalSentCritical! ||
+        channelSendSummary.other > totalSentOther! ||
+        (channelSendSummary.bytesByKind !== undefined &&
+          sendSummary?.bytesByKind !== undefined &&
+          (
+            channelSendSummary.bytesByKind.snapshots >
+              sendSummary.bytesByKind.snapshots ||
+            channelSendSummary.bytesByKind.keepalives >
+              sendSummary.bytesByKind.keepalives ||
+            channelSendSummary.bytesByKind.critical >
+              sendSummary.bytesByKind.critical ||
+            channelSendSummary.bytesByKind.other >
+              sendSummary.bytesByKind.other
+          )) ||
+        (channelSendSummary.failed?.frames ?? 0) > (failedSendFrames ?? 0) ||
+        (channelSendSummary.failed?.bytes ?? 0) > (failedSendBytes ?? 0)
+      )) ||
+    (outboundProofWindow !== undefined &&
+      (
+        totalSentFrames === undefined ||
+        outboundProofWindow.sentFrames > totalSentFrames ||
+        outboundProofWindow.sentBytes > totalSentBytes! ||
+        outboundProofWindow.sentSnapshots > totalSentSnapshots! ||
+        outboundProofWindow.sentKeepalives > totalSentKeepalives! ||
+        outboundProofWindow.sentCritical > totalSentCritical! ||
+        outboundProofWindow.sentOther > totalSentOther! ||
+        (sessionRawFrames !== undefined &&
+          outboundProofWindow.receivedFrames > sessionRawFrames) ||
+        (sessionRawBytes !== undefined &&
+          outboundProofWindow.receivedBytes > sessionRawBytes)
+      )) ||
     (maxPumpGapSessionMs !== undefined &&
       maxPumpGapSessionMs < maxPumpGapMs) ||
     decodedFrames > rawFrames ||
     authenticatedFrames > decodedFrames ||
     decodedBytes > rawBytes ||
     authenticatedBytes > decodedBytes ||
+    (authenticatedByKind !== undefined &&
+      receiveKindFrameTotal(authenticatedByKind) !== authenticatedFrames) ||
     (sessionRawFrames !== undefined &&
       (
         sessionRawFrames < rawFrames ||
         sessionRawBytes! < rawBytes ||
+        receivedFrames > sessionRawFrames ||
+        receivedBytes > sessionRawBytes! ||
         sessionDecodedFrames! < decodedFrames ||
         sessionDecodedBytes! < decodedBytes ||
         sessionAuthenticatedFrames! < authenticatedFrames ||
@@ -494,6 +949,15 @@ export function parseNetworkTelemetrySummary(
         sessionAuthenticatedFrames! > sessionDecodedFrames! ||
         sessionDecodedBytes! > sessionRawBytes! ||
         sessionAuthenticatedBytes! > sessionDecodedBytes!
+      )) ||
+    (sessionAuthenticatedByKind !== undefined &&
+      receiveKindFrameTotal(sessionAuthenticatedByKind) !==
+        sessionAuthenticatedFrames) ||
+    (authenticatedByKind !== undefined &&
+      sessionAuthenticatedByKind !== undefined &&
+      !receiveKindsFitWithin(
+        authenticatedByKind,
+        sessionAuthenticatedByKind,
       )) ||
     criticalPending > maxCriticalPending ||
     snapshotGapEvents > acceptedSnapshots ||
@@ -513,6 +977,12 @@ export function parseNetworkTelemetrySummary(
       ...(firstAuthenticatedFrameMs === undefined
         ? {}
         : { firstAuthenticatedFrameMs }),
+      ...(currentGenerationInbound === undefined
+        ? {}
+        : { currentGenerationInbound }),
+      ...(currentGenerationOutboundProof === undefined
+        ? {}
+        : { currentGenerationOutboundProof }),
     },
     receive: {
       rawFrames,
@@ -524,6 +994,9 @@ export function parseNetworkTelemetrySummary(
       ...(rawAgeMs === undefined ? {} : { rawAgeMs }),
       ...(decodedAgeMs === undefined ? {} : { decodedAgeMs }),
       ...(authenticatedAgeMs === undefined ? {} : { authenticatedAgeMs }),
+      ...(authenticatedByKind === undefined
+        ? {}
+        : { byKind: authenticatedByKind }),
     },
     ...(sessionRawFrames === undefined
       ? {}
@@ -535,38 +1008,15 @@ export function parseNetworkTelemetrySummary(
             decodedBytes: sessionDecodedBytes!,
             authenticatedFrames: sessionAuthenticatedFrames!,
             authenticatedBytes: sessionAuthenticatedBytes!,
+            ...(sessionAuthenticatedByKind === undefined
+              ? {}
+              : { byKind: sessionAuthenticatedByKind }),
           },
         }),
-    ...(totalSentFrames === undefined
+    ...(sendSummary === undefined ? {} : { send: sendSummary }),
+    ...(channelSendSummary === undefined
       ? {}
-      : {
-          send: {
-            frames: totalSentFrames,
-            bytes: totalSentBytes!,
-            snapshots: totalSentSnapshots!,
-            keepalives: totalSentKeepalives!,
-            critical: totalSentCritical!,
-            other: totalSentOther!,
-            ...(sentSnapshotBytes === undefined
-              ? {}
-              : {
-                  bytesByKind: {
-                    snapshots: sentSnapshotBytes,
-                    keepalives: sentKeepaliveBytes!,
-                    critical: sentCriticalBytes!,
-                    other: sentOtherBytes!,
-                  },
-                }),
-            ...(failedSendFrames === undefined
-              ? {}
-              : {
-                  failed: {
-                    frames: failedSendFrames,
-                    bytes: failedSendBytes!,
-                  },
-                }),
-          },
-        }),
+      : { sendChannel: channelSendSummary }),
     sinceAuthenticated: {
       sentFrames,
       sentBytes,
@@ -580,6 +1030,12 @@ export function parseNetworkTelemetrySummary(
         ? {}
         : { windowAgeMs: authenticatedWindowAgeMs }),
     },
+    ...(outboundProofWindow === undefined
+      ? {}
+      : { sinceOutboundProof: outboundProofWindow }),
+    ...(outboundProofSummary === undefined
+      ? {}
+      : { outboundProof: outboundProofSummary }),
     pump: {
       lastGapMs: lastPumpGapMs,
       maxGapMs: maxPumpGapMs,
@@ -600,6 +1056,12 @@ export function parseNetworkTelemetrySummary(
       missing: missingSnapshots,
       maxGap: maxSnapshotGap,
       ...(lastSnapshotSeq === undefined ? {} : { lastSeq: lastSnapshotSeq }),
+      ...(activeSnapshotIntervalTicks === undefined
+        ? {}
+        : { activeIntervalTicks: activeSnapshotIntervalTicks }),
+      ...(snapshotDeliveryLag === undefined
+        ? {}
+        : { deliveryLag: snapshotDeliveryLag }),
     },
     critical: {
       pending: criticalPending,
@@ -619,10 +1081,22 @@ export function cloneNetworkTelemetrySummary(
 ): NetworkTelemetrySummary {
   return {
     channel: { ...summary.channel },
-    receive: { ...summary.receive },
+    receive: {
+      ...summary.receive,
+      ...(summary.receive.byKind === undefined
+        ? {}
+        : { byKind: { ...summary.receive.byKind } }),
+    },
     ...(summary.receiveSession === undefined
       ? {}
-      : { receiveSession: { ...summary.receiveSession } }),
+      : {
+          receiveSession: {
+            ...summary.receiveSession,
+            ...(summary.receiveSession.byKind === undefined
+              ? {}
+              : { byKind: { ...summary.receiveSession.byKind } }),
+          },
+        }),
     ...(summary.send === undefined
       ? {}
       : {
@@ -636,7 +1110,52 @@ export function cloneNetworkTelemetrySummary(
               : { failed: { ...summary.send.failed } }),
           },
         }),
+    ...(summary.sendChannel === undefined
+      ? {}
+      : {
+          sendChannel: {
+            ...summary.sendChannel,
+            ...(summary.sendChannel.bytesByKind === undefined
+              ? {}
+              : { bytesByKind: { ...summary.sendChannel.bytesByKind } }),
+            ...(summary.sendChannel.failed === undefined
+              ? {}
+              : { failed: { ...summary.sendChannel.failed } }),
+          },
+        }),
     sinceAuthenticated: { ...summary.sinceAuthenticated },
+    ...(summary.sinceOutboundProof === undefined
+      ? {}
+      : { sinceOutboundProof: { ...summary.sinceOutboundProof } }),
+    ...(summary.outboundProof === undefined
+      ? {}
+      : {
+          outboundProof: {
+            ...summary.outboundProof,
+            bySource: { ...summary.outboundProof.bySource },
+            deliveryProbe: { ...summary.outboundProof.deliveryProbe },
+            ...(summary.outboundProof.criticalAck === undefined
+              ? {}
+              : { criticalAck: { ...summary.outboundProof.criticalAck } }),
+            ...(summary.outboundProof.criticalCursor === undefined
+              ? {}
+              : {
+                  criticalCursor: {
+                    ...summary.outboundProof.criticalCursor,
+                  },
+                }),
+            ...(summary.outboundProof.snapshotCursor === undefined
+              ? {}
+              : {
+                  snapshotCursor: {
+                    ...summary.outboundProof.snapshotCursor,
+                  },
+                }),
+            ...(summary.outboundProof.clockPong === undefined
+              ? {}
+              : { clockPong: { ...summary.outboundProof.clockPong } }),
+          },
+        }),
     pump: { ...summary.pump },
     ...(summary.rtt === undefined ? {} : { rtt: { ...summary.rtt } }),
     ...(summary.authenticatedInterarrival === undefined
@@ -676,6 +1195,7 @@ export class NetworkTelemetry {
   private lastRawAtMs: number | null = null;
   private lastDecodedAtMs: number | null = null;
   private lastAuthenticatedAtMs: number | null = null;
+  private readonly authenticatedByKind = createReceiveKindTotals();
 
   private sessionRawFrames = 0;
   private sessionRawBytes = 0;
@@ -685,6 +1205,7 @@ export class NetworkTelemetry {
   private sessionAuthenticatedBytes = 0;
   private lastSessionAuthenticatedAtMs: number | null = null;
   private readonly authenticatedInterarrival = createTimingAccumulator();
+  private readonly sessionAuthenticatedByKind = createReceiveKindTotals();
 
   private sentFrames = 0;
   private sentBytes = 0;
@@ -699,6 +1220,19 @@ export class NetworkTelemetry {
   private failedSendFrames = 0;
   private failedSendBytes = 0;
 
+  private channelSentFrames = 0;
+  private channelSentBytes = 0;
+  private channelSentSnapshots = 0;
+  private channelSentKeepalives = 0;
+  private channelSentCritical = 0;
+  private channelSentOther = 0;
+  private channelSentSnapshotBytes = 0;
+  private channelSentKeepaliveBytes = 0;
+  private channelSentCriticalBytes = 0;
+  private channelSentOtherBytes = 0;
+  private channelFailedSendFrames = 0;
+  private channelFailedSendBytes = 0;
+
   private sentFramesSinceAuthenticated = 0;
   private sentBytesSinceAuthenticated = 0;
   private receivedFramesSinceAuthenticated = 0;
@@ -708,6 +1242,44 @@ export class NetworkTelemetry {
   private sentCriticalSinceAuthenticated = 0;
   private sentOtherSinceAuthenticated = 0;
   private sinceAuthenticatedWindowStartedAtMs: number | null = null;
+  private authenticatedWindowGeneration = 0;
+
+  private sentFramesSinceOutboundProof = 0;
+  private sentBytesSinceOutboundProof = 0;
+  private receivedFramesSinceOutboundProof = 0;
+  private receivedBytesSinceOutboundProof = 0;
+  private sentSnapshotsSinceOutboundProof = 0;
+  private sentKeepalivesSinceOutboundProof = 0;
+  private sentCriticalSinceOutboundProof = 0;
+  private sentOtherSinceOutboundProof = 0;
+  private sinceOutboundProofWindowStartedAtMs: number | null = null;
+  private outboundProofWindowGeneration = 0;
+
+  private currentGenerationOutboundProof = false;
+  private lastOutboundProofAtMs: number | null = null;
+  private outboundProofTotal = 0;
+  private deliveryProbeEchoProofs = 0;
+  private criticalAckProofs = 0;
+  private criticalCursorProofs = 0;
+  private snapshotCursorProofs = 0;
+  private clockPongProofs = 0;
+  private deliveryProbesSent = 0;
+  private deliveryProbesEchoed = 0;
+  private deliveryProbeAttemptGeneration = 0;
+  private readonly rejectedDeliveryProbeAttempts =
+    new WeakSet<NetworkDeliveryProbeAttempt>();
+  private lastDeliveryProbeSentSeq: number | null = null;
+  private lastDeliveryProbeSentAtMs: number | null = null;
+  private lastDeliveryProbeEchoedSeq: number | null = null;
+  private lastDeliveryProbeEchoedAtMs: number | null = null;
+  private lastCriticalAckProofAtMs: number | null = null;
+  private lastCriticalAckCursor: number | null = null;
+  private lastCriticalCursorProofAtMs: number | null = null;
+  private lastCriticalCursor: number | null = null;
+  private lastSnapshotCursorProofAtMs: number | null = null;
+  private lastSnapshotCursor: number | null = null;
+  private lastClockPongProofAtMs: number | null = null;
+  private lastClockPongSampleId: number | null = null;
 
   private lastPumpAtMs: number | null = null;
   private pumpWindowStartedAtMs: number | null = null;
@@ -722,6 +1294,8 @@ export class NetworkTelemetry {
   private snapshotsMissing = 0;
   private maxSnapshotGap = 0;
   private lastSnapshotSeq: number | null = null;
+  private activeSnapshotIntervalTicks: number | null | undefined = undefined;
+  private snapshotDeliveryLag: number | null = null;
 
   private criticalPending = 0;
   private maxCriticalPending = 0;
@@ -749,6 +1323,21 @@ export class NetworkTelemetry {
     this.lastRawAtMs = null;
     this.lastDecodedAtMs = null;
     this.lastAuthenticatedAtMs = null;
+    resetReceiveKindTotals(this.authenticatedByKind);
+    this.currentGenerationOutboundProof = false;
+    this.channelSentFrames = 0;
+    this.channelSentBytes = 0;
+    this.channelSentSnapshots = 0;
+    this.channelSentKeepalives = 0;
+    this.channelSentCritical = 0;
+    this.channelSentOther = 0;
+    this.channelSentSnapshotBytes = 0;
+    this.channelSentKeepaliveBytes = 0;
+    this.channelSentCriticalBytes = 0;
+    this.channelSentOtherBytes = 0;
+    this.channelFailedSendFrames = 0;
+    this.channelFailedSendBytes = 0;
+    this.sinceOutboundProofWindowStartedAtMs ??= now;
   }
 
   public noteChannelDetached(): void {
@@ -758,10 +1347,12 @@ export class NetworkTelemetry {
   }
 
   /** Stage a frame before transport.send; pair a thrown send with noteSendFailed. */
-  public noteSent(bytes: number, kind: MessageKind): void {
+  public noteSent(bytes: number, kind: MessageKind): NetworkSendAttempt {
     requireCounter(bytes, "Sent byte count");
     this.sentFrames = increment(this.sentFrames);
     this.sentBytes = increment(this.sentBytes, bytes);
+    this.channelSentFrames = increment(this.channelSentFrames);
+    this.channelSentBytes = increment(this.channelSentBytes, bytes);
     this.sentFramesSinceAuthenticated = increment(
       this.sentFramesSinceAuthenticated,
     );
@@ -769,24 +1360,72 @@ export class NetworkTelemetry {
       this.sentBytesSinceAuthenticated,
       bytes,
     );
+    this.sentFramesSinceOutboundProof = increment(
+      this.sentFramesSinceOutboundProof,
+    );
+    this.sentBytesSinceOutboundProof = increment(
+      this.sentBytesSinceOutboundProof,
+      bytes,
+    );
     this.adjustSentKind(kind, 1, bytes);
+    return {
+      channelGeneration: this.channelGeneration,
+      authenticatedWindowGeneration: this.authenticatedWindowGeneration,
+      outboundProofWindowGeneration: this.outboundProofWindowGeneration,
+    };
   }
 
   /** Roll back a staged send when the transport rejects it by throwing. */
-  public noteSendFailed(bytes: number, kind: MessageKind): void {
+  public noteSendFailed(
+    bytes: number,
+    kind: MessageKind,
+    attempt?: NetworkSendAttempt,
+  ): void {
     requireCounter(bytes, "Rejected send byte count");
+    const sameChannel = attempt === undefined ||
+      attempt.channelGeneration === this.channelGeneration;
+    const sameAuthenticatedWindow = attempt === undefined ||
+      attempt.authenticatedWindowGeneration ===
+        this.authenticatedWindowGeneration;
+    const sameOutboundProofWindow = attempt === undefined ||
+      attempt.outboundProofWindowGeneration ===
+        this.outboundProofWindowGeneration;
     this.failedSendFrames = increment(this.failedSendFrames);
     this.failedSendBytes = increment(this.failedSendBytes, bytes);
+    if (sameChannel) {
+      this.channelFailedSendFrames = increment(this.channelFailedSendFrames);
+      this.channelFailedSendBytes = increment(this.channelFailedSendBytes, bytes);
+    }
     this.sentFrames = decrement(this.sentFrames);
     this.sentBytes = decrement(this.sentBytes, bytes);
-    this.sentFramesSinceAuthenticated = decrement(
-      this.sentFramesSinceAuthenticated,
-    );
-    this.sentBytesSinceAuthenticated = decrement(
-      this.sentBytesSinceAuthenticated,
-      bytes,
-    );
-    this.adjustSentKind(kind, -1, -bytes);
+    if (sameChannel) {
+      this.channelSentFrames = decrement(this.channelSentFrames);
+      this.channelSentBytes = decrement(this.channelSentBytes, bytes);
+    }
+    if (sameAuthenticatedWindow) {
+      this.sentFramesSinceAuthenticated = decrement(
+        this.sentFramesSinceAuthenticated,
+      );
+      this.sentBytesSinceAuthenticated = decrement(
+        this.sentBytesSinceAuthenticated,
+        bytes,
+      );
+    }
+    if (sameOutboundProofWindow) {
+      this.sentFramesSinceOutboundProof = decrement(
+        this.sentFramesSinceOutboundProof,
+      );
+      this.sentBytesSinceOutboundProof = decrement(
+        this.sentBytesSinceOutboundProof,
+        bytes,
+      );
+    }
+    this.adjustSentKind(kind, -1, -bytes, {
+      lifetime: true,
+      channel: sameChannel,
+      authenticatedWindow: sameAuthenticatedWindow,
+      outboundProofWindow: sameOutboundProofWindow,
+    });
   }
 
   /** Count every listener callback, before decoding or sender validation. */
@@ -802,6 +1441,13 @@ export class NetworkTelemetry {
     );
     this.receivedBytesSinceAuthenticated = increment(
       this.receivedBytesSinceAuthenticated,
+      bytes,
+    );
+    this.receivedFramesSinceOutboundProof = increment(
+      this.receivedFramesSinceOutboundProof,
+    );
+    this.receivedBytesSinceOutboundProof = increment(
+      this.receivedBytesSinceOutboundProof,
       bytes,
     );
     this.lastRawAtMs = now;
@@ -828,13 +1474,15 @@ export class NetworkTelemetry {
    * Count a frame from the bound peer session. This begins a fresh traffic and
    * pump-gap window; the current frame remains in the per-channel receive totals.
    */
-  public noteAuthenticatedReceived(bytes: number): void {
+  public noteAuthenticatedReceived(bytes: number, kind?: MessageKind): void {
     requireCounter(bytes, "Authenticated byte count");
     const now = this.now();
     this.authenticatedFrames = increment(this.authenticatedFrames);
     this.authenticatedBytes = increment(this.authenticatedBytes, bytes);
     this.sessionAuthenticatedFrames = increment(this.sessionAuthenticatedFrames);
     this.sessionAuthenticatedBytes = increment(this.sessionAuthenticatedBytes, bytes);
+    this.incrementAuthenticatedKind(this.authenticatedByKind, kind);
+    this.incrementAuthenticatedKind(this.sessionAuthenticatedByKind, kind);
     if (this.lastSessionAuthenticatedAtMs !== null) {
       noteTimingSample(
         this.authenticatedInterarrival,
@@ -898,6 +1546,116 @@ export class NetworkTelemetry {
     this.lastSnapshotSeq = Math.max(this.lastSnapshotSeq ?? 0, sequence);
   }
 
+  /** Record the active periodic cadence and peer-acceptance lag without history. */
+  public noteSnapshotFlow(
+    intervalTicks: number | null,
+    deliveryLag: number,
+  ): void {
+    this.activeSnapshotIntervalTicks = intervalTicks === null
+      ? null
+      : requireCounter(intervalTicks, "Active snapshot interval");
+    this.snapshotDeliveryLag = requireCounter(
+      deliveryLag,
+      "Snapshot delivery lag",
+    );
+  }
+
+  /** Stage one delivery probe before transport.send. */
+  public noteDeliveryProbeSent(sequence: number): NetworkDeliveryProbeAttempt {
+    const previousCount = this.deliveryProbesSent;
+    const attempt: NetworkDeliveryProbeAttempt = {
+      generation: increment(this.deliveryProbeAttemptGeneration),
+      previousLastSequence: this.lastDeliveryProbeSentSeq,
+      previousLastAtMs: this.lastDeliveryProbeSentAtMs,
+      incremented: previousCount < Number.MAX_SAFE_INTEGER,
+    };
+    this.deliveryProbeAttemptGeneration = attempt.generation;
+    this.lastDeliveryProbeSentSeq = requireCounter(
+      sequence,
+      "Delivery probe sequence",
+    );
+    this.lastDeliveryProbeSentAtMs = this.now();
+    this.deliveryProbesSent = increment(this.deliveryProbesSent);
+    return attempt;
+  }
+
+  /** Roll back a staged delivery probe when transport.send throws. */
+  public noteDeliveryProbeSendFailed(
+    attempt: NetworkDeliveryProbeAttempt,
+  ): void {
+    if (this.rejectedDeliveryProbeAttempts.has(attempt)) return;
+    this.rejectedDeliveryProbeAttempts.add(attempt);
+    if (attempt.incremented) {
+      this.deliveryProbesSent = decrement(this.deliveryProbesSent);
+    }
+    if (attempt.generation !== this.deliveryProbeAttemptGeneration) return;
+    this.lastDeliveryProbeSentSeq = attempt.previousLastSequence;
+    this.lastDeliveryProbeSentAtMs = attempt.previousLastAtMs;
+  }
+
+  /** Record an echoed local probe and the corresponding outbound proof. */
+  public noteDeliveryProbeEchoed(sequence: number): void {
+    this.lastDeliveryProbeEchoedSeq = requireCounter(
+      sequence,
+      "Echoed delivery probe sequence",
+    );
+    this.lastDeliveryProbeEchoedAtMs = this.now();
+    this.deliveryProbesEchoed = increment(this.deliveryProbesEchoed);
+    this.noteOutboundDeliveryProof("delivery-probe-echo");
+  }
+
+  /** Record one bounded source category as end-to-end outbound delivery proof. */
+  public noteOutboundDeliveryProof<S extends OutboundDeliveryProofSource>(
+    source: S,
+    metadata?: OutboundDeliveryProofMetadataMap[S],
+    provesCurrentGeneration = true,
+  ): void {
+    const metadataRecord = metadata as
+      | { cursor?: number; sampleId?: number }
+      | undefined;
+    const cursor = metadataRecord?.cursor === undefined
+      ? null
+      : requireCounter(metadataRecord.cursor, "Outbound proof cursor");
+    const sampleId = metadataRecord?.sampleId === undefined
+      ? null
+      : requireCounter(metadataRecord.sampleId, "Clock sample ID");
+    const now = this.now();
+    switch (source) {
+      case "delivery-probe-echo":
+        this.deliveryProbeEchoProofs = increment(this.deliveryProbeEchoProofs);
+        break;
+      case "critical-ack":
+        this.criticalAckProofs = increment(this.criticalAckProofs);
+        this.lastCriticalAckProofAtMs = now;
+        this.lastCriticalAckCursor = cursor;
+        break;
+      case "critical-cursor":
+        this.criticalCursorProofs = increment(this.criticalCursorProofs);
+        this.lastCriticalCursorProofAtMs = now;
+        this.lastCriticalCursor = cursor;
+        break;
+      case "snapshot-cursor":
+        this.snapshotCursorProofs = increment(this.snapshotCursorProofs);
+        this.lastSnapshotCursorProofAtMs = now;
+        this.lastSnapshotCursor = cursor;
+        break;
+      case "clock-pong":
+        this.clockPongProofs = increment(this.clockPongProofs);
+        this.lastClockPongProofAtMs = now;
+        this.lastClockPongSampleId = sampleId;
+        break;
+      default: {
+        const exhaustive: never = source;
+        throw new TypeError(`Unknown outbound delivery proof source: ${exhaustive}`);
+      }
+    }
+    this.outboundProofTotal = increment(this.outboundProofTotal);
+    this.lastOutboundProofAtMs = now;
+    if (provesCurrentGeneration) this.currentGenerationOutboundProof = true;
+    this.resetOutboundProofWindow();
+    this.sinceOutboundProofWindowStartedAtMs = now;
+  }
+
   /** Sample the current reliable outbox size and retain its session high-water mark. */
   public noteCriticalPending(count: number): void {
     requireCounter(count, "Critical pending count");
@@ -935,6 +1693,8 @@ export class NetworkTelemetry {
       channel: {
         generation: this.channelGeneration,
         attached: this.channelAttached,
+        currentGenerationInbound: this.authenticatedFrames > 0,
+        currentGenerationOutboundProof: this.currentGenerationOutboundProof,
         ...(this.channelAttachedAtMs === null || channelEnd === null
           ? {}
           : { ageMs: this.elapsed(this.channelAttachedAtMs, channelEnd) }),
@@ -952,6 +1712,7 @@ export class NetworkTelemetry {
         decodedBytes: this.decodedBytes,
         authenticatedFrames: this.authenticatedFrames,
         authenticatedBytes: this.authenticatedBytes,
+        byKind: { ...this.authenticatedByKind },
         ...(this.lastRawAtMs === null
           ? {}
           : { rawAgeMs: this.elapsed(this.lastRawAtMs, now) }),
@@ -974,6 +1735,7 @@ export class NetworkTelemetry {
         decodedBytes: this.sessionDecodedBytes,
         authenticatedFrames: this.sessionAuthenticatedFrames,
         authenticatedBytes: this.sessionAuthenticatedBytes,
+        byKind: { ...this.sessionAuthenticatedByKind },
       },
       send: {
         frames: this.sentFrames,
@@ -993,6 +1755,24 @@ export class NetworkTelemetry {
           bytes: this.failedSendBytes,
         },
       },
+      sendChannel: {
+        frames: this.channelSentFrames,
+        bytes: this.channelSentBytes,
+        snapshots: this.channelSentSnapshots,
+        keepalives: this.channelSentKeepalives,
+        critical: this.channelSentCritical,
+        other: this.channelSentOther,
+        bytesByKind: {
+          snapshots: this.channelSentSnapshotBytes,
+          keepalives: this.channelSentKeepaliveBytes,
+          critical: this.channelSentCriticalBytes,
+          other: this.channelSentOtherBytes,
+        },
+        failed: {
+          frames: this.channelFailedSendFrames,
+          bytes: this.channelFailedSendBytes,
+        },
+      },
       sinceAuthenticated: {
         sentFrames: this.sentFramesSinceAuthenticated,
         sentBytes: this.sentBytesSinceAuthenticated,
@@ -1009,6 +1789,109 @@ export class NetworkTelemetry {
                 this.sinceAuthenticatedWindowStartedAtMs,
                 now,
               ),
+            }),
+      },
+      sinceOutboundProof: {
+        sentFrames: this.sentFramesSinceOutboundProof,
+        sentBytes: this.sentBytesSinceOutboundProof,
+        receivedFrames: this.receivedFramesSinceOutboundProof,
+        receivedBytes: this.receivedBytesSinceOutboundProof,
+        sentSnapshots: this.sentSnapshotsSinceOutboundProof,
+        sentKeepalives: this.sentKeepalivesSinceOutboundProof,
+        sentCritical: this.sentCriticalSinceOutboundProof,
+        sentOther: this.sentOtherSinceOutboundProof,
+        ...(this.sinceOutboundProofWindowStartedAtMs === null
+          ? {}
+          : {
+              windowAgeMs: this.elapsed(
+                this.sinceOutboundProofWindowStartedAtMs,
+                now,
+              ),
+            }),
+      },
+      outboundProof: {
+        total: this.outboundProofTotal,
+        ...(this.lastOutboundProofAtMs === null
+          ? {}
+          : { ageMs: this.elapsed(this.lastOutboundProofAtMs, now) }),
+        bySource: {
+          deliveryProbeEcho: this.deliveryProbeEchoProofs,
+          criticalAck: this.criticalAckProofs,
+          criticalCursor: this.criticalCursorProofs,
+          snapshotCursor: this.snapshotCursorProofs,
+          clockPong: this.clockPongProofs,
+        },
+        deliveryProbe: {
+          sent: this.deliveryProbesSent,
+          echoed: this.deliveryProbesEchoed,
+          ...(this.lastDeliveryProbeSentSeq === null
+            ? {}
+            : { lastSentSeq: this.lastDeliveryProbeSentSeq }),
+          ...(this.lastDeliveryProbeSentAtMs === null
+            ? {}
+            : {
+                lastSentAgeMs: this.elapsed(
+                  this.lastDeliveryProbeSentAtMs,
+                  now,
+                ),
+              }),
+          ...(this.lastDeliveryProbeEchoedSeq === null
+            ? {}
+            : { lastEchoedSeq: this.lastDeliveryProbeEchoedSeq }),
+          ...(this.lastDeliveryProbeEchoedAtMs === null
+            ? {}
+            : {
+                lastEchoedAgeMs: this.elapsed(
+                  this.lastDeliveryProbeEchoedAtMs,
+                  now,
+                ),
+              }),
+        },
+        ...(this.lastCriticalAckProofAtMs === null
+          ? {}
+          : {
+              criticalAck: {
+                lastAgeMs: this.elapsed(this.lastCriticalAckProofAtMs, now),
+                ...(this.lastCriticalAckCursor === null
+                  ? {}
+                  : { lastCursor: this.lastCriticalAckCursor }),
+              },
+            }),
+        ...(this.lastCriticalCursorProofAtMs === null
+          ? {}
+          : {
+              criticalCursor: {
+                lastAgeMs: this.elapsed(
+                  this.lastCriticalCursorProofAtMs,
+                  now,
+                ),
+                ...(this.lastCriticalCursor === null
+                  ? {}
+                  : { lastCursor: this.lastCriticalCursor }),
+              },
+            }),
+        ...(this.lastSnapshotCursorProofAtMs === null
+          ? {}
+          : {
+              snapshotCursor: {
+                lastAgeMs: this.elapsed(
+                  this.lastSnapshotCursorProofAtMs,
+                  now,
+                ),
+                ...(this.lastSnapshotCursor === null
+                  ? {}
+                  : { lastCursor: this.lastSnapshotCursor }),
+              },
+            }),
+        ...(this.lastClockPongProofAtMs === null
+          ? {}
+          : {
+              clockPong: {
+                lastAgeMs: this.elapsed(this.lastClockPongProofAtMs, now),
+                ...(this.lastClockPongSampleId === null
+                  ? {}
+                  : { lastSampleId: this.lastClockPongSampleId }),
+              },
             }),
       },
       pump: {
@@ -1036,6 +1919,12 @@ export class NetworkTelemetry {
         ...(this.lastSnapshotSeq === null
           ? {}
           : { lastSeq: this.lastSnapshotSeq }),
+        ...(this.activeSnapshotIntervalTicks === undefined
+          ? {}
+          : { activeIntervalTicks: this.activeSnapshotIntervalTicks }),
+        ...(this.snapshotDeliveryLag === null
+          ? {}
+          : { deliveryLag: this.snapshotDeliveryLag }),
       },
       critical: {
         pending: this.criticalPending,
@@ -1047,6 +1936,9 @@ export class NetworkTelemetry {
   }
 
   private resetTrafficWindow(): void {
+    this.authenticatedWindowGeneration = increment(
+      this.authenticatedWindowGeneration,
+    );
     this.sentFramesSinceAuthenticated = 0;
     this.sentBytesSinceAuthenticated = 0;
     this.receivedFramesSinceAuthenticated = 0;
@@ -1057,39 +1949,157 @@ export class NetworkTelemetry {
     this.sentOtherSinceAuthenticated = 0;
   }
 
+  private resetOutboundProofWindow(): void {
+    this.outboundProofWindowGeneration = increment(
+      this.outboundProofWindowGeneration,
+    );
+    this.sentFramesSinceOutboundProof = 0;
+    this.sentBytesSinceOutboundProof = 0;
+    this.receivedFramesSinceOutboundProof = 0;
+    this.receivedBytesSinceOutboundProof = 0;
+    this.sentSnapshotsSinceOutboundProof = 0;
+    this.sentKeepalivesSinceOutboundProof = 0;
+    this.sentCriticalSinceOutboundProof = 0;
+    this.sentOtherSinceOutboundProof = 0;
+  }
+
   private adjustSentKind(
     kind: MessageKind,
     frameAmount: 1 | -1,
     byteAmount: number,
+    scopes: SentCounterScopes = {
+      lifetime: true,
+      channel: true,
+      authenticatedWindow: true,
+      outboundProofWindow: true,
+    },
   ): void {
     if (kind === "SNAPSHOT") {
-      this.sentSnapshots = adjust(this.sentSnapshots, frameAmount);
-      this.sentSnapshotBytes = adjust(this.sentSnapshotBytes, byteAmount);
-      this.sentSnapshotsSinceAuthenticated = adjust(
-        this.sentSnapshotsSinceAuthenticated,
-        frameAmount,
-      );
+      if (scopes.lifetime) {
+        this.sentSnapshots = adjust(this.sentSnapshots, frameAmount);
+        this.sentSnapshotBytes = adjust(this.sentSnapshotBytes, byteAmount);
+      }
+      if (scopes.channel) {
+        this.channelSentSnapshots = adjust(
+          this.channelSentSnapshots,
+          frameAmount,
+        );
+        this.channelSentSnapshotBytes = adjust(
+          this.channelSentSnapshotBytes,
+          byteAmount,
+        );
+      }
+      if (scopes.authenticatedWindow) {
+        this.sentSnapshotsSinceAuthenticated = adjust(
+          this.sentSnapshotsSinceAuthenticated,
+          frameAmount,
+        );
+      }
+      if (scopes.outboundProofWindow) {
+        this.sentSnapshotsSinceOutboundProof = adjust(
+          this.sentSnapshotsSinceOutboundProof,
+          frameAmount,
+        );
+      }
     } else if (kind === "KEEPALIVE") {
-      this.sentKeepalives = adjust(this.sentKeepalives, frameAmount);
-      this.sentKeepaliveBytes = adjust(this.sentKeepaliveBytes, byteAmount);
-      this.sentKeepalivesSinceAuthenticated = adjust(
-        this.sentKeepalivesSinceAuthenticated,
-        frameAmount,
-      );
+      if (scopes.lifetime) {
+        this.sentKeepalives = adjust(this.sentKeepalives, frameAmount);
+        this.sentKeepaliveBytes = adjust(this.sentKeepaliveBytes, byteAmount);
+      }
+      if (scopes.channel) {
+        this.channelSentKeepalives = adjust(
+          this.channelSentKeepalives,
+          frameAmount,
+        );
+        this.channelSentKeepaliveBytes = adjust(
+          this.channelSentKeepaliveBytes,
+          byteAmount,
+        );
+      }
+      if (scopes.authenticatedWindow) {
+        this.sentKeepalivesSinceAuthenticated = adjust(
+          this.sentKeepalivesSinceAuthenticated,
+          frameAmount,
+        );
+      }
+      if (scopes.outboundProofWindow) {
+        this.sentKeepalivesSinceOutboundProof = adjust(
+          this.sentKeepalivesSinceOutboundProof,
+          frameAmount,
+        );
+      }
     } else if (isCriticalKind(kind)) {
-      this.sentCritical = adjust(this.sentCritical, frameAmount);
-      this.sentCriticalBytes = adjust(this.sentCriticalBytes, byteAmount);
-      this.sentCriticalSinceAuthenticated = adjust(
-        this.sentCriticalSinceAuthenticated,
-        frameAmount,
-      );
+      if (scopes.lifetime) {
+        this.sentCritical = adjust(this.sentCritical, frameAmount);
+        this.sentCriticalBytes = adjust(this.sentCriticalBytes, byteAmount);
+      }
+      if (scopes.channel) {
+        this.channelSentCritical = adjust(
+          this.channelSentCritical,
+          frameAmount,
+        );
+        this.channelSentCriticalBytes = adjust(
+          this.channelSentCriticalBytes,
+          byteAmount,
+        );
+      }
+      if (scopes.authenticatedWindow) {
+        this.sentCriticalSinceAuthenticated = adjust(
+          this.sentCriticalSinceAuthenticated,
+          frameAmount,
+        );
+      }
+      if (scopes.outboundProofWindow) {
+        this.sentCriticalSinceOutboundProof = adjust(
+          this.sentCriticalSinceOutboundProof,
+          frameAmount,
+        );
+      }
     } else {
-      this.sentOther = adjust(this.sentOther, frameAmount);
-      this.sentOtherBytes = adjust(this.sentOtherBytes, byteAmount);
-      this.sentOtherSinceAuthenticated = adjust(
-        this.sentOtherSinceAuthenticated,
-        frameAmount,
-      );
+      if (scopes.lifetime) {
+        this.sentOther = adjust(this.sentOther, frameAmount);
+        this.sentOtherBytes = adjust(this.sentOtherBytes, byteAmount);
+      }
+      if (scopes.channel) {
+        this.channelSentOther = adjust(this.channelSentOther, frameAmount);
+        this.channelSentOtherBytes = adjust(
+          this.channelSentOtherBytes,
+          byteAmount,
+        );
+      }
+      if (scopes.authenticatedWindow) {
+        this.sentOtherSinceAuthenticated = adjust(
+          this.sentOtherSinceAuthenticated,
+          frameAmount,
+        );
+      }
+      if (scopes.outboundProofWindow) {
+        this.sentOtherSinceOutboundProof = adjust(
+          this.sentOtherSinceOutboundProof,
+          frameAmount,
+        );
+      }
+    }
+  }
+
+  private incrementAuthenticatedKind(
+    totals: NetworkReceiveKindTotals,
+    kind: MessageKind | undefined,
+  ): void {
+    if (kind === "SNAPSHOT") {
+      totals.snapshots = increment(totals.snapshots);
+    } else if (kind === "KEEPALIVE") {
+      totals.keepalives = increment(totals.keepalives);
+    } else if (kind === "CLOCK_PING") {
+      totals.clockPings = increment(totals.clockPings);
+    } else if (kind === "CLOCK_PONG") {
+      totals.clockPongs = increment(totals.clockPongs);
+    } else if (kind === "ACK") {
+      totals.acks = increment(totals.acks);
+    } else if (kind !== undefined && isCriticalKind(kind)) {
+      totals.critical = increment(totals.critical);
+    } else {
+      totals.other = increment(totals.other);
     }
   }
 

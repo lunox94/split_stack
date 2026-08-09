@@ -77,6 +77,16 @@ export interface RemoteTickDiagnosticContext {
   maxAllowedDeltaTicks: number;
 }
 
+export interface RollbackDiagnosticContext {
+  /** Local simulation tick at the first pause transition. */
+  originalPauseTick: number;
+  /** Local and remote ticks after any earlier NETWORK_PAUSE adoption. */
+  localResumeTick: number;
+  remoteResumeTick: number;
+  /** Shared tick selected for the resume countdown. */
+  finalCommonTick: number;
+}
+
 export const PAUSE_TRIGGERS = [
   "local-silence",
   "local-delivery-failure",
@@ -129,6 +139,7 @@ export interface NetworkDiagnosticEventInput {
   lastSnapshotRejection?: SnapshotRejectionReason;
   clockSync?: ClockSyncTimeoutSummary;
   remoteTick?: RemoteTickDiagnosticContext;
+  rollback?: RollbackDiagnosticContext;
   pauseTrigger?: PauseTrigger;
   detachReason?: DetachReason;
   telemetry?: NetworkTelemetrySummary;
@@ -312,6 +323,31 @@ function readRemoteTickContext(
   return { source, localTick, remoteTargetTick, maxAllowedDeltaTicks };
 }
 
+function readRollbackContext(
+  value: unknown,
+): RollbackDiagnosticContext | undefined {
+  if (!isRecord(value)) return undefined;
+  const originalPauseTick = readNonNegativeInteger(value.originalPauseTick);
+  const localResumeTick = readNonNegativeInteger(value.localResumeTick);
+  const remoteResumeTick = readNonNegativeInteger(value.remoteResumeTick);
+  const finalCommonTick = readNonNegativeInteger(value.finalCommonTick);
+  if (
+    originalPauseTick === undefined ||
+    localResumeTick === undefined ||
+    remoteResumeTick === undefined ||
+    finalCommonTick === undefined ||
+    finalCommonTick !== Math.min(localResumeTick, remoteResumeTick)
+  ) {
+    return undefined;
+  }
+  return {
+    originalPauseTick,
+    localResumeTick,
+    remoteResumeTick,
+    finalCommonTick,
+  };
+}
+
 function readEvent(value: unknown): NetworkDiagnosticEvent | undefined {
   if (!isRecord(value) || !EVENT_KINDS.has(value.kind as NetworkDiagnosticEventKind)) {
     return undefined;
@@ -348,6 +384,17 @@ function readEvent(value: unknown): NetworkDiagnosticEvent | undefined {
   if (kind === "clock-sync-timeout" && clockSync === undefined) return undefined;
   const remoteTick = kind === "desynchronized"
     ? readRemoteTickContext(value.remoteTick)
+    : undefined;
+  const parsedRollback = kind === "resume-countdown"
+    ? readRollbackContext(value.rollback)
+    : undefined;
+  const rollback = parsedRollback !== undefined &&
+    (pauseTick === undefined || pauseTick === parsedRollback.finalCommonTick) &&
+    (rollbackTicks === undefined ||
+      rollbackTicks ===
+        Math.max(parsedRollback.localResumeTick, parsedRollback.remoteResumeTick) -
+          parsedRollback.finalCommonTick)
+    ? parsedRollback
     : undefined;
   const pauseTrigger = kind === "connection-unstable" &&
     PAUSE_TRIGGER_SET.has(value.pauseTrigger as PauseTrigger)
@@ -391,6 +438,7 @@ function readEvent(value: unknown): NetworkDiagnosticEvent | undefined {
     ...(lastSnapshotRejection === undefined ? {} : { lastSnapshotRejection }),
     ...(clockSync === undefined ? {} : { clockSync }),
     ...(remoteTick === undefined ? {} : { remoteTick }),
+    ...(rollback === undefined ? {} : { rollback }),
     ...(pauseTrigger === undefined ? {} : { pauseTrigger }),
     ...(detachReason === undefined ? {} : { detachReason }),
     ...(telemetry === undefined ? {} : { telemetry }),
@@ -484,6 +532,9 @@ function cloneEvent(event: NetworkDiagnosticEvent): NetworkDiagnosticEvent {
     ...(event.remoteTick === undefined
       ? {}
       : { remoteTick: { ...event.remoteTick } }),
+    ...(event.rollback === undefined
+      ? {}
+      : { rollback: { ...event.rollback } }),
     ...(event.telemetry === undefined
       ? {}
       : { telemetry: cloneNetworkTelemetrySummary(event.telemetry) }),
@@ -640,6 +691,23 @@ export class NetworkDiagnostics {
     ) {
       throw new TypeError("Invalid remote tick diagnostic context");
     }
+    const rollback = input.rollback === undefined
+      ? undefined
+      : readRollbackContext(input.rollback);
+    if (
+      input.rollback !== undefined &&
+      (
+        input.kind !== "resume-countdown" ||
+        rollback === undefined ||
+        (pauseTick !== undefined && pauseTick !== rollback.finalCommonTick) ||
+        (rollbackTicks !== undefined &&
+          rollbackTicks !==
+            Math.max(rollback.localResumeTick, rollback.remoteResumeTick) -
+              rollback.finalCommonTick)
+      )
+    ) {
+      throw new TypeError("Invalid rollback diagnostic context");
+    }
     if (
       input.pauseTrigger !== undefined &&
       (
@@ -695,6 +763,7 @@ export class NetworkDiagnostics {
         : { lastSnapshotRejection: input.lastSnapshotRejection }),
       ...(clockSync === undefined ? {} : { clockSync }),
       ...(remoteTick === undefined ? {} : { remoteTick }),
+      ...(rollback === undefined ? {} : { rollback }),
       ...(input.pauseTrigger === undefined
         ? {}
         : { pauseTrigger: input.pauseTrigger }),

@@ -19,8 +19,8 @@ import {
 
 interface OutboxEntry {
   envelope: RealtimeEnvelope<CriticalKind>;
-  firstSentMs: number;
-  lastSentMs: number;
+  firstSentMs: number | null;
+  lastSentMs: number | null;
   retryAfterMs: number;
   retransmitted: boolean;
 }
@@ -40,7 +40,9 @@ interface InboundState {
 interface GapResendWindow {
   fromSeq: number;
   throughSeq: number;
+  nextSequence: number;
   lastSentMs: number;
+  active: boolean;
 }
 
 export interface CriticalAcknowledgement {
@@ -60,7 +62,8 @@ export interface CriticalReliabilityOptions {
   peer: StreamRef;
   clock: MonotonicClock;
   getMatchTick: () => Tick;
-  send: (envelope: RealtimeEnvelope) => void;
+  /** Return false when transport admission was deferred without transmitting. */
+  send: (envelope: RealtimeEnvelope) => boolean | void;
   apply: (
     envelope: RealtimeEnvelope<CriticalKind>,
     processedAtMonotonicMs: number,
@@ -166,11 +169,18 @@ export class CriticalReliability {
   private retransmitTimeoutMs = CRITICAL_INITIAL_RETRANSMIT_MS;
   private lastResentSequence = 0;
   private resendBudgetRemaining = DEFAULT_RESEND_BUDGET_PER_PUMP;
+  private pumping = false;
   private requireApplicationReceiptKinds: ReadonlySet<CriticalKind>;
 
   public constructor(private readonly options: CriticalReliabilityOptions) {
     this.peer = options.peer;
-    this.maxPending = options.maxPending ?? RULES.network.maxPendingCritical;
+    const maxPending = options.maxPending ?? RULES.network.maxPendingCritical;
+    if (!Number.isSafeInteger(maxPending) || maxPending <= 0) {
+      throw new RangeError(
+        "Maximum pending critical count must be a positive safe integer",
+      );
+    }
+    this.maxPending = maxPending;
     this.retryMs = options.retryMs ?? RULES.network.retryMs;
     this.requireApplicationReceiptKinds = new Set(
       options.requireApplicationReceiptKinds ?? [],
@@ -274,16 +284,16 @@ export class CriticalReliability {
     } as RealtimeEnvelope<K>;
     this.nextSequence += 1;
     const erased = envelope as RealtimeEnvelope<CriticalKind>;
-    const firstSentMs = this.options.clock.now();
-    this.outbox.set(envelope.seq!, {
+    const entry: OutboxEntry = {
       envelope: erased,
-      firstSentMs,
-      lastSentMs: firstSentMs,
+      firstSentMs: null,
+      lastSentMs: null,
       retryAfterMs: Math.max(this.retransmitTimeoutMs, this.retryMs),
       retransmitted: false,
-    });
+    };
+    this.outbox.set(envelope.seq!, entry);
     this.outboundEventSeq.set(eventId, envelope.seq!);
-    this.options.send(envelope);
+    this.transmit(entry, this.options.clock.now());
     return envelope;
   }
 
@@ -307,27 +317,57 @@ export class CriticalReliability {
     }
   }
 
-  public pump(): void {
+  public pump(
+    maxRetransmissions = DEFAULT_RESEND_BUDGET_PER_PUMP,
+  ): void {
     if (!this.connected) return;
-    const now = this.options.clock.now();
-    this.resendBudgetRemaining = DEFAULT_RESEND_BUDGET_PER_PUMP;
-    const pending = [...this.outbox.entries()];
-    const firstAfterCursor = pending.findIndex(
-      ([sequence]) => sequence > this.lastResentSequence,
-    );
-    const ordered =
-      firstAfterCursor <= 0
-        ? pending
-        : [
-            ...pending.slice(firstAfterCursor),
-            ...pending.slice(0, firstAfterCursor),
-          ];
-    for (const [sequence, entry] of ordered) {
-      if (now - entry.lastSentMs < entry.retryAfterMs) continue;
-      if (this.resendBudgetRemaining === 0) break;
-      this.resendBudgetRemaining -= 1;
-      this.retransmit(entry, now);
-      this.lastResentSequence = sequence;
+    if (
+      !Number.isSafeInteger(maxRetransmissions) ||
+      maxRetransmissions < 0
+    ) {
+      throw new RangeError(
+        "Critical retransmission budget must be a non-negative safe integer",
+      );
+    }
+    if (this.pumping) return;
+    this.pumping = true;
+    try {
+      const now = this.options.clock.now();
+      this.resendBudgetRemaining = Math.min(
+        DEFAULT_RESEND_BUDGET_PER_PUMP,
+        maxRetransmissions,
+      );
+      const pending = [...this.outbox.entries()];
+      const firstAfterCursor = pending.findIndex(
+        ([sequence]) => sequence > this.lastResentSequence,
+      );
+      const ordered =
+        firstAfterCursor <= 0
+          ? pending
+          : [
+              ...pending.slice(firstAfterCursor),
+              ...pending.slice(0, firstAfterCursor),
+            ];
+      for (const [sequence, entry] of ordered) {
+        if (
+          entry.lastSentMs !== null &&
+          now - entry.lastSentMs < entry.retryAfterMs
+        ) continue;
+        if (this.resendBudgetRemaining === 0) break;
+        this.resendBudgetRemaining -= 1;
+        try {
+          if (!this.transmit(entry, now)) {
+            this.resendBudgetRemaining += 1;
+            break;
+          }
+        } catch (error) {
+          this.resendBudgetRemaining += 1;
+          throw error;
+        }
+        this.lastResentSequence = sequence;
+      }
+    } finally {
+      this.pumping = false;
     }
   }
 
@@ -369,57 +409,117 @@ export class CriticalReliability {
     if (span <= 0 || span > this.maxPending) return;
     const now = this.options.clock.now();
     this.gapResendWindows = this.gapResendWindows.filter(
-      (window) => now - window.lastSentMs < this.retryMs,
+      (window) => window.active || now - window.lastSentMs < this.retryMs,
     );
-    const entries: OutboxEntry[] = [];
-    for (
-      let sequence = envelope.payload.fromSeq;
-      sequence <= envelope.payload.throughSeq;
-      sequence += 1
-    ) {
-      const entry = this.outbox.get(sequence);
-      if (entry === undefined) continue;
-      entries.push(entry);
-    }
-    if (entries.length === 0) return;
-    if (this.gapResendWindows.some(
+    let window = this.gapResendWindows.find(
       (window) =>
         envelope.payload.fromSeq <= window.throughSeq &&
         envelope.payload.throughSeq >= window.fromSeq,
-    )) {
+    );
+    if (window === undefined) {
+      const entries: OutboxEntry[] = [];
+      for (
+        let sequence = envelope.payload.fromSeq;
+        sequence <= envelope.payload.throughSeq;
+        sequence += 1
+      ) {
+        const entry = this.outbox.get(sequence);
+        if (entry === undefined) continue;
+        entries.push(entry);
+      }
+      const batch = entries.slice(0, this.resendBudgetRemaining);
+      const first = batch[0];
+      const last = batch[batch.length - 1];
+      if (first === undefined || last === undefined) return;
+      window = {
+        fromSeq: first.envelope.seq!,
+        throughSeq: last.envelope.seq!,
+        nextSequence: first.envelope.seq!,
+        lastSentMs: now,
+        active: false,
+      };
+      this.gapResendWindows.push(window);
+      // Retained windows never overlap and each spans at least one current
+      // outbox entry, so the validated outbox bound also bounds this list.
+    }
+
+    if (
+      window.active ||
+      window.nextSequence > window.throughSeq ||
+      window.nextSequence < envelope.payload.fromSeq ||
+      window.nextSequence > envelope.payload.throughSeq
+    ) {
       return;
     }
-    // Commit the rate limit before crossing a potentially re-entrant transport.
-    // Older peers may request overlapping ranges for every buffered future
-    // frame; remembering every recently covered range prevents those requests
-    // from recursively amplifying one loss into a retransmission storm.
-    const batch = entries.slice(0, this.resendBudgetRemaining);
-    const first = batch[0];
-    const last = batch[batch.length - 1];
-    if (first === undefined || last === undefined) return;
-    this.resendBudgetRemaining -= batch.length;
-    this.gapResendWindows.push({
-      fromSeq: first.envelope.seq!,
-      throughSeq: last.envelope.seq!,
-      lastSentMs: now,
-    });
-    while (this.gapResendWindows.length > this.maxPending) {
-      this.gapResendWindows.shift();
-    }
-    for (const entry of batch) {
-      this.retransmit(entry, now);
+
+    // Mark the admitted range active before crossing the transport boundary.
+    // A synchronous peer can issue another overlapping GAP_REQUEST while a
+    // retransmission is in flight; the active marker suppresses that recursion,
+    // while nextSequence records only sends that actually completed.
+    window.active = true;
+    const throughSequence = Math.min(
+      window.throughSeq,
+      envelope.payload.throughSeq,
+    );
+    try {
+      while (window.nextSequence <= throughSequence) {
+        if (this.resendBudgetRemaining === 0) return;
+        const sequence = window.nextSequence;
+        const entry = this.outbox.get(sequence);
+        if (entry === undefined) {
+          window.nextSequence = sequence + 1;
+          continue;
+        }
+        this.resendBudgetRemaining -= 1;
+        try {
+          if (!this.transmit(entry, now)) {
+            this.resendBudgetRemaining += 1;
+            return;
+          }
+        } catch (error) {
+          this.resendBudgetRemaining += 1;
+          throw error;
+        }
+        window.nextSequence = sequence + 1;
+        window.lastSentMs = now;
+      }
+    } finally {
+      window.active = false;
     }
   }
 
-  private retransmit(entry: OutboxEntry, now: number): void {
+  private transmit(entry: OutboxEntry, now: number): boolean {
+    const previousFirstSentMs = entry.firstSentMs;
+    const previousLastSentMs = entry.lastSentMs;
+    const previousRetransmitted = entry.retransmitted;
+    const previousRetryAfterMs = entry.retryAfterMs;
+    const retransmission = previousLastSentMs !== null;
+    entry.firstSentMs ??= now;
     entry.lastSentMs = now;
-    entry.retransmitted = true;
-    entry.retryAfterMs = Math.min(
-      entry.retryAfterMs * 2,
-      MAX_RETRANSMIT_MS,
-    );
-    this.options.send(entry.envelope);
-    this.options.onRetransmit?.();
+    if (retransmission) {
+      entry.retransmitted = true;
+      entry.retryAfterMs = Math.min(
+        entry.retryAfterMs * 2,
+        MAX_RETRANSMIT_MS,
+      );
+    }
+    try {
+      if (this.options.send(entry.envelope) === false) {
+        entry.firstSentMs = previousFirstSentMs;
+        entry.lastSentMs = previousLastSentMs;
+        entry.retransmitted = previousRetransmitted;
+        entry.retryAfterMs = previousRetryAfterMs;
+        return false;
+      }
+    } catch (error) {
+      entry.firstSentMs = previousFirstSentMs;
+      entry.lastSentMs = previousLastSentMs;
+      entry.retransmitted = previousRetransmitted;
+      entry.retryAfterMs = previousRetryAfterMs;
+      throw error;
+    }
+    if (retransmission) this.options.onRetransmit?.();
+    return true;
   }
 
   private receiveCritical(envelope: RealtimeEnvelope<CriticalKind>): void {
@@ -517,12 +617,21 @@ export class CriticalReliability {
     ) {
       return;
     }
+    const previousGapRequest = state.gapRequest;
     state.gapRequest = { fromSeq: state.nextExpected, lastSentMs: now };
-    this.sendControl("GAP_REQUEST", {
-      stream: state.stream,
-      fromSeq: state.nextExpected,
-      throughSeq: firstBufferedSequence - 1,
-    });
+    try {
+      if (!this.sendControl("GAP_REQUEST", {
+        stream: state.stream,
+        fromSeq: state.nextExpected,
+        throughSeq: firstBufferedSequence - 1,
+      })) {
+        state.gapRequest = previousGapRequest;
+        return;
+      }
+    } catch (error) {
+      state.gapRequest = previousGapRequest;
+      throw error;
+    }
     this.options.onGapRequest?.();
   }
 
@@ -551,7 +660,9 @@ export class CriticalReliability {
     const eventId = criticalEventId(entry.envelope);
     // Karn's rule: an ACK after any retransmission cannot identify which send it
     // measured, so it must not influence the shared RTT estimator.
-    if (!entry.retransmitted) this.observeRoundTrip(entry);
+    if (!entry.retransmitted && entry.firstSentMs !== null) {
+      this.observeRoundTrip(entry);
+    }
     this.outbox.delete(sequence);
     this.gapResendWindows = this.gapResendWindows.filter((window) => {
       for (
@@ -579,6 +690,7 @@ export class CriticalReliability {
   }
 
   private observeRoundTrip(entry: OutboxEntry): void {
+    if (entry.firstSentMs === null) return;
     const sampleMs = Math.max(0, this.options.clock.now() - entry.firstSentMs);
     this.options.onRoundTrip?.(sampleMs);
     const estimate = this.roundTripEstimator.observe(sampleMs);
@@ -619,7 +731,7 @@ export class CriticalReliability {
   private sendControl<K extends "ACK" | "GAP_REQUEST">(
     kind: K,
     payload: RealtimePayloadMap[K],
-  ): void {
+  ): boolean {
     const envelope = {
       protocol: 1,
       matchId: this.options.matchId,
@@ -630,6 +742,6 @@ export class CriticalReliability {
       sentAtMonotonicMs: this.options.clock.now(),
       payload,
     } as RealtimeEnvelope<K>;
-    this.options.send(envelope);
+    return this.options.send(envelope) !== false;
   }
 }

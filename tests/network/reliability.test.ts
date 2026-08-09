@@ -163,6 +163,22 @@ function createDelayedPair(oneWayDelayMs: number) {
 }
 
 describe("critical realtime reliability", () => {
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    "rejects a non-positive or non-safe maxPending value (%s)",
+    (maxPending) => {
+      expect(() => new CriticalReliability({
+        matchId: "match-1",
+        identity: { senderId: "player-a", sessionId: "session-a" },
+        peer: { senderId: "player-b", sessionId: "session-b" },
+        clock: new ManualClock(),
+        getMatchTick: () => 120,
+        send: () => undefined,
+        apply: () => undefined,
+        maxPending,
+      })).toThrow(RangeError);
+    },
+  );
+
   it("reports a reentrant acknowledgement after committing the outbox state", () => {
     const observations: Array<{
       eventId: string;
@@ -497,7 +513,9 @@ describe("critical realtime reliability", () => {
       peer: { senderId: "player-b", sessionId: "session-b" },
       clock,
       getMatchTick: () => 120,
-      send: (envelope) => sent.push(envelope),
+      send: (envelope) => {
+        sent.push(envelope);
+      },
       apply: () => undefined,
     });
     for (let index = 1; index <= 64; index += 1) {
@@ -515,6 +533,204 @@ describe("critical realtime reliability", () => {
 
     sender.pump();
     expect(sent).toHaveLength(96);
+  });
+
+  it("does not refresh the retransmit budget during a reentrant pump", () => {
+    const clock = new ManualClock();
+    const sent: RealtimeEnvelope[] = [];
+    let reenter = false;
+    let sender!: CriticalReliability;
+    sender = new CriticalReliability({
+      matchId: "match-1",
+      identity: { senderId: "player-a", sessionId: "session-a" },
+      peer: { senderId: "player-b", sessionId: "session-b" },
+      clock,
+      getMatchTick: () => 120,
+      send: (envelope) => {
+        sent.push(envelope);
+        if (!reenter) return;
+        reenter = false;
+        sender.pump();
+      },
+      apply: () => undefined,
+    });
+    for (let index = 1; index <= 64; index += 1) {
+      sender.sendCritical(
+        "HOLLOW_CROSS",
+        { eventId: `cross-reentrant-${index}`, targetPlayerId: "player-b" },
+        120,
+      );
+    }
+
+    clock.advance(CRITICAL_INITIAL_RETRANSMIT_MS);
+    reenter = true;
+    sender.pump();
+
+    expect(sent).toHaveLength(64 + 16);
+  });
+
+  it("accepts a smaller caller budget for a congested recovery window", () => {
+    const clock = new ManualClock();
+    const sent: RealtimeEnvelope[] = [];
+    const sender = new CriticalReliability({
+      matchId: "match-1",
+      identity: { senderId: "player-a", sessionId: "session-a" },
+      peer: { senderId: "player-b", sessionId: "session-b" },
+      clock,
+      getMatchTick: () => 120,
+      send: (envelope) => {
+        sent.push(envelope);
+      },
+      apply: () => undefined,
+    });
+    for (let index = 1; index <= 8; index += 1) {
+      sender.sendCritical(
+        "HOLLOW_CROSS",
+        { eventId: `recovery-budget-${index}`, targetPlayerId: "player-b" },
+        120,
+      );
+    }
+
+    clock.advance(CRITICAL_INITIAL_RETRANSMIT_MS);
+    sender.pump(3);
+    expect(sent).toHaveLength(11);
+
+    sender.pump(0);
+    expect(sent).toHaveLength(11);
+
+    sender.pump(2);
+    expect(sent).toHaveLength(13);
+  });
+
+  it("does not back off a critical event whose transport admission is deferred", () => {
+    const clock = new ManualClock();
+    const transmittedAt: number[] = [];
+    let admitted = false;
+    let attempts = 0;
+    const sender = new CriticalReliability({
+      matchId: "match-1",
+      identity: { senderId: "player-a", sessionId: "session-a" },
+      peer: { senderId: "player-b", sessionId: "session-b" },
+      clock,
+      getMatchTick: () => 120,
+      send: (envelope) => {
+        if (envelope.kind !== "HOLLOW_CROSS") return;
+        attempts += 1;
+        if (!admitted) return false;
+        transmittedAt.push(clock.now());
+        return true;
+      },
+      apply: () => undefined,
+    });
+
+    sender.sendCritical(
+      "HOLLOW_CROSS",
+      { eventId: "deferred-admission", targetPlayerId: "player-b" },
+      120,
+    );
+    expect(attempts).toBe(1);
+    expect(transmittedAt).toEqual([]);
+
+    sender.pump(1);
+    expect(attempts).toBe(2);
+    admitted = true;
+    sender.pump(1);
+    expect(transmittedAt).toEqual([0]);
+
+    clock.advance(CRITICAL_INITIAL_RETRANSMIT_MS - 1);
+    sender.pump(1);
+    expect(transmittedAt).toEqual([0]);
+    clock.advance(1);
+    sender.pump(1);
+    expect(transmittedAt).toEqual([0, CRITICAL_INITIAL_RETRANSMIT_MS]);
+  });
+
+  it("retries immediately after a transport rejects a timed retransmission", () => {
+    const clock = new ManualClock();
+    const sentAt: number[] = [];
+    let rejectNextRetransmission = false;
+    const sender = new CriticalReliability({
+      matchId: "match-1",
+      identity: { senderId: "player-a", sessionId: "session-a" },
+      peer: { senderId: "player-b", sessionId: "session-b" },
+      clock,
+      getMatchTick: () => 120,
+      send: () => {
+        if (rejectNextRetransmission) {
+          rejectNextRetransmission = false;
+          throw new Error("injected retransmission failure");
+        }
+        sentAt.push(clock.now());
+      },
+      apply: () => undefined,
+    });
+    sender.sendCritical(
+      "HOLLOW_CROSS",
+      { eventId: "failure-atomic-timeout", targetPlayerId: "player-b" },
+      120,
+    );
+
+    clock.advance(CRITICAL_INITIAL_RETRANSMIT_MS);
+    rejectNextRetransmission = true;
+    expect(() => sender.pump()).toThrow("injected retransmission failure");
+
+    sender.pump();
+    expect(sentAt).toEqual([0, CRITICAL_INITIAL_RETRANSMIT_MS]);
+
+    clock.advance(CRITICAL_INITIAL_RETRANSMIT_MS * 2 - 1);
+    sender.pump();
+    expect(sentAt).toHaveLength(2);
+    clock.advance(1);
+    sender.pump();
+    expect(sentAt).toEqual([
+      0,
+      CRITICAL_INITIAL_RETRANSMIT_MS,
+      CRITICAL_INITIAL_RETRANSMIT_MS * 3,
+    ]);
+  });
+
+  it("restores the caller budget after a timed retransmission is rejected", () => {
+    const clock = new ManualClock();
+    const streamA: StreamRef = { senderId: "player-a", sessionId: "session-a" };
+    const streamB: StreamRef = { senderId: "player-b", sessionId: "session-b" };
+    const deliveredAt: number[] = [];
+    let rejectNextRetransmission = false;
+    const sender = new CriticalReliability({
+      matchId: "match-1",
+      identity: streamA,
+      peer: streamB,
+      clock,
+      getMatchTick: () => 120,
+      send: () => {
+        if (rejectNextRetransmission) {
+          rejectNextRetransmission = false;
+          throw new Error("injected budget failure");
+        }
+        deliveredAt.push(clock.now());
+      },
+      apply: () => undefined,
+    });
+    sender.sendCritical(
+      "HOLLOW_CROSS",
+      { eventId: "failure-atomic-budget", targetPlayerId: "player-b" },
+      120,
+    );
+
+    clock.advance(CRITICAL_INITIAL_RETRANSMIT_MS);
+    rejectNextRetransmission = true;
+    expect(() => sender.pump(1)).toThrow("injected budget failure");
+    sender.receive({
+      protocol: 1,
+      matchId: "match-1",
+      senderId: streamB.senderId,
+      sessionId: streamB.sessionId,
+      kind: "GAP_REQUEST",
+      matchTick: 120,
+      sentAtMonotonicMs: clock.now(),
+      payload: { stream: streamA, fromSeq: 1, throughSeq: 1 },
+    });
+
+    expect(deliveredAt).toEqual([0, CRITICAL_INITIAL_RETRANSMIT_MS]);
   });
 
   it("does not let an older retry batch starve later pending events", () => {
@@ -625,6 +841,77 @@ describe("critical realtime reliability", () => {
     expect(appliedB).toHaveLength(2);
   });
 
+  it("retries a missing-prefix request whose transport admission is deferred", () => {
+    const clock = new ManualClock();
+    const streamA: StreamRef = { senderId: "player-a", sessionId: "session-a" };
+    const streamB: StreamRef = { senderId: "player-b", sessionId: "session-b" };
+    let gapAttempts = 0;
+    const receiver = new CriticalReliability({
+      matchId: "match-1",
+      identity: streamB,
+      peer: streamA,
+      clock,
+      getMatchTick: () => 120,
+      send: (frame) => {
+        if (frame.kind !== "GAP_REQUEST") return;
+        gapAttempts += 1;
+        return gapAttempts === 1 ? false : true;
+      },
+      apply: () => undefined,
+    });
+    const future: RealtimeEnvelope<"HOLLOW_CROSS"> = {
+      protocol: 1,
+      matchId: "match-1",
+      senderId: streamA.senderId,
+      sessionId: streamA.sessionId,
+      kind: "HOLLOW_CROSS",
+      seq: 2,
+      matchTick: 120,
+      sentAtMonotonicMs: clock.now(),
+      payload: { eventId: "future-cross", targetPlayerId: streamB.senderId },
+    };
+
+    receiver.receive(future);
+    receiver.receive(future);
+
+    expect(gapAttempts).toBe(2);
+  });
+
+  it("retries a missing-prefix request after its transport send throws", () => {
+    const clock = new ManualClock();
+    const streamA: StreamRef = { senderId: "player-a", sessionId: "session-a" };
+    const streamB: StreamRef = { senderId: "player-b", sessionId: "session-b" };
+    let gapAttempts = 0;
+    const receiver = new CriticalReliability({
+      matchId: "match-1",
+      identity: streamB,
+      peer: streamA,
+      clock,
+      getMatchTick: () => 120,
+      send: (frame) => {
+        if (frame.kind !== "GAP_REQUEST") return;
+        gapAttempts += 1;
+        if (gapAttempts === 1) throw new Error("injected gap request failure");
+      },
+      apply: () => undefined,
+    });
+    const future: RealtimeEnvelope<"HOLLOW_CROSS"> = {
+      protocol: 1,
+      matchId: "match-1",
+      senderId: streamA.senderId,
+      sessionId: streamA.sessionId,
+      kind: "HOLLOW_CROSS",
+      seq: 2,
+      matchTick: 120,
+      sentAtMonotonicMs: clock.now(),
+      payload: { eventId: "throwing-future-cross", targetPlayerId: streamB.senderId },
+    };
+
+    expect(() => receiver.receive(future)).toThrow("injected gap request failure");
+    expect(() => receiver.receive(future)).not.toThrow();
+    expect(gapAttempts).toBe(2);
+  });
+
   it("bounds retries when a missing prefix leaves later events buffered", () => {
     const clock = new ManualClock();
     const streamA: StreamRef = { senderId: "player-a", sessionId: "session-a" };
@@ -693,7 +980,9 @@ describe("critical realtime reliability", () => {
       peer: streamB,
       clock,
       getMatchTick: () => 120,
-      send: (frame) => sent.push(frame),
+      send: (frame) => {
+        sent.push(frame);
+      },
       apply: () => undefined,
     });
     for (let index = 1; index <= 8; index += 1) {
@@ -721,6 +1010,105 @@ describe("critical realtime reliability", () => {
     expect(sent.length - framesBeforeGapRequests).toBe(4);
   });
 
+  it("resumes the unsent remainder after a gap retransmission is rejected", () => {
+    const clock = new ManualClock();
+    const streamA: StreamRef = { senderId: "player-a", sessionId: "session-a" };
+    const streamB: StreamRef = { senderId: "player-b", sessionId: "session-b" };
+    const deliveredSequences: number[] = [];
+    let rejectSequence: number | null = null;
+    const sender = new CriticalReliability({
+      matchId: "match-1",
+      identity: streamA,
+      peer: streamB,
+      clock,
+      getMatchTick: () => 120,
+      send: (frame) => {
+        if (frame.seq === rejectSequence) {
+          rejectSequence = null;
+          throw new Error("injected gap retransmission failure");
+        }
+        if (frame.seq !== undefined) deliveredSequences.push(frame.seq);
+      },
+      apply: () => undefined,
+    });
+    for (let sequence = 1; sequence <= 16; sequence += 1) {
+      sender.sendCritical(
+        "HOLLOW_CROSS",
+        { eventId: `gap-failure-${sequence}`, targetPlayerId: "player-b" },
+        120,
+      );
+    }
+    deliveredSequences.length = 0;
+    const requestGap = (): void => sender.receive({
+      protocol: 1,
+      matchId: "match-1",
+      senderId: streamB.senderId,
+      sessionId: streamB.sessionId,
+      kind: "GAP_REQUEST",
+      matchTick: 120,
+      sentAtMonotonicMs: clock.now(),
+      payload: { stream: streamA, fromSeq: 1, throughSeq: 16 },
+    });
+
+    rejectSequence = 2;
+    expect(requestGap).toThrow("injected gap retransmission failure");
+    expect(deliveredSequences).toEqual([1]);
+
+    requestGap();
+    expect(deliveredSequences).toEqual(
+      Array.from({ length: 16 }, (_, index) => index + 1),
+    );
+  });
+
+  it("keeps an in-flight gap guard active across a slow reentrant transport", () => {
+    const clock = new ManualClock();
+    const streamA: StreamRef = { senderId: "player-a", sessionId: "session-a" };
+    const streamB: StreamRef = { senderId: "player-b", sessionId: "session-b" };
+    const deliveredSequences: number[] = [];
+    let reenterOnRetransmit = false;
+    let reentered = false;
+    let sender!: CriticalReliability;
+    const requestGap = (): void => sender.receive({
+      protocol: 1,
+      matchId: "match-1",
+      senderId: streamB.senderId,
+      sessionId: streamB.sessionId,
+      kind: "GAP_REQUEST",
+      matchTick: 120,
+      sentAtMonotonicMs: clock.now(),
+      payload: { stream: streamA, fromSeq: 1, throughSeq: 1 },
+    });
+    sender = new CriticalReliability({
+      matchId: "match-1",
+      identity: streamA,
+      peer: streamB,
+      clock,
+      getMatchTick: () => 120,
+      retryMs: 100,
+      send: (frame) => {
+        if (frame.seq === undefined) return;
+        deliveredSequences.push(frame.seq);
+        if (reenterOnRetransmit && !reentered) {
+          reentered = true;
+          clock.advance(100);
+          requestGap();
+        }
+      },
+      apply: () => undefined,
+    });
+    sender.sendCritical(
+      "HOLLOW_CROSS",
+      { eventId: "slow-reentrant-gap", targetPlayerId: "player-b" },
+      120,
+    );
+    deliveredSequences.length = 0;
+
+    reenterOnRetransmit = true;
+    requestGap();
+
+    expect(deliveredSequences).toEqual([1]);
+  });
+
   it("shares the bounded resend budget with large gap requests", () => {
     const clock = new ManualClock();
     const streamA: StreamRef = { senderId: "player-a", sessionId: "session-a" };
@@ -732,7 +1120,9 @@ describe("critical realtime reliability", () => {
       peer: streamB,
       clock,
       getMatchTick: () => 120,
-      send: (frame) => sent.push(frame),
+      send: (frame) => {
+        sent.push(frame);
+      },
       apply: () => undefined,
     });
     for (let index = 1; index <= 64; index += 1) {
