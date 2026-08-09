@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: pi-hermes-memory-health [--check|--repair]
+
+Checks the pi-hermes-memory SQLite cache without printing memory/session rows.
+
+Modes:
+  --check   Verify integrity, FTS counts, active handles, and known local hazards.
+  --repair  If the DB is malformed, recover it with sqlite3 .recover, rebuild FTS,
+            verify integrity, and atomically install the repaired cache.
+
+Environment:
+  PI_AGENT_ROOT  Override Pi agent root (default: ~/.pi/agent)
+USAGE
+}
+
+mode="check"
+case "${1:---check}" in
+  --check) mode="check" ;;
+  --repair) mode="repair" ;;
+  -h|--help) usage; exit 0 ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
+agent_root="${PI_AGENT_ROOT:-$HOME/.pi/agent}"
+db_dir="$agent_root/pi-hermes-memory"
+db="$db_dir/sessions.db"
+package_dir="$agent_root/git/github.com/chandra447/pi-hermes-memory"
+stale_rewrite="$repo_root/.pi/extensions/memory-search-rewrite.ts"
+
+require_sqlite() {
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    echo "FAIL: sqlite3 is required but was not found on PATH" >&2
+    exit 1
+  fi
+}
+
+sqlite_scalar() {
+  sqlite3 "$db" "$1"
+}
+
+integrity_status() {
+  if [ ! -f "$db" ]; then
+    echo "missing"
+    return 0
+  fi
+
+  sqlite3 "$db" 'PRAGMA integrity_check;' 2>&1 || true
+}
+
+quick_status() {
+  if [ ! -f "$db" ]; then
+    echo "missing"
+    return 0
+  fi
+
+  sqlite3 "$db" 'PRAGMA quick_check;' 2>&1 || true
+}
+
+print_check() {
+  require_sqlite
+
+  echo "Pi agent root: $agent_root"
+  echo "Hermes DB: $db"
+
+  if [ ! -f "$db" ]; then
+    echo "FAIL: sessions.db does not exist"
+    return 1
+  fi
+
+  local integrity
+  integrity="$(integrity_status)"
+  if [ "$integrity" = "ok" ]; then
+    echo "OK: PRAGMA integrity_check"
+  else
+    echo "FAIL: PRAGMA integrity_check"
+    echo "$integrity" | sed 's/^/  /'
+  fi
+
+  local quick
+  quick="$(quick_status)"
+  if [ "$quick" = "ok" ]; then
+    echo "OK: PRAGMA quick_check"
+  else
+    echo "FAIL: PRAGMA quick_check"
+    echo "$quick" | sed 's/^/  /'
+  fi
+
+  if [ "$integrity" = "ok" ]; then
+    local counts
+    counts="$(sqlite_scalar "
+      SELECT
+        (SELECT COUNT(*) FROM memories),
+        (SELECT COUNT(*) FROM memory_fts),
+        (SELECT COUNT(*) FROM sessions),
+        (SELECT COUNT(*) FROM messages),
+        (SELECT COUNT(*) FROM message_fts),
+        (SELECT COUNT(*) FROM session_files);
+    " 2>&1 || true)"
+
+    if [[ "$counts" =~ ^[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+$ ]]; then
+      IFS='|' read -r memories memory_fts sessions messages message_fts session_files <<< "$counts"
+      echo "Counts: memories=$memories memory_fts=$memory_fts sessions=$sessions messages=$messages message_fts=$message_fts session_files=$session_files"
+      if [ "$memories" = "$memory_fts" ]; then
+        echo "OK: memory_fts count matches memories"
+      else
+        echo "FAIL: memory_fts count mismatch"
+      fi
+      if [ "$messages" = "$message_fts" ]; then
+        echo "OK: message_fts count matches messages"
+      else
+        echo "FAIL: message_fts count mismatch"
+      fi
+    else
+      echo "FAIL: could not read safe count summary"
+      echo "$counts" | sed 's/^/  /'
+    fi
+  fi
+
+  if command -v lsof >/dev/null 2>&1; then
+    local open_handles
+    open_handles="$(lsof "$db" "$db-wal" "$db-shm" 2>/dev/null || true)"
+    if [ -n "$open_handles" ]; then
+      echo "WARN: active process has DB handles open (restart Pi before replacing DB):"
+      echo "$open_handles" | sed 's/^/  /'
+    else
+      echo "OK: no active DB handles detected"
+    fi
+  fi
+
+  if [ -f "$stale_rewrite" ]; then
+    echo "WARN: obsolete project memory-search rewrite exists: $stale_rewrite"
+    echo "      Upstream pi-hermes-memory now normalizes FTS queries; remove this file unless a documented package regression requires it."
+  else
+    echo "OK: obsolete project memory-search rewrite is absent"
+  fi
+
+  if [ -d "$package_dir/.git" ]; then
+    local package_status
+    package_status="$(git -C "$package_dir" status --short 2>/dev/null || true)"
+    if [ -n "$package_status" ]; then
+      echo "WARN: pi-hermes-memory package source has local changes that may be overwritten by Pi updates:"
+      echo "$package_status" | sed 's/^/  /'
+    else
+      echo "OK: pi-hermes-memory package source is clean"
+    fi
+  fi
+
+  [ "$integrity" = "ok" ] && [ "$quick" = "ok" ]
+}
+
+repair_db() {
+  require_sqlite
+
+  if [ ! -f "$db" ]; then
+    echo "FAIL: cannot repair missing DB: $db" >&2
+    exit 1
+  fi
+
+  local integrity
+  integrity="$(integrity_status)"
+  if [ "$integrity" = "ok" ]; then
+    echo "OK: DB integrity is already clean; no repair needed."
+    return 0
+  fi
+
+  if command -v lsof >/dev/null 2>&1 && lsof "$db" "$db-wal" "$db-shm" >/dev/null 2>&1; then
+    echo "FAIL: DB has active open handles. Quit/restart Pi, then rerun with --repair." >&2
+    lsof "$db" "$db-wal" "$db-shm" 2>/dev/null | sed 's/^/  /' >&2 || true
+    exit 1
+  fi
+
+  local ts recovery old sql recovered import_stderr
+  ts="$(date +%Y%m%d-%H%M%S)"
+  recovery="$db_dir/recovery-$ts"
+  old="$recovery/sessions.db.malformed"
+  sql="$recovery/recover.sql"
+  recovered="$recovery/sessions.recovered.db"
+  import_stderr="$recovery/import.stderr"
+
+  mkdir -p "$recovery"
+  cp -p "$db" "$old"
+  [ -f "$db-wal" ] && cp -p "$db-wal" "$recovery/sessions.db-wal.malformed" || true
+  [ -f "$db-shm" ] && cp -p "$db-shm" "$recovery/sessions.db-shm.malformed" || true
+
+  sqlite3 "$old" '.recover' > "$sql"
+  sqlite3 "$recovered" < "$sql" 2> "$import_stderr"
+
+  if [ -s "$import_stderr" ]; then
+    echo "FAIL: recovered SQL import had errors; leaving recovery files at $recovery" >&2
+    sed 's/^/  /' "$import_stderr" >&2
+    exit 1
+  fi
+
+  sqlite3 "$recovered" "
+    INSERT INTO message_fts(message_fts)
+    SELECT 'rebuild'
+    WHERE EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_fts');
+    INSERT INTO memory_fts(memory_fts)
+    SELECT 'rebuild'
+    WHERE EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_fts');
+  "
+
+  local recovered_integrity
+  recovered_integrity="$(sqlite3 "$recovered" 'PRAGMA integrity_check;' 2>&1 || true)"
+  if [ "$recovered_integrity" != "ok" ]; then
+    echo "FAIL: recovered DB did not pass integrity_check; leaving recovery files at $recovery" >&2
+    echo "$recovered_integrity" | sed 's/^/  /' >&2
+    exit 1
+  fi
+
+  cp -p "$db" "$db.malformed-before-recover-$ts.bak"
+  [ -f "$db-wal" ] && cp -p "$db-wal" "$db-wal.malformed-before-recover-$ts.bak" || true
+  [ -f "$db-shm" ] && cp -p "$db-shm" "$db-shm.malformed-before-recover-$ts.bak" || true
+
+  cp -p "$recovered" "$db.fixed-$ts"
+  mv "$db.fixed-$ts" "$db"
+  rm -f "$db-wal" "$db-shm"
+  rm -f "$sql"
+
+  echo "OK: installed recovered DB"
+  echo "Recovery dir: $recovery"
+  sqlite3 "$db" 'PRAGMA integrity_check;'
+}
+
+case "$mode" in
+  check) print_check ;;
+  repair) repair_db ;;
+esac

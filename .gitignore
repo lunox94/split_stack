@@ -9,3 +9,9 @@ test-results/
 *.log
 .vite/
 .DS_Store
+.agent/logs/
+.agent/sessions/
+.agent/metrics/
+.agent/vendor/
+.scratch/*
+!.scratch/.gitkeep

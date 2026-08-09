@@ -1,0 +1,41 @@
+# Local allowlist layered over pinned upstream skills; never edit vendored skills in place.
+version: 1
+owner: orchestrator
+modes:
+  solo:
+    delegation: lightweight-subagent
+  team:
+    delegation: pi-agents-team
+selected_skills:
+  - { name: ask-matt, coordination: orchestrator-only }
+  - { name: setup-matt-pocock-skills, coordination: orchestrator-only }
+  - { name: grill-with-docs, coordination: orchestrator-only }
+  - { name: grilling, coordination: orchestrator-only }
+  - { name: grill-me, coordination: orchestrator-only }
+  - { name: to-spec, coordination: orchestrator-only }
+  - { name: to-tickets, coordination: orchestrator-only }
+  - { name: implement, coordination: orchestrator-only }
+  - { name: code-review, coordination: orchestrator-parallel }
+  - { name: tdd, coordination: worker-brief-compatible }
+  - { name: diagnosing-bugs, coordination: worker-brief-compatible }
+  - { name: codebase-design, coordination: worker-brief-compatible }
+  - { name: domain-modeling, coordination: orchestrator-only }
+  - { name: handoff, coordination: orchestrator-only }
+  - { name: prototype, coordination: orchestrator-only }
+  - { name: triage, coordination: orchestrator-only }
+  - { name: research, coordination: orchestrator-parallel }
+  - { name: wayfinder, coordination: orchestrator-only }
+  - { name: improve-codebase-architecture, coordination: orchestrator-parallel }
+  - { name: teach, coordination: orchestrator-only }
+  - { name: resolving-merge-conflicts, coordination: orchestrator-only }
+  - { name: to-questionnaire, coordination: orchestrator-only }
+  - { name: wait-what, coordination: orchestrator-only }
+  - { name: wizard, coordination: orchestrator-only }
+  - { name: writing-for-agents, coordination: orchestrator-only }
+rules:
+  - the orchestrator selects skills explicitly for each task
+  - ask-matt and every skill workflow it routes to are selected together; Pi built-ins need no entry
+  - workers receive only the relevant constraints in their self-contained brief
+  - worker-brief-compatible does not expose the skill root to workers
+  - to-spec publishes an agreed specification; to-tickets is for work larger than one agent session
+  - plan execution starts only from the user's explicit approval choice

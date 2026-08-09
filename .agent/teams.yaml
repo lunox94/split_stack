@@ -1,0 +1,73 @@
+# Tool-neutral source for the flat Pi Agents Team adapter.
+# Project truth belongs in the referenced expertise files; generated bundles are adapters.
+model_slots:
+  orchestrator_model: openai-codex/gpt-5.6-sol
+  high_reasoning_model: openai-codex/gpt-5.6-sol
+  coding_model: openai-codex/gpt-5.6-terra
+  fast_model: openai-codex/gpt-5.6-luna
+runtime:
+  topology: flat
+  max_parallel_workers: 3
+  retry_limit: 1
+  workers_use_dedicated_worktrees: true
+roles:
+  - id: planning-lead
+    role: Coordinates complex feature scoping and may write only the delegated plans/GH-<issue> or plans/LOCAL-<slug> tree.
+    model: high_reasoning_model
+    expertise: [.agent/expertise/worker-base.md, .agent/expertise/planning-lead.md]
+    writable: true
+  - id: planner
+    role: Investigates or decomposes one bounded planning question and may write only an explicitly delegated plan path.
+    model: fast_model
+    expertise: [.agent/expertise/worker-base.md, .agent/expertise/planner.md]
+    writable: true
+  - id: engineering-lead
+    role: Coordinates implementation spanning two or more Split Stack architecture seams and assigns disjoint writable files.
+    model: high_reasoning_model
+    expertise: [.agent/expertise/worker-base.md, .agent/expertise/engineering-lead.md]
+    writable: false
+  - id: gameplay-rules
+    role: Implements deterministic simulation, scoring, pieces, powers, balance rules, hashes, and their focused tests.
+    model: coding_model
+    expertise: [.agent/expertise/worker-base.md, .agent/expertise/gameplay-rules.md]
+    writable: true
+  - id: realtime-webxdc
+    role: Implements Webxdc protocol, durable and realtime convergence, competitive match lifecycle, recovery, and related tests.
+    model: coding_model
+    expertise: [.agent/expertise/worker-base.md, .agent/expertise/realtime-webxdc.md]
+    writable: true
+  - id: experience
+    role: Implements Three.js presentation, UI, input, audio, accessibility, responsive behavior, and related tests without changing authoritative simulation timing.
+    model: coding_model
+    expertise: [.agent/expertise/worker-base.md, .agent/expertise/experience.md]
+    writable: true
+  - id: platform-release
+    role: Implements TypeScript and Vite tooling, Webxdc manifest and packaging, offline asset closure, archive verification, and release mechanics.
+    model: coding_model
+    expertise: [.agent/expertise/worker-base.md, .agent/expertise/platform-release.md]
+    writable: true
+  - id: validation-lead
+    role: Coordinates broad risk-based review across QA, security and privacy, performance, and independent verification.
+    model: high_reasoning_model
+    expertise: [.agent/expertise/worker-base.md, .agent/expertise/validation-lead.md]
+    writable: false
+  - id: qa
+    role: Analyzes regressions or adds explicitly scoped behavioral coverage and may edit only delegated test files.
+    model: coding_model
+    expertise: [.agent/expertise/worker-base.md, .agent/expertise/qa.md]
+    writable: true
+  - id: security-privacy
+    role: Reviews identity, message validation, storage, telemetry, secrets, offline boundaries, privacy, and unsafe defaults.
+    model: coding_model
+    expertise: [.agent/expertise/worker-base.md, .agent/expertise/security-privacy.md]
+    writable: false
+  - id: performance
+    role: Reviews simulation cadence, Webxdc queues, rendering and allocation hot paths, audio streaming, startup, and archive-size risks.
+    model: coding_model
+    expertise: [.agent/expertise/worker-base.md, .agent/expertise/performance.md]
+    writable: false
+  - id: verifier
+    role: Independently verifies requested outcomes, acceptance criteria, sensitive invariants, and claimed command evidence after implementation.
+    model: high_reasoning_model
+    expertise: [.agent/expertise/worker-base.md, .agent/expertise/verifier.md]
+    writable: false

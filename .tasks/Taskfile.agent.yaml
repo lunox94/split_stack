@@ -1,0 +1,87 @@
+version: "3"
+
+vars:
+  PI_CLI: .pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js
+  PI_SKILL_ARGS: >-
+    --no-skills
+    --skill .agent/skills
+    --skill .agent/vendor/matt-pocock-skills-selected
+    --skill .pi/node_modules/context-mode/skills
+    --skill .pi/git/github.com/apmantza/pi-lens/skills
+    --skill .pi/git/github.com/DietrichGebert/ponytail/skills
+    --skill .pi/git/github.com/nicobailon/pi-mcp-adapter/skills
+  MATT_SKILLS_VERSION: v1.2.3
+  MATT_SKILLS_COMMIT: 6acc160e4e0cd062dbbbd7a1b26ae92855edf07e
+
+tasks:
+  run:
+    desc: Launch the interactive orchestrator with Ponytail fixed to full mode and project-only skills.
+    env:
+      PONYTAIL_DEFAULT_MODE: full
+    cmds:
+      - exec node {{.PI_CLI}} {{.PI_SKILL_ARGS}} {{.CLI_ARGS}}
+
+  bootstrap:
+    desc: Install locked Pi runtime, packages, and pinned skills; init itself never installs anything.
+    cmds:
+      - bun install --frozen-lockfile --cwd .pi
+      - npm ci --prefix .pi/npm
+      - task: skills:install
+      - node {{.PI_CLI}} update --extensions --approve --no-skills
+
+  skills:install:
+    desc: Install the pinned upstream Matt Pocock skills and expose only the project allowlist.
+    cmds:
+      - task: skills:checkout
+      - bun .agent/scripts/select-skills.ts
+
+  skills:checkout:
+    internal: true
+    status:
+      - test -d .agent/vendor/matt-pocock-skills/.git
+      - test "$(git -C .agent/vendor/matt-pocock-skills rev-parse HEAD)" = "{{.MATT_SKILLS_COMMIT}}"
+      - test -z "$(git -C .agent/vendor/matt-pocock-skills status --porcelain)"
+    cmds:
+      - test ! -e .agent/vendor/matt-pocock-skills
+      - mkdir -p .agent/vendor
+      - git clone --depth 1 --branch {{.MATT_SKILLS_VERSION}} https://github.com/mattpocock/skills .agent/vendor/matt-pocock-skills
+
+  validate:
+    desc: Validate placeholders, generated fingerprints, config, and runtime files.
+    cmds:
+      - bun .agent/scripts/validate.ts
+
+  team:generate:
+    desc: Generate the flat Pi Agents Team adapter and self-contained role bundles.
+    cmds:
+      - bun .agent/scripts/generate-team.ts
+
+  corpus:report:
+    desc: Report deterministic sizes for agent-controlled context surfaces.
+    cmds:
+      - bun .agent/scripts/corpus-report.ts
+
+  corpus:baseline:
+    desc: Refresh the committed context-size baseline after reviewing an intentional corpus change.
+    cmds:
+      - bun .agent/scripts/corpus-report.ts --write-baseline
+
+  metrics:
+    desc: Summarize passive local orchestrator token and context metadata.
+    cmds:
+      - bun .agent/scripts/workflow-metrics.ts {{.CLI_ARGS}}
+
+  hermes:health:
+    desc: Check orchestrator-owned Hermes integrity without reading memory rows.
+    cmds:
+      - bash .agent/scripts/hermes-health --check
+
+  hermes:repair:
+    desc: Recover malformed Hermes data after Pi is stopped, preserving backups.
+    cmds:
+      - bash .agent/scripts/hermes-health --repair
+
+  fixed-layout:test:
+    desc: Test fixed-layout compositor mechanics.
+    cmds:
+      - node --test --experimental-strip-types .pi/packages/fixed-layout/compositor.test.ts .pi/packages/fixed-layout/layout.test.ts

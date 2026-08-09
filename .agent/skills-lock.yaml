@@ -1,0 +1,5 @@
+matt_pocock_skills:
+  repository: https://github.com/mattpocock/skills
+  ref: v1.2.3
+  resolved_commit: 6acc160e4e0cd062dbbbd7a1b26ae92855edf07e
+  policy: upstream-unchanged

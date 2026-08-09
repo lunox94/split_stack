@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "files": [
+    "engineering-lead.md",
+    "experience.md",
+    "gameplay-rules.md",
+    "performance.md",
+    "planner.md",
+    "planning-lead.md",
+    "platform-release.md",
+    "qa.md",
+    "realtime-webxdc.md",
+    "security-privacy.md",
+    "validation-lead.md",
+    "verifier.md"
+  ]
+}
