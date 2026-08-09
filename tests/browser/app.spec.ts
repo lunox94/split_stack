@@ -50,6 +50,12 @@ async function openLobby(page: Page): Promise<void> {
   await expect(page.getByRole("heading", { name: "Lobby", exact: true })).toBeVisible();
 }
 
+async function waitForWaitingChallenge(page: Page): Promise<void> {
+  const message = page.locator(".home-waiting-message");
+  await expect(message).toBeVisible({ timeout: 15_000 });
+  await expect(message).toContainText(/waiting for an opponent/i);
+}
+
 async function leaveThroughMatchMenu(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Match menu" }).click();
   await page.getByRole("button", { name: "Leave match" }).click();
@@ -706,9 +712,7 @@ async function openVersusPair(
 ): Promise<{ seatA: Page; seatB: Page }> {
   await openApp(seatAPage, "Alice");
   await seatAPage.getByRole("button", { name: "Create challenge" }).click();
-  await expect(seatAPage.locator(".home-waiting-message")).toContainText(
-    /waiting for an opponent/i,
-  );
+  await waitForWaitingChallenge(seatAPage);
 
   const seatBPage = await context.newPage();
   await openApp(seatBPage, "Bob");
@@ -735,9 +739,7 @@ async function openNamedVersusPair(
   const seatA = await context.newPage();
   await openApp(seatA, seatAName);
   await seatA.getByRole("button", { name: "Create challenge" }).click();
-  await expect(seatA.locator(".home-waiting-message")).toContainText(
-    /waiting for an opponent/i,
-  );
+  await waitForWaitingChallenge(seatA);
 
   const seatB = await context.newPage();
   await openApp(seatB, seatBName);
@@ -1625,9 +1627,7 @@ test("a creator can cancel a waiting challenge from Home", async ({ page }) => {
   await openApp(page, "Alice");
   await page.getByRole("button", { name: "Create challenge" }).click();
 
-  await expect(page.locator(".home-waiting-message")).toContainText(
-    /waiting for an opponent/i,
-  );
+  await waitForWaitingChallenge(page);
   await expect(page.locator(".home-status")).toBeEmpty();
   const waitingActions = page.locator(".home-actions button:visible");
   await expect(waitingActions).toHaveCount(3);
@@ -1651,9 +1651,7 @@ test("challenge creation announces once while cancellation stays silent", async 
     (button as HTMLButtonElement).click();
     (button as HTMLButtonElement).click();
   });
-  await expect(page.locator(".home-waiting-message")).toContainText(
-    /waiting for an opponent/i,
-  );
+  await waitForWaitingChallenge(page);
 
   const feedbackCount = (kind: string) => page.evaluate((eventKind) => {
     const raw = window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]";
@@ -1781,10 +1779,7 @@ test("a transient durable failure retries the challenge until its echo arrives",
   await openApp(page, "Alice");
   await page.getByRole("button", { name: "Create challenge" }).click();
 
-  await expect(page.locator(".home-waiting-message")).toContainText(
-    /waiting for an opponent/i,
-    { timeout: 10_000 },
-  );
+  await waitForWaitingChallenge(page);
   await openLobby(page);
   await expect(
     page.locator(".lobby-challenge-row").filter({ hasText: "Alice" }),
@@ -1799,10 +1794,7 @@ test("a dropped first self echo is repaired by one accepted-send retry", async (
   await openApp(page, "Alice");
   await page.getByRole("button", { name: "Create challenge" }).click();
 
-  await expect(page.locator(".home-waiting-message")).toContainText(
-    /waiting for an opponent/i,
-    { timeout: 10_000 },
-  );
+  await waitForWaitingChallenge(page);
   await expect.poll(() => page.evaluate(() => {
     const updates = JSON.parse(
       window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
@@ -1900,9 +1892,7 @@ test("both players reach ready-up when each first peer runtime claim is lost", a
 
   await openApp(page, "Alice");
   await page.getByRole("button", { name: "Create challenge" }).click();
-  await expect(page.locator(".home-waiting-message")).toContainText(
-    /waiting for an opponent/i,
-  );
+  await waitForWaitingChallenge(page);
   await page.close();
 
   const seatB = await context.newPage();
@@ -2288,11 +2278,15 @@ test("replaces a silent competitive channel without registering a second listene
   await expect(seatB.getByText(/match starts in/i)).toBeVisible({ timeout: 10_000 });
   await advancePairMonotonic(seatA, seatB, 4_000, 250);
   await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
+  await expect(seatB.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
 
   // Keep setup realistic, then make the short-lived outage states deterministic.
-  await freezeMonotonic(seatA);
+  await Promise.all([freezeMonotonic(seatA), freezeMonotonic(seatB)]);
+  const seatBSendsBeforeKeepalive = await realtimeSendCount(seatB);
   await advanceMonotonic(seatB, RULES.network.keepaliveMs + 1);
-  await seatA.waitForTimeout(60);
+  await expect.poll(() => realtimeSendCount(seatB), { timeout: 5_000 }).toBeGreaterThan(
+    seatBSendsBeforeKeepalive,
+  );
   await setRealtimeSendBlocked(seatB, true);
   const recoveryOverlay = seatA.locator(".center-overlay");
   const localPane = seatA.locator('.player-pane[data-side="left"]');
@@ -3637,6 +3631,7 @@ test("a spectating challenge creator keeps watching behind the pairing prompt", 
   const spectator = await context.newPage();
   await openApp(spectator, "Charlie");
   await spectator.getByRole("button", { name: "Create challenge" }).click();
+  await waitForWaitingChallenge(spectator);
   await openLobby(spectator);
   await spectator.getByRole("button", {
     name: "Watch Alice vs Bob",
@@ -3877,9 +3872,7 @@ test("leaving a pre-match pairing closes it without replacing the shared realtim
 
   await openApp(page, "Alice");
   await page.getByRole("button", { name: "Create challenge" }).click();
-  await expect(page.locator(".home-waiting-message")).toContainText(
-    /waiting for an opponent/i,
-  );
+  await waitForWaitingChallenge(page);
 
   const seatB = await context.newPage();
   await openApp(seatB, "Bob");
@@ -3989,9 +3982,7 @@ test("a newer pre-match runtime takes control while the older runtime stays on H
   await expect(seatA.getByRole("heading", { name: "Split Stack" })).toBeVisible({
     timeout: 15_000,
   });
-  await expect(seatA.locator(".home-waiting-message")).toContainText(
-    /waiting for an opponent/i,
-  );
+  await waitForWaitingChallenge(seatA);
   expect(olderSeatBErrors).toEqual([]);
 
   await olderSeatB.close();
