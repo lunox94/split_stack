@@ -142,4 +142,28 @@ describe("pending chat feedback recovery journal", () => {
       resolved: false,
     }]);
   });
+
+  it("reserves two recovery slots for terminal result feedback", () => {
+    const storage = new MemoryStorage();
+    const store = new PendingChatFeedbackStoreV2(
+      storage,
+      "rules-v2",
+      "alice@example.test",
+    );
+
+    for (let index = 0; index < 64; index += 1) {
+      store.add(challengeCreated(`optional-${index}`), { kind: "challenge-created" });
+    }
+    store.add(matchConceded("terminal-1"), { kind: "match-result" });
+    store.add(matchConceded("terminal-2"), { kind: "match-result" });
+
+    expect(store.entries()).toHaveLength(64);
+    expect(store.entries().filter((entry) => entry.resolver.kind === "challenge-created"))
+      .toHaveLength(62);
+    expect(store.entries().filter((entry) => entry.resolver.kind === "match-result"))
+      .toMatchObject([
+        { payload: { eventId: "terminal-1" } },
+        { payload: { eventId: "terminal-2" } },
+      ]);
+  });
 });

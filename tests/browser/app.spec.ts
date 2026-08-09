@@ -3204,7 +3204,8 @@ test("a pending concession retries automatically then throttles each manual retr
       (update) => update.payload?.kind === "match-conceded",
     );
     const feedbackKey = Object.keys(window.localStorage).find((key) =>
-      key.startsWith("split-stack/pending-chat-feedback/v2:")
+      key.startsWith("split-stack/pending-chat-feedback/v2:") &&
+      key.endsWith(":bob@example.test")
     );
     const journal = feedbackKey === undefined
       ? []

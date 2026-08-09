@@ -1,12 +1,14 @@
 import type {
   CompetitionActor,
-  CompetitionLedgerView,
   CompetitionResultView,
-  PendingRematchView,
   PlayerCompetitionActivity,
-  PracticeLeaderboardEntry,
   StartingPairingView,
 } from "./competition-ledger-v2";
+import type {
+  CompetitionPendingRematchView,
+  CompetitionPracticeEntryView,
+  CompetitionView,
+} from "./competition-event-lifecycle";
 import { formatString, STRINGS } from "./strings";
 import type { AppShell } from "../ui/shell";
 
@@ -19,7 +21,7 @@ export interface CompetitionPresenterCallbacks {
 
 export interface CompetitionPresenterOptions extends CompetitionPresenterCallbacks {
   readonly shell: AppShell;
-  readonly view: CompetitionLedgerView;
+  readonly view: CompetitionView;
   readonly self: CompetitionActor;
   readonly realtimeAvailable: boolean;
   /** Replacement runtimes may watch their committed match but never control it. */
@@ -95,7 +97,7 @@ function renderOpenChallenges(options: CompetitionPresenterOptions): void {
     return;
   }
 
-  // CompetitionLedgerView exposes these in canonical oldest-first event order.
+  // CompetitionView exposes these in canonical oldest-first event order.
   const rows = view.openChallenges.map((challenge, index) => {
     const row = element(document, "li", "history-item lobby-challenge-row");
     row.dataset.challengeId = challenge.challengeId;
@@ -275,7 +277,7 @@ function resultScore(entry: CompetitionResultView): string {
   } ${second.displayName}`;
 }
 
-function renderResults(shell: AppShell, view: CompetitionLedgerView): void {
+function renderResults(shell: AppShell, view: CompetitionView): void {
   const document = shell.container.ownerDocument;
   const results = view.recentResults.slice(0, 20);
   if (results.length === 0) {
@@ -333,7 +335,7 @@ function tableHeader(
   return head;
 }
 
-function renderStandings(shell: AppShell, view: CompetitionLedgerView, selfId: string): void {
+function renderStandings(shell: AppShell, view: CompetitionView, selfId: string): void {
   const document = shell.container.ownerDocument;
   if (view.standings.length === 0) {
     replaceWithEmpty(shell.standings, STRINGS["lobby.noStandings"]);
@@ -376,7 +378,7 @@ function renderStandings(shell: AppShell, view: CompetitionLedgerView, selfId: s
 
 function practiceRow(
   document: Document,
-  entry: PracticeLeaderboardEntry,
+  entry: CompetitionPracticeEntryView,
   selfId: string,
   pinned: boolean,
 ): HTMLTableRowElement {
@@ -397,7 +399,7 @@ function practiceRow(
   return row;
 }
 
-function renderPractice(shell: AppShell, view: CompetitionLedgerView, selfId: string): void {
+function renderPractice(shell: AppShell, view: CompetitionView, selfId: string): void {
   const document = shell.container.ownerDocument;
   const leaders = view.practice.leaderboard.slice(0, 10);
   const pinned = view.practice.pinned;
@@ -422,7 +424,7 @@ function renderPractice(shell: AppShell, view: CompetitionLedgerView, selfId: st
 
 function activityText(
   activity: PlayerCompetitionActivity,
-  view: CompetitionLedgerView,
+  view: CompetitionView,
   selfId: string,
 ): string {
   if (activity.kind === "waiting") return STRINGS["lobby.waitingForOpponent"];
@@ -445,7 +447,7 @@ function activityText(
   return "";
 }
 
-function rematchText(rematch: PendingRematchView, selfId: string): string {
+function rematchText(rematch: CompetitionPendingRematchView, selfId: string): string {
   const opponent = rematch.seatA.id === selfId ? rematch.seatB : rematch.seatA;
   const selfRequested = rematch.requestedByPlayerIds.includes(selfId);
   const opponentRequested = rematch.requestedByPlayerIds.includes(opponent.id);
@@ -524,7 +526,10 @@ export function presentCompetition(options: CompetitionPresenterOptions): void {
   // realtime channel. A suspended creator must always be able to free the seat.
   shell.cancelChallengeButton.disabled = false;
   shell.practiceButton.disabled = false;
-  if (view.activity.kind === "live") {
+  if (
+    view.activity.kind === "live" &&
+    shell.lobbyStatus.textContent !== STRINGS["lobby.staleLink"]
+  ) {
     shell.lobbyStatus.textContent = STRINGS["lobby.finishActiveMatch"];
   } else if (shell.lobbyStatus.textContent === STRINGS["lobby.finishActiveMatch"]) {
     shell.lobbyStatus.textContent = "";

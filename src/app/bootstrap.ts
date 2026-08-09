@@ -3,7 +3,6 @@ import type { AudioCue } from "../audio/cues";
 import type { MusicIntensity } from "../audio/music";
 import { RULES } from "../config/rules";
 import { RULES_HASH } from "../config/rules-hash";
-import { canonicalize, hashCanonicalHex } from "../domain/hashing";
 import {
   createSimulation,
   type Simulation,
@@ -34,10 +33,6 @@ import { RemoteSnapshotStore, type PlayerSnapshotV1 } from "../network/snapshots
 import { parseSnapshotProfile } from "../network/snapshot-profile";
 import { RealtimeHub } from "../network/realtime-hub";
 import {
-  DurableLamportClock,
-  WebxdcDurableLog,
-  type DurableOutboundUpdate,
-  type DurableReceivedUpdate,
   type LobbyActor,
   type MaterializedChallenge,
 } from "../network/webxdc-durable";
@@ -104,42 +99,12 @@ import {
   type AppRuntimeMode,
 } from "./runtime-helpers";
 import {
-  COMPETITION_EVENT_SCHEMA_V2,
-  CompetitionLedgerV2,
-  isCompetitionEventV2,
-  type CompetitionActor,
-  type CompetitionEventV2,
-  type CompetitionLedgerView,
   type CompetitionResultView,
-  type LiveMatchView,
-  type PendingRematchView,
-  type PracticeCompletedV2,
   type StartingPairingView,
 } from "./competition-ledger-v2";
-import {
-  challengeCancelledFeedback,
-  challengeJoinedFeedback,
-  challengeOpenedFeedback,
-  matchResultFeedback,
-  matchStartedFeedback,
-  practiceRecordFeedback,
-  projectChatUpdate,
-  rematchRequestedFeedback,
-  tournamentSummary,
-  type ChatActivityCounts,
-  type ChatUpdateMetadata,
-} from "./chat-feedback";
 import { presentCompetition } from "./competition-presenter";
 import { isRecognizedAppRouteHash, parseAppRoute } from "./routes";
-import {
-  connectionLossFallbackFor,
-  liveControllerRecoveryStatus,
-} from "./live-session-recovery";
-import {
-  PendingChatFeedbackStoreV2,
-  type PendingChatFeedbackResolverV2,
-  type PendingChatFeedbackV2,
-} from "./pending-chat-feedback";
+import { liveControllerRecoveryStatus } from "./live-session-recovery";
 import { STRINGS, formatString, type StringKey } from "./strings";
 import {
   PresentationTimeline,
@@ -150,13 +115,18 @@ import {
   RuntimePresentationCadence,
 } from "./presentation-cadence";
 import { recoveryPresentationFor } from "./recovery-presentation";
+import {
+  createCompetitionEventLifecycle,
+  type CompetitionIntentReference,
+  type CompetitionLiveMatchView,
+  type CompetitionPendingRematchView,
+} from "./competition-event-lifecycle";
 
 const PRACTICE_HIGH_SCORE_KEY = `split-stack/practice-high-score/v2:${RULES_HASH}`;
 const FIXED_TICK_MS = 1_000 / RULES.timing.ticksPerSecond;
 const PRESENCE_HEARTBEAT_MS = 5_000;
 const DURABLE_RETRY_MIN_MS = 1_000;
 const DURABLE_RETRY_MAX_MS = 10_000;
-const DURABLE_SUCCESS_SEND_LIMIT = 2;
 const LIVE_RECOVERY_TICK_MS = 1_000;
 const RECONNECT_DOT_STEP_MS = 600;
 const RECOVERY_CONFIRMATION_DELAY_MS = 10_000;
@@ -164,8 +134,6 @@ const STALE_ROUTE_NOTICE_MS = 5_000;
 const SNAPSHOT_PROFILE = parseSnapshotProfile(
   import.meta.env.VITE_SPLIT_STACK_SNAPSHOT_HZ,
 );
-
-type DurablePayload = CompetitionEventV2;
 
 interface ActiveMatch {
   pairingId: string;
@@ -180,7 +148,6 @@ interface ActiveMatch {
   duplicateRuntime: boolean;
   /** An explicit read-only view of the participant's own fenced live match. */
   recoveryWatch?: boolean;
-  startedEventId?: string;
   committedSeed?: string;
   committedConfigHash?: string;
 }
@@ -448,8 +415,8 @@ export async function bootstrap(): Promise<void> {
   let competitivePumpTimer: number | null = null;
   let spectator: SpectatorRuntime | null = null;
   let activeMatch: ActiveMatch | null = null;
-  let interruptedPairing: StartingPairingView | LiveMatchView | null = null;
-  let pendingPairingExitId: string | null = null;
+  let interruptedPairing: StartingPairingView | CompetitionLiveMatchView | null = null;
+  const reportedRejectedJoinReferences = new Set<CompetitionIntentReference>();
   let displayedResult: CompetitionResultView | null = null;
   let pendingCommittedStart: {
     match: ActiveMatch;
@@ -463,7 +430,7 @@ export async function bootstrap(): Promise<void> {
   const neutralFinishFallbackTimers = new Map<string, number>();
   interface PassiveLiveRecovery {
     readonly matchId: string;
-    readonly startedEventId: string;
+    readonly committedConfigHash: string;
     readonly seatAPlayerId: string;
     readonly seatBPlayerId: string;
     readonly seatASessionId: string;
@@ -637,65 +604,25 @@ export async function bootstrap(): Promise<void> {
     }
   };
   const runtimeId = createRuntimeId();
-  const lamport = new DurableLamportClock();
-  const competition = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
-  type RuntimeClaimEvent = Extract<CompetitionEventV2, { kind: "runtime-claimed" }>;
-  const localRuntimeClaims = new Map<string, RuntimeClaimEvent>();
-  const observedPeerRuntimeByPairing = new Map<string, string>();
-  interface RuntimeClaimRetryState {
-    readonly pairingId: string;
-    readonly claim: RuntimeClaimEvent;
-    attempts: number;
-    sending: boolean;
-    retryTimer: number | null;
-  }
-  const runtimeClaimRetries = new Map<string, RuntimeClaimRetryState>();
-  const pendingJoinClaims = new Map<string, {
-    payload: Extract<CompetitionEventV2, { kind: "challenge-claimed" }>;
-    creatorId: string;
-  }>();
-  type PendingAcceptedFeedback =
-    | {
-        kind: "challenge-created";
-        payload: Extract<CompetitionEventV2, { kind: "challenge-created" }>;
-      }
-    | {
-        kind: "challenge-cancelled";
-        payload: Extract<CompetitionEventV2, { kind: "challenge-cancelled" }>;
-      }
-    | {
-        kind: "practice-record";
-        payload: PracticeCompletedV2;
-      };
-  const pendingAcceptedFeedback = new Map<string, PendingAcceptedFeedback>();
-  interface PendingMaterializedFeedback {
-    readonly payload: CompetitionEventV2;
-    readonly mayDefer: boolean;
-    readonly metadata: (view: CompetitionLedgerView) => ChatUpdateMetadata | null;
-    readonly onSettled?: () => void;
-    echoed: boolean;
-  }
-  const pendingMaterializedFeedback = new Map<string, PendingMaterializedFeedback>();
-  let pendingPairingExitEventId: string | null = null;
+  const competitionLifecycle = await createCompetitionEventLifecycle({
+    actor: selfActor,
+    runtimeSessionId: runtimeId,
+    currentRulesHash: RULES_HASH,
+    host: host ?? null,
+    storage,
+    scheduler: {
+      now: () => performance.now(),
+      setTimeout: (task, delayMs) => window.setTimeout(task, delayMs),
+      clearTimeout: (id) => window.clearTimeout(id),
+    },
+    createId: createRuntimeId,
+  });
+  const competitionView = () => competitionLifecycle.current().competition;
+  let pendingPairingExitReference: CompetitionIntentReference | null = null;
   const presence = new AdvisoryPresenceTracker({ clock: { now: () => performance.now() } });
   let presenceUnsubscribe: (() => void) | null = null;
   let controllerTrafficUnsubscribe: (() => void) | null = null;
   let receivePassiveControllerTraffic: (data: Uint8Array) => void = () => undefined;
-  const durable = host === undefined ? null : new WebxdcDurableLog<unknown>(host);
-  const pendingChatFeedback = new PendingChatFeedbackStoreV2(
-    storage,
-    RULES_HASH,
-    selfActor.id,
-  );
-  const rememberFeedbackIntent = (
-    payload: CompetitionEventV2,
-    resolver: PendingChatFeedbackResolverV2,
-  ): void => {
-    if (durable !== null) pendingChatFeedback.add(payload, resolver);
-  };
-  let durableReplayReady = durable === null;
-  let appendChain = Promise.resolve();
-  let lastAppendMs = -Infinity;
   let renderCompetitionState: () => void = () => undefined;
 
   connectHubServices = (hub): void => {
@@ -855,348 +782,14 @@ export async function bootstrap(): Promise<void> {
   }
   applyPreferences();
 
-  const sendDurableOnce = async (
-    update: DurableOutboundUpdate<DurablePayload>,
-  ): Promise<void> => {
-    if (durable === null) return;
-    const pending = appendChain.catch(() => undefined).then(async () => {
-      const interval = Math.max(0, host?.sendUpdateInterval ?? 0);
-      await wait(window, lastAppendMs + interval - performance.now());
-      await durable.append(update);
-      lastAppendMs = performance.now();
-    });
-    appendChain = pending.catch(() => undefined);
-    await pending;
-  };
-
-  interface DurableOutboxEntry {
-    readonly update: DurableOutboundUpdate<DurablePayload>;
-    readonly successfulSendLimit: number;
-    attempts: number;
-    successfulSends: number;
-    metadataDelivered: boolean;
-    sending: boolean;
-    retryTimer: number | null;
-  }
-  const durableOutbox = new Map<string, DurableOutboxEntry>();
-
-  const acknowledgeDurableEvent = (
-    payload: CompetitionEventV2,
-    received: DurableReceivedUpdate<unknown>,
-  ): boolean => {
-    const entry = durableOutbox.get(payload.eventId);
-    if (
-      entry === undefined ||
-      canonicalize(entry.update.payload) !== canonicalize(payload)
-    ) {
-      return false;
-    }
-    const expectsMetadata = entry.update.info !== undefined ||
-      entry.update.href !== undefined ||
-      entry.update.summary !== undefined ||
-      entry.update.notify !== undefined;
-    if (expectsMetadata) {
-      let notificationsMatch = false;
-      try {
-        notificationsMatch = canonicalize(entry.update.notify ?? null) ===
-          canonicalize(received.notify ?? null);
-      } catch {
-        return false;
-      }
-      if (
-        entry.update.info !== received.info ||
-        entry.update.href !== received.href ||
-        entry.update.summary !== received.summary ||
-        !notificationsMatch
-      ) {
-        return false;
-      }
-    }
-    if (entry?.retryTimer !== null && entry?.retryTimer !== undefined) {
-      window.clearTimeout(entry.retryTimer);
-    }
-    durableOutbox.delete(payload.eventId);
-    return true;
-  };
-
-  const flushDurableEntry = async (
-    eventId: string,
-    entry: DurableOutboxEntry,
-  ): Promise<void> => {
-    if (entry.sending || durableOutbox.get(eventId) !== entry) return;
-    entry.sending = true;
-    let delayMs = DURABLE_RETRY_MIN_MS;
-    try {
-      await sendDurableOnce(
-        entry.metadataDelivered
-          ? { payload: entry.update.payload }
-          : entry.update,
-      );
-      entry.metadataDelivered = true;
-      entry.attempts = 0;
-      entry.successfulSends += 1;
-      delayMs = Math.max(
-        DURABLE_RETRY_MIN_MS,
-        (host?.sendUpdateInterval ?? 0) + DURABLE_RETRY_MIN_MS,
-      );
-    } catch {
-      entry.attempts += 1;
-      delayMs = Math.min(
-        DURABLE_RETRY_MAX_MS,
-        DURABLE_RETRY_MIN_MS * 2 ** Math.min(entry.attempts - 1, 4),
-      );
-      shell.lobbyStatus.textContent = STRINGS["lobby.challengeError"];
-    } finally {
-      entry.sending = false;
-    }
-    if (durableOutbox.get(eventId) !== entry) return;
-    if (entry.successfulSends >= entry.successfulSendLimit) {
-      // A successful host append with no listener echo is ambiguous. One
-      // payload-only confirmation retry repairs an isolated dropped echo,
-      // while the persisted feedback journal handles reload recovery without
-      // creating an unbounded physical durable log.
-      durableOutbox.delete(eventId);
-      return;
-    }
-    entry.retryTimer = window.setTimeout(() => {
-      entry.retryTimer = null;
-      void flushDurableEntry(eventId, entry);
-    }, delayMs);
-  };
-
-  const enqueueDurable = (
-    update: DurableOutboundUpdate<DurablePayload>,
-    options: { readonly successfulSendLimit?: number } = {},
-  ): void => {
-    if (durable === null) return;
-    const eventId = update.payload.eventId;
-    const previous = durableOutbox.get(eventId);
-    if (previous?.retryTimer !== null && previous?.retryTimer !== undefined) {
-      window.clearTimeout(previous.retryTimer);
-    }
-    const entry: DurableOutboxEntry = {
-      update,
-      successfulSendLimit: options.successfulSendLimit ?? DURABLE_SUCCESS_SEND_LIMIT,
-      attempts: 0,
-      successfulSends: 0,
-      metadataDelivered: false,
-      sending: false,
-      retryTimer: null,
-    };
-    durableOutbox.set(eventId, entry);
-    void flushDurableEntry(eventId, entry);
-  };
-
-  const eventBase = (
-    purpose: string,
-    actor: CompetitionActor = selfActor,
-  ): Pick<CompetitionEventV2, "schema" | "eventId" | "logicalClock" | "actor"> => {
-    const logicalClock = lamport.next();
-    return {
-      schema: COMPETITION_EVENT_SCHEMA_V2,
-      eventId: `${runtimeId}:${logicalClock}:${purpose}`,
-      logicalClock,
-      actor: { ...actor },
-    };
-  };
-
-  const chatActivity = (
-    overrides: Partial<ChatActivityCounts> = {},
-  ): ChatActivityCounts => {
-    const counts = competition.view().counts;
-    return {
-      waiting: overrides.waiting ?? counts.waiting,
-      live: overrides.live ?? counts.live,
-    };
-  };
-
-  const queueResolvedFeedback = (
-    payload: CompetitionEventV2,
-    metadata: ChatUpdateMetadata | null,
-  ): void => {
-    pendingChatFeedback.resolve(payload.eventId, metadata);
-    if (metadata !== null && durableReplayReady) {
-      enqueueDurable(projectChatUpdate(payload, metadata));
-    }
-  };
-
-  const matchResultMetadata = (
-    result: MatchResultV1,
-    view: CompetitionLedgerView,
-    reasonOverride?: "concession",
-  ): ChatUpdateMetadata | null => {
-    const seatA = result.players[0];
-    const seatB = result.players[1];
-    if (seatA === undefined || seatB === undefined) return null;
-    const tally = view.headToHead.find((entry) =>
-      entry.playerIds.includes(seatA.id) && entry.playerIds.includes(seatB.id)
-    );
-    const reason = reasonOverride ?? (
-      result.reason === "connection-lost" ? "connection-lost" as const : undefined
-    );
-    return matchResultFeedback({
-      matchId: result.matchId,
-      seatA: {
-        ...seatA,
-        score: result.statsByPlayer[seatA.id]?.score ?? 0,
-      },
-      seatB: {
-        ...seatB,
-        score: result.statsByPlayer[seatB.id]?.score ?? 0,
-      },
-      outcome: result.outcome === "seat-a"
-        ? "seat-a"
-        : result.outcome === "seat-b"
-          ? "seat-b"
-          : result.outcome === "draw"
-            ? "draw"
-            : "neutral",
-      ...(reason === undefined ? {} : { reason }),
-      headToHead: {
-        seatAWins: tally?.winsByPlayer[seatA.id] ?? 0,
-        seatBWins: tally?.winsByPlayer[seatB.id] ?? 0,
-      },
-      activity: {
-        waiting: view.counts.waiting,
-        live: view.counts.live,
-      },
-    });
-  };
-
-  const materializedMetadataForPersistedFeedback = (
-    entry: PendingChatFeedbackV2,
-    view: CompetitionLedgerView,
-  ): ChatUpdateMetadata | null => {
-    const { payload, resolver } = entry;
-    if (resolver.kind === "match-started" && payload.kind === "match-started") {
-      return matchStartedFeedback({
-        seatAName: resolver.seatAName,
-        seatBName: resolver.seatBName,
-        matchId: payload.matchId,
-        activity: {
-          waiting: view.counts.waiting,
-          live: view.counts.live,
-        },
-      });
-    }
-    if (resolver.kind === "match-result") {
-      if (payload.kind === "match-finished") {
-        return matchResultMetadata(payload.result, view);
-      }
-      if (payload.kind === "match-conceded") {
-        const materialized = view.recentResults.find(
-          (entry) => entry.matchId === payload.matchId,
-        );
-        return materialized === undefined
-          ? null
-          : matchResultMetadata(materialized.result, view, "concession");
-      }
-    }
-    if (resolver.kind === "pairing-left" && payload.kind === "pairing-left") {
-      if (resolver.source !== "challenge") return null;
-      return resolver.seatALeft
-        ? challengeCancelledFeedback({
-            actorName: resolver.actorName,
-            challengeId: resolver.challengeId,
-            activity: {
-              waiting: view.counts.waiting,
-              live: view.counts.live,
-            },
-          })
-        : {
-            summary: tournamentSummary({
-              waiting: view.counts.waiting,
-              live: view.counts.live,
-            }),
-          };
-    }
-    if (resolver.kind === "rematch-requested" && payload.kind === "rematch-requested") {
-      return rematchRequestedFeedback({
-        requesterName: payload.actor.displayName,
-        opponentId: resolver.opponentId,
-        matchId: payload.afterMatchId,
-        activity: {
-          waiting: view.counts.waiting,
-          live: view.counts.live,
-        },
-      });
-    }
-    return null;
-  };
-
-  const installPersistedFeedback = (entry: PendingChatFeedbackV2): void => {
-    if (entry.resolved) return;
-    const { payload, resolver } = entry;
-    if (resolver.kind === "challenge-created" && payload.kind === "challenge-created") {
-      pendingAcceptedFeedback.set(payload.eventId, { kind: resolver.kind, payload });
-      return;
-    }
-    if (
-      resolver.kind === "challenge-cancelled" &&
-      payload.kind === "challenge-cancelled"
-    ) {
-      pendingAcceptedFeedback.set(payload.eventId, { kind: resolver.kind, payload });
-      return;
-    }
-    if (resolver.kind === "practice-record" && payload.kind === "practice-completed") {
-      pendingAcceptedFeedback.set(payload.eventId, { kind: resolver.kind, payload });
-      return;
-    }
-    if (resolver.kind === "challenge-joined" && payload.kind === "challenge-claimed") {
-      pendingJoinClaims.set(payload.eventId, {
-        payload,
-        creatorId: resolver.creatorId,
-      });
-      return;
-    }
-    pendingMaterializedFeedback.set(payload.eventId, {
-      payload,
-      mayDefer: resolver.kind === "match-started" || resolver.kind === "match-result",
-      metadata: (view) => materializedMetadataForPersistedFeedback(entry, view),
-      echoed: false,
-    });
-  };
-
-  const forgetRuntimeFeedback = (eventId: string): void => {
-    pendingAcceptedFeedback.delete(eventId);
-    pendingJoinClaims.delete(eventId);
-    const materialized = pendingMaterializedFeedback.get(eventId);
-    pendingMaterializedFeedback.delete(eventId);
-    materialized?.onSettled?.();
-  };
-
-  const appendCompetition = (payload: DurablePayload): void => {
-    enqueueDurable({ payload });
-  };
-
-  const appendAfterMaterialization = (
-    payload: CompetitionEventV2,
-    resolver: PendingChatFeedbackResolverV2,
-    metadata: (view: CompetitionLedgerView) => ChatUpdateMetadata | null,
-    options: {
-      mayDefer?: boolean;
-      onSettled?: () => void;
-    } = {},
-  ): void => {
-    rememberFeedbackIntent(payload, resolver);
-    pendingMaterializedFeedback.set(payload.eventId, {
-      payload,
-      metadata,
-      mayDefer: options.mayDefer ?? false,
-      echoed: false,
-      ...(options.onSettled === undefined ? {} : { onSettled: options.onSettled }),
-    });
-    appendCompetition(payload);
-  };
-
-  type PairingView = StartingPairingView | LiveMatchView;
+  type PairingView = StartingPairingView | CompetitionLiveMatchView;
 
   const activeMatchFrom = (
     pairing: PairingView,
     forceSpectator = false,
   ): ActiveMatch | null => {
     const committedStart = "start" in pairing
-      ? (pairing as LiveMatchView).start
+      ? (pairing as CompetitionLiveMatchView).start
       : undefined;
     const seatASessionId = committedStart?.seatASessionId ??
       pairing.runtimeSessionByPlayer[pairing.seatA.id];
@@ -1247,149 +840,10 @@ export async function bootstrap(): Promise<void> {
       ...(committedStart === undefined
         ? {}
         : {
-            startedEventId: committedStart.eventId,
             committedSeed: committedStart.seed,
             committedConfigHash: committedStart.configHash,
           }),
     };
-  };
-
-  const ensureLocalRuntimeClaim = (pairing: PairingView): RuntimeClaimEvent | undefined => {
-    if (
-      !durableReplayReady ||
-      durable === null ||
-      (pairing.seatA.id !== selfActor.id && pairing.seatB.id !== selfActor.id)
-    ) {
-      return undefined;
-    }
-    const existing = localRuntimeClaims.get(pairing.pairingId);
-    if (existing !== undefined) return existing;
-    const claim: CompetitionEventV2 = {
-      ...eventBase("runtime-claimed"),
-      kind: "runtime-claimed",
-      pairingId: pairing.pairingId,
-      runtimeSessionId: runtimeId,
-    };
-    localRuntimeClaims.set(pairing.pairingId, claim);
-    appendCompetition(claim);
-    return claim;
-  };
-
-  const stopRuntimeClaimRetry = (pairingId: string): void => {
-    const retry = runtimeClaimRetries.get(pairingId);
-    if (retry === undefined) return;
-    if (retry.retryTimer !== null) window.clearTimeout(retry.retryTimer);
-    runtimeClaimRetries.delete(pairingId);
-  };
-
-  const stopAllRuntimeClaimRetries = (): void => {
-    for (const pairingId of [...runtimeClaimRetries.keys()]) {
-      stopRuntimeClaimRetry(pairingId);
-    }
-  };
-
-  const runtimeClaimRetryIsNeeded = (retry: RuntimeClaimRetryState): boolean => {
-    if (
-      localRuntimeClaims.get(retry.pairingId)?.eventId !== retry.claim.eventId ||
-      retry.claim.runtimeSessionId !== runtimeId
-    ) {
-      return false;
-    }
-    const pairing = competition.view(selfActor.id).startingPairings.find(
-      (candidate) =>
-        candidate.pairingId === retry.pairingId &&
-        (candidate.seatA.id === selfActor.id || candidate.seatB.id === selfActor.id),
-    );
-    if (pairing === undefined) return false;
-    const peer = pairing.seatA.id === selfActor.id ? pairing.seatB : pairing.seatA;
-    return pairing.runtimeSessionByPlayer[selfActor.id] === runtimeId &&
-      pairing.runtimeSessionByPlayer[peer.id] === undefined;
-  };
-
-  const runtimeClaimRetryDelay = (attempts: number): number => Math.max(
-    Math.max(0, host?.sendUpdateInterval ?? 0),
-    Math.min(
-      DURABLE_RETRY_MAX_MS,
-      DURABLE_RETRY_MIN_MS * 2 ** Math.min(attempts, 4),
-    ),
-  );
-
-  const scheduleRuntimeClaimRetry = (
-    retry: RuntimeClaimRetryState,
-    immediate = false,
-  ): void => {
-    if (
-      retry.sending ||
-      retry.retryTimer !== null ||
-      runtimeClaimRetries.get(retry.pairingId) !== retry
-    ) {
-      return;
-    }
-    retry.retryTimer = window.setTimeout(() => {
-      retry.retryTimer = null;
-      if (!runtimeClaimRetryIsNeeded(retry)) {
-        stopRuntimeClaimRetry(retry.pairingId);
-        return;
-      }
-      retry.sending = true;
-      void sendDurableOnce({ payload: retry.claim })
-        .catch(() => undefined)
-        .finally(() => {
-          retry.sending = false;
-          if (
-            runtimeClaimRetries.get(retry.pairingId) !== retry ||
-            !runtimeClaimRetryIsNeeded(retry)
-          ) {
-            stopRuntimeClaimRetry(retry.pairingId);
-            return;
-          }
-          retry.attempts += 1;
-          scheduleRuntimeClaimRetry(retry);
-        });
-    }, immediate ? 0 : runtimeClaimRetryDelay(retry.attempts));
-  };
-
-  const syncRuntimeClaimRetry = (
-    pairing: StartingPairingView | undefined,
-    claim: RuntimeClaimEvent | undefined,
-  ): void => {
-    for (const pairingId of [...runtimeClaimRetries.keys()]) {
-      if (pairingId !== pairing?.pairingId) stopRuntimeClaimRetry(pairingId);
-    }
-    if (pairing === undefined || claim === undefined) return;
-    const peer = pairing.seatA.id === selfActor.id ? pairing.seatB : pairing.seatA;
-    if (
-      pairing.runtimeSessionByPlayer[selfActor.id] !== runtimeId ||
-      pairing.runtimeSessionByPlayer[peer.id] !== undefined
-    ) {
-      stopRuntimeClaimRetry(pairing.pairingId);
-      return;
-    }
-    const existing = runtimeClaimRetries.get(pairing.pairingId);
-    if (existing !== undefined) return;
-    const retry: RuntimeClaimRetryState = {
-      pairingId: pairing.pairingId,
-      claim,
-      attempts: 0,
-      sending: false,
-      retryTimer: null,
-    };
-    runtimeClaimRetries.set(pairing.pairingId, retry);
-    scheduleRuntimeClaimRetry(retry);
-  };
-
-  const retryRuntimeClaimsImmediately = (): void => {
-    for (const retry of [...runtimeClaimRetries.values()]) {
-      if (!runtimeClaimRetryIsNeeded(retry)) {
-        stopRuntimeClaimRetry(retry.pairingId);
-        continue;
-      }
-      if (retry.retryTimer !== null) {
-        window.clearTimeout(retry.retryTimer);
-        retry.retryTimer = null;
-      }
-      scheduleRuntimeClaimRetry(retry, true);
-    }
   };
 
   const publishCommittedStartWhenReady = (): void => {
@@ -1398,39 +852,16 @@ export async function bootstrap(): Promise<void> {
     const seatB = pending.match.challenge.seatB;
     if (seatB === null) return;
     announcedConfigHash = pending.configHash;
-    const started: Extract<CompetitionEventV2, { kind: "match-started" }> = {
-      ...eventBase("match-started"),
-      kind: "match-started",
-      pairingId: pending.match.pairingId,
-      seriesId: pending.match.seriesId,
-      round: pending.match.round,
-      matchId: pending.match.matchId,
-      rulesHash: RULES_HASH,
-      configHash: pending.configHash,
-      seed: pending.seed,
-      seedHash: hashCanonicalHex({ seed: pending.seed }),
-      seatAPlayerId: pending.match.challenge.seatA.playerId,
-      seatBPlayerId: seatB.playerId,
-      seatASessionId: pending.match.seatASessionId,
-      seatBSessionId: pending.match.seatBSessionId,
-    };
-    pending.match.startedEventId = started.eventId;
-    pendingCommittedStart = null;
-    appendAfterMaterialization(
-      started,
-      {
-        kind: "match-started",
-        seatAName: pending.match.challenge.seatA.displayName,
-        seatBName: seatB.displayName,
-      },
-      () => matchStartedFeedback({
-        seatAName: pending.match.challenge.seatA.displayName,
-        seatBName: seatB.displayName,
-        matchId: pending.match.matchId,
-        activity: chatActivity(),
-      }),
-      { mayDefer: true },
-    );
+    try {
+      competitionLifecycle.express({
+        kind: "start-match",
+        pairingId: pending.match.pairingId,
+        seed: pending.seed,
+      });
+      pendingCommittedStart = null;
+    } catch {
+      announcedConfigHash = null;
+    }
   };
 
   const leaveRuntime = (): void => {
@@ -1495,14 +926,14 @@ export async function bootstrap(): Promise<void> {
 
   const rematchForResult = (
     resultView: CompetitionResultView,
-    view = competition.view(selfActor.id),
-  ): PendingRematchView | undefined => view.pendingRematches.find(
+    view = competitionView(),
+  ): CompetitionPendingRematchView | undefined => view.pendingRematches.find(
     (candidate) => candidate.afterMatchId === resultView.matchId,
   );
 
   const updateRematchAction = (): void => {
     const resultView = displayedResult;
-    const view = competition.view(selfActor.id);
+    const view = competitionView();
     shell.newChallengeButton.disabled = view.activity.kind !== "idle";
     if (resultView === null || !resultView.result.players.some((player) => player.id === selfActor.id)) {
       shell.setRematchAction("hidden");
@@ -1532,7 +963,7 @@ export async function bootstrap(): Promise<void> {
       shell.setCompetitiveResult(null);
       return;
     }
-    const view = competition.view(selfActor.id);
+    const view = competitionView();
     const headToHead = view.headToHead.find((entry) =>
       entry.playerIds.includes(seatA.id) && entry.playerIds.includes(seatB.id)
     );
@@ -1573,7 +1004,7 @@ export async function bootstrap(): Promise<void> {
     shell.setScrambled(false);
     const seatA = result.players[0];
     const seatB = result.players[1];
-    const inferredContext = competition.view().recentResults.find(
+    const inferredContext = competitionView().recentResults.find(
       (candidate) => candidate.matchId === result.matchId,
     );
     displayedResult = resultContext ?? inferredContext ?? (
@@ -1626,33 +1057,26 @@ export async function bootstrap(): Promise<void> {
     } catch {
       // Practice score is a non-authoritative convenience cache.
     }
-    const completion: PracticeCompletedV2 = {
-      ...eventBase("practice-completed"),
-      kind: "practice-completed",
-      rulesHash: RULES_HASH,
-      runId: practiceRunId ?? `practice:${runtimeId}:${createRuntimeId()}`,
-      endReason: "top-out",
-      score: snapshot.player.score,
-      durationTicks: snapshot.tick,
-      finalLevel: snapshot.level,
-      finalStats: {
-        score: snapshot.player.score,
-        lines: snapshot.player.lines,
-        garbageSent: snapshot.player.stats.garbageSent,
-        powersActivated: snapshot.player.stats.powersActivated,
-        tetrises: snapshot.player.stats.tetrises,
-        tSpinSingles: snapshot.player.stats.tSpinSingles,
-        tSpinDoubles: snapshot.player.stats.tSpinDoubles,
-        tSpinTriples: snapshot.player.stats.tSpinTriples,
-        topOutTick: snapshot.tick,
-      },
-    };
-    rememberFeedbackIntent(completion, { kind: "practice-record" });
-    pendingAcceptedFeedback.set(completion.eventId, {
-      kind: "practice-record",
-      payload: completion,
-    });
-    appendCompetition(completion);
+    try {
+      competitionLifecycle.express({
+        kind: "complete-practice",
+        runId: practiceRunId ?? `practice:${runtimeId}:${createRuntimeId()}`,
+        durationTicks: snapshot.tick,
+        finalLevel: snapshot.level,
+        finalStats: {
+          score: snapshot.player.score,
+          lines: snapshot.player.lines,
+          garbageSent: snapshot.player.stats.garbageSent,
+          powersActivated: snapshot.player.stats.powersActivated,
+          tetrises: snapshot.player.stats.tetrises,
+          tSpinSingles: snapshot.player.stats.tSpinSingles,
+          tSpinDoubles: snapshot.player.stats.tSpinDoubles,
+          tSpinTriples: snapshot.player.stats.tSpinTriples,
+        },
+      });
+    } catch {
+      // Local Practice results remain usable when durable identity storage is unavailable.
+    }
     mode = "results";
     shell.setResultsMode("practice");
     shell.setCompetitiveResult(null);
@@ -1923,62 +1347,33 @@ export async function bootstrap(): Promise<void> {
     return presentation;
   };
 
-  const appendMatchFinished = (
-    finished: Extract<CompetitionEventV2, { kind: "match-finished" }>,
-    onSettled?: () => void,
-  ): void => {
-    const result = finished.result;
-    if (result.players[0] === undefined || result.players[1] === undefined) {
-      appendCompetition(finished);
-      return;
-    }
-    appendAfterMaterialization(
-      finished,
-      { kind: "match-result" },
-      (materialized) => matchResultMetadata(result, materialized),
-      { mayDefer: true, ...(onSettled === undefined ? {} : { onSettled }) },
-    );
-  };
-
-  const appendMatchConceded = (
-    conceded: Extract<CompetitionEventV2, { kind: "match-conceded" }>,
-    onSettled?: () => void,
-  ): void => {
-    appendAfterMaterialization(
-      conceded,
-      { kind: "match-result" },
-      (materialized) => {
-        const result = materialized.recentResults.find(
-          (entry) => entry.matchId === conceded.matchId,
-        );
-        return result === undefined
-          ? null
-          : matchResultMetadata(result.result, materialized, "concession");
-      },
-      { mayDefer: true, ...(onSettled === undefined ? {} : { onSettled }) },
-    );
-  };
-
   const publishMatchResult = (
     match: ActiveMatch,
     result: MatchResultV1,
   ): void => {
-    const view = competition.view();
-    if (view.recentResults.some((candidate) => candidate.matchId === result.matchId)) {
+    const view = competitionView();
+    if (
+      result.matchId !== match.matchId ||
+      view.recentResults.some((candidate) => candidate.matchId === result.matchId)
+    ) {
       return;
     }
-    const live = view.liveMatches.find(
-      (candidate) => candidate.matchId === result.matchId,
-    );
-    const startedEventId = match.startedEventId ?? live?.startedEventId;
-    if (startedEventId === undefined) return;
-    appendMatchFinished({
-      ...eventBase("match-finished"),
-      kind: "match-finished",
-      matchId: result.matchId,
-      startedEventId,
-      result,
-    });
+    try {
+      competitionLifecycle.express({
+        kind: "finish-match",
+        matchId: result.matchId,
+        result: {
+          outcome: result.outcome,
+          reason: result.reason,
+          durationTicks: result.durationTicks,
+          finalLevel: result.finalLevel,
+          statsByPlayer: result.statsByPlayer,
+          completedBy: result.completedBy,
+        },
+      });
+    } catch {
+      // The lifecycle retries admitted results; failed admission remains visible in recovery UI.
+    }
   };
 
   const clearPassiveLiveRecovery = (): void => {
@@ -2001,35 +1396,30 @@ export async function bootstrap(): Promise<void> {
       nowMs: performance.now(),
     });
 
-  type RecoveryResolutionPayload = Extract<
-    CompetitionEventV2,
-    { kind: "match-conceded" | "match-finished" }
-  >;
+  const matchesPassiveRecovery = (
+    match: CompetitionLiveMatchView,
+    recovery: PassiveLiveRecovery,
+  ): boolean =>
+    match.matchId === recovery.matchId &&
+    match.start.configHash === recovery.committedConfigHash &&
+    match.seatA.id === recovery.seatAPlayerId &&
+    match.seatB.id === recovery.seatBPlayerId &&
+    match.start.seatASessionId === recovery.seatASessionId &&
+    match.start.seatBSessionId === recovery.seatBSessionId;
 
-  const pendingRecoveryResolutionFor = (
-    matchId: string,
-  ): RecoveryResolutionPayload | null => {
-    for (const entry of pendingChatFeedback.entries()) {
-      if (entry.resolved) continue;
-      if (
-        entry.payload.kind === "match-conceded" &&
-        entry.payload.matchId === matchId
-      ) {
-        return entry.payload;
-      }
-      if (
-        entry.payload.kind === "match-finished" &&
-        entry.payload.matchId === matchId &&
-        entry.payload.result.reason === "connection-lost"
-      ) {
-        return entry.payload;
-      }
-    }
-    return null;
-  };
+  const pendingRecoveryResolutionFor = (matchId: string) =>
+    competitionLifecycle.current().intents.find((entry) =>
+      !entry.settled &&
+      (
+        (entry.intent.kind === "concede-match" && entry.intent.matchId === matchId) ||
+        (entry.intent.kind === "settle-connection-loss" && entry.intent.matchId === matchId)
+      )
+    ) ?? null;
 
-  const clearRecoveryResolutionProgress = (eventId: string): void => {
-    recoveryResolutionStartedAtMs.delete(eventId);
+  const clearRecoveryResolutionProgress = (
+    reference: CompetitionIntentReference,
+  ): void => {
+    recoveryResolutionStartedAtMs.delete(reference);
     const recovery = passiveLiveRecovery;
     if (recovery !== null) {
       recovery.finishQueued = false;
@@ -2040,11 +1430,11 @@ export async function bootstrap(): Promise<void> {
   const presentPendingRecoveryResolution = (
     recovery: PassiveLiveRecovery,
   ): boolean => {
-    const payload = pendingRecoveryResolutionFor(recovery.matchId);
-    if (payload === null) return false;
-    const startedAtMs = recoveryResolutionStartedAtMs.get(payload.eventId) ??
+    const pending = pendingRecoveryResolutionFor(recovery.matchId);
+    if (pending === null) return false;
+    const startedAtMs = recoveryResolutionStartedAtMs.get(pending.reference) ??
       performance.now();
-    recoveryResolutionStartedAtMs.set(payload.eventId, startedAtMs);
+    recoveryResolutionStartedAtMs.set(pending.reference, startedAtMs);
     shell.setHomeRecovery({
       kind: "ending",
       delayed: performance.now() - startedAtMs >= RECOVERY_CONFIRMATION_DELAY_MS,
@@ -2055,22 +1445,24 @@ export async function bootstrap(): Promise<void> {
   const retryPendingRecoveryResolution = (
     recovery: PassiveLiveRecovery,
   ): void => {
-    const payload = pendingRecoveryResolutionFor(recovery.matchId);
-    if (payload === null || durableOutbox.has(payload.eventId)) return;
+    const pending = pendingRecoveryResolutionFor(recovery.matchId);
+    if (pending === null) return;
     const now = performance.now();
-    const startedAtMs = recoveryResolutionStartedAtMs.get(payload.eventId);
+    const startedAtMs = recoveryResolutionStartedAtMs.get(pending.reference);
     if (
       startedAtMs === undefined ||
       now - startedAtMs < RECOVERY_CONFIRMATION_DELAY_MS
     ) {
       return;
     }
-    recoveryResolutionStartedAtMs.set(payload.eventId, now);
-    enqueueDurable(
-      { payload },
-      { successfulSendLimit: 1 },
-    );
-    refreshPassiveLiveRecovery();
+    try {
+      competitionLifecycle.express(pending.intent);
+      recoveryResolutionStartedAtMs.set(pending.reference, now);
+      refreshPassiveLiveRecovery();
+    } catch {
+      // The next canonical revision will either make the retry admissible or
+      // clear the obsolete recovery prompt.
+    }
   };
 
   const publishPassiveConnectionLoss = (
@@ -2079,21 +1471,19 @@ export async function bootstrap(): Promise<void> {
     if (
       passiveLiveRecovery !== recovery ||
       recovery.finishQueued ||
-      !durableReplayReady ||
       document.visibilityState === "hidden" ||
       realtimeHub === null ||
       passiveRecoveryStatus(recovery).kind !== "expired"
     ) {
       return;
     }
-    const view = competition.view(selfActor.id);
+    const view = competitionView();
     if (view.recentResults.some((entry) => entry.matchId === recovery.matchId)) {
       clearPassiveLiveRecovery();
       return;
     }
     const live = view.liveMatches.find((entry) =>
-      entry.matchId === recovery.matchId &&
-      entry.startedEventId === recovery.startedEventId &&
+      matchesPassiveRecovery(entry, recovery) &&
       (entry.seatA.id === selfActor.id || entry.seatB.id === selfActor.id)
     );
     if (live === undefined) {
@@ -2107,50 +1497,43 @@ export async function bootstrap(): Promise<void> {
       clearPassiveLiveRecovery();
       return;
     }
-    const finished = connectionLossFallbackFor(live, selfActor);
-    recovery.finishQueued = true;
-    if (pendingChatFeedback.get(finished.eventId) !== undefined) return;
-    recoveryResolutionStartedAtMs.set(finished.eventId, performance.now());
-    appendMatchFinished(
-      finished,
-      () => clearRecoveryResolutionProgress(finished.eventId),
-    );
-    refreshPassiveLiveRecovery();
+    try {
+      const reference = competitionLifecycle.express({
+        kind: "settle-connection-loss",
+        matchId: live.matchId,
+      });
+      recovery.finishQueued = true;
+      recoveryResolutionStartedAtMs.set(reference, performance.now());
+      refreshPassiveLiveRecovery();
+    } catch {
+      recovery.finishQueued = false;
+    }
   };
 
   const concedePassiveMatch = (recovery: PassiveLiveRecovery): void => {
-    if (
-      passiveLiveRecovery !== recovery ||
-      !durableReplayReady ||
-      durable === null
-    ) {
-      return;
-    }
-    const live = competition.view(selfActor.id).liveMatches.find((entry) =>
-      entry.matchId === recovery.matchId &&
-      entry.startedEventId === recovery.startedEventId &&
+    if (passiveLiveRecovery !== recovery || host === undefined) return;
+    const live = competitionView().liveMatches.find((entry) =>
+      matchesPassiveRecovery(entry, recovery) &&
       (entry.seatA.id === selfActor.id || entry.seatB.id === selfActor.id)
     );
     if (live === undefined) return;
     const existing = pendingRecoveryResolutionFor(recovery.matchId);
     if (existing !== null) {
-      recoveryResolutionStartedAtMs.set(existing.eventId, performance.now());
-      appendCompetition(existing);
+      recoveryResolutionStartedAtMs.set(existing.reference, performance.now());
       refreshPassiveLiveRecovery();
       return;
     }
-    const conceded: Extract<CompetitionEventV2, { kind: "match-conceded" }> = {
-      ...eventBase("match-conceded"),
-      kind: "match-conceded",
-      matchId: live.matchId,
-      startedEventId: live.startedEventId,
-    };
-    recoveryResolutionStartedAtMs.set(conceded.eventId, performance.now());
-    appendMatchConceded(
-      conceded,
-      () => clearRecoveryResolutionProgress(conceded.eventId),
-    );
-    refreshPassiveLiveRecovery();
+    try {
+      const reference = competitionLifecycle.express({
+        kind: "concede-match",
+        matchId: live.matchId,
+      });
+      recovery.finishQueued = true;
+      recoveryResolutionStartedAtMs.set(reference, performance.now());
+      refreshPassiveLiveRecovery();
+    } catch {
+      recovery.finishQueued = false;
+    }
   };
 
   const refreshPassiveLiveRecovery = (): void => {
@@ -2193,9 +1576,8 @@ export async function bootstrap(): Promise<void> {
         spectator = spectatorRuntime(activeMatch);
       }
     }
-    const live = competition.view(selfActor.id).liveMatches.find((entry) =>
-      entry.matchId === recovery.matchId &&
-      entry.startedEventId === recovery.startedEventId
+    const live = competitionView().liveMatches.find((entry) =>
+      matchesPassiveRecovery(entry, recovery)
     );
     if (live === undefined) {
       clearPassiveLiveRecovery();
@@ -2227,7 +1609,9 @@ export async function bootstrap(): Promise<void> {
     }
   };
 
-  const syncPassiveLiveRecovery = (match: LiveMatchView | undefined): boolean => {
+  const syncPassiveLiveRecovery = (
+    match: CompetitionLiveMatchView | undefined,
+  ): boolean => {
     if (match === undefined) {
       clearPassiveLiveRecovery();
       return false;
@@ -2241,14 +1625,11 @@ export async function bootstrap(): Promise<void> {
       clearPassiveLiveRecovery();
       return false;
     }
-    if (
-      passiveLiveRecovery?.matchId !== match.matchId ||
-      passiveLiveRecovery.startedEventId !== match.startedEventId
-    ) {
+    if (passiveLiveRecovery === null || !matchesPassiveRecovery(match, passiveLiveRecovery)) {
       clearPassiveLiveRecovery();
       passiveLiveRecovery = {
         matchId: match.matchId,
-        startedEventId: match.startedEventId,
+        committedConfigHash: match.start.configHash,
         seatAPlayerId: match.seatA.id,
         seatBPlayerId: match.seatB.id,
         seatASessionId: match.start.seatASessionId,
@@ -2439,7 +1820,7 @@ export async function bootstrap(): Promise<void> {
         onStartCommitted: () => {
           if (
             match.role !== "a" ||
-            match.startedEventId !== undefined ||
+            match.committedConfigHash !== undefined ||
             announcedConfigHash !== null
           ) {
             return;
@@ -2526,7 +1907,7 @@ export async function bootstrap(): Promise<void> {
         },
       });
       competitive.start();
-      if (match.startedEventId !== undefined) competitive.setReady(true);
+      if (match.committedConfigHash !== undefined) competitive.setReady(true);
     } catch {
       try {
         if (competitive === null) channel.leave?.();
@@ -2606,17 +1987,13 @@ export async function bootstrap(): Promise<void> {
 
   const reconcileLobby = (): void => {
     publishCommittedStartWhenReady();
-    const view = competition.view(selfActor.id);
+    const view = competitionView();
     const ownedStarting = view.startingPairings.find((pairing) =>
       pairing.seatA.id === selfActor.id || pairing.seatB.id === selfActor.id
     );
     const ownedLive = view.liveMatches.find((pairing) =>
       pairing.seatA.id === selfActor.id || pairing.seatB.id === selfActor.id
     );
-    const localRuntimeClaim = ownedStarting === undefined
-      ? undefined
-      : ensureLocalRuntimeClaim(ownedStarting);
-    syncRuntimeClaimRetry(ownedStarting, localRuntimeClaim);
     const completed = activeMatch === null
       ? undefined
       : view.recentResults.find((entry) => entry.matchId === activeMatch?.matchId);
@@ -2634,7 +2011,6 @@ export async function bootstrap(): Promise<void> {
       clearConfirmingPairing();
       clearPassiveLiveRecovery();
       const hadInterruption = interruptedPairing !== null;
-      pendingPairingExitId = null;
       interruptedPairing = null;
       shell.setPairingInterruption(null);
       if (hadInterruption && mode === "practice") {
@@ -2672,33 +2048,6 @@ export async function bootstrap(): Promise<void> {
     }
 
     const ownedPairing = ownedStarting ?? ownedLive!;
-    if (ownedStarting !== undefined && localRuntimeClaim !== undefined) {
-      const peer = ownedStarting.seatA.id === selfActor.id
-        ? ownedStarting.seatB
-        : ownedStarting.seatA;
-      const peerRuntime = ownedStarting.runtimeSessionByPlayer[peer.id];
-      const previousPeerRuntime = observedPeerRuntimeByPairing.get(
-        ownedStarting.pairingId,
-      );
-      if (peerRuntime !== undefined && peerRuntime !== previousPeerRuntime) {
-        observedPeerRuntimeByPairing.set(ownedStarting.pairingId, peerRuntime);
-        if (
-          ownedStarting.runtimeSessionByPlayer[selfActor.id] === runtimeId &&
-          !durableOutbox.has(localRuntimeClaim.eventId)
-        ) {
-          enqueueDurable({ payload: localRuntimeClaim });
-        }
-      }
-    }
-
-    if (
-      ownedStarting !== undefined &&
-      pendingPairingExitId === ownedStarting.pairingId
-    ) {
-      leaveStartingPairing(ownedStarting.pairingId);
-      return;
-    }
-
     const preservingActivity = ownedStarting !== undefined && (
       mode === "practice" ||
       (mode === "spectator" && activeMatch?.pairingId !== ownedStarting.pairingId)
@@ -2723,8 +2072,7 @@ export async function bootstrap(): Promise<void> {
     if (
       ownedStarting !== undefined &&
       localSessionId !== undefined &&
-      localSessionId !== runtimeId &&
-      (localRuntimeClaim === undefined || !durableOutbox.has(localRuntimeClaim.eventId))
+      localSessionId !== runtimeId
     ) {
       clearConfirmingPairing();
       if (mode === "competitive" || mode === "spectator") showHome();
@@ -2750,150 +2098,16 @@ export async function bootstrap(): Promise<void> {
       activeMatch.seatASessionId === next.seatASessionId &&
       activeMatch.seatBSessionId === next.seatBSessionId
     ) {
-      if (next.startedEventId !== undefined) {
-        activeMatch.startedEventId = next.startedEventId;
+      if (next.committedConfigHash !== undefined) {
+        activeMatch.committedConfigHash = next.committedConfigHash;
+        if (next.committedSeed !== undefined) {
+          activeMatch.committedSeed = next.committedSeed;
+        }
       }
       return;
     }
 
     startActiveMatch(next);
-  };
-
-  const receiveDurable = (update: DurableReceivedUpdate<unknown>): void => {
-    const { payload, serial } = update;
-    if (
-      !Number.isSafeInteger(serial) ||
-      serial < 1 ||
-      !isCompetitionEventV2(payload)
-    ) {
-      return;
-    }
-    const beforeView = competition.view(selfActor.id);
-    lamport.observe(payload.logicalClock);
-    competition.apply({ serial, payload });
-    acknowledgeDurableEvent(payload, update);
-    const afterView = competition.view(selfActor.id);
-    const canonicalDelivery = competition.hasCanonicalEvent(payload);
-    const matchesDelivery = (expected: CompetitionEventV2): boolean =>
-      canonicalDelivery && canonicalize(expected) === canonicalize(payload);
-    const persisted = pendingChatFeedback.get(payload.eventId);
-    const feedbackReceipt = update.info !== undefined ||
-      update.href !== undefined ||
-      update.summary !== undefined ||
-      update.notify !== undefined;
-    if (
-      feedbackReceipt &&
-      persisted !== undefined &&
-      matchesDelivery(persisted.payload)
-    ) {
-      pendingChatFeedback.acknowledge(payload.eventId);
-      forgetRuntimeFeedback(payload.eventId);
-    }
-    const acceptedFeedback = pendingAcceptedFeedback.get(payload.eventId);
-    if (acceptedFeedback !== undefined) {
-      pendingAcceptedFeedback.delete(payload.eventId);
-      let metadata: ReturnType<typeof challengeOpenedFeedback> | null = null;
-      const canonicalEcho = matchesDelivery(acceptedFeedback.payload);
-      if (
-        canonicalEcho &&
-        acceptedFeedback.kind === "challenge-created" &&
-        !beforeView.openChallenges.some((entry) =>
-          entry.challengeId === acceptedFeedback.payload.challengeId
-        ) &&
-        afterView.openChallenges.some((entry) =>
-          entry.challengeId === acceptedFeedback.payload.challengeId
-        )
-      ) {
-        metadata = challengeOpenedFeedback({
-          actorName: acceptedFeedback.payload.actor.displayName,
-          challengeId: acceptedFeedback.payload.challengeId,
-          activity: chatActivity(),
-        });
-      } else if (
-        canonicalEcho &&
-        acceptedFeedback.kind === "challenge-cancelled" &&
-        competition.isEventEffective(acceptedFeedback.payload.eventId)
-      ) {
-        metadata = challengeCancelledFeedback({
-          actorName: acceptedFeedback.payload.actor.displayName,
-          challengeId: acceptedFeedback.payload.challengeId,
-          activity: chatActivity(),
-        });
-      } else if (
-        canonicalEcho &&
-        acceptedFeedback.kind === "practice-record" &&
-        acceptedFeedback.payload.score > (beforeView.practice.record?.score ?? 0) &&
-        afterView.practice.record?.player.id === acceptedFeedback.payload.actor.id &&
-        afterView.practice.record.score === acceptedFeedback.payload.score
-      ) {
-        metadata = practiceRecordFeedback({
-          playerName: acceptedFeedback.payload.actor.displayName,
-          score: acceptedFeedback.payload.score,
-          previousChatRecord: beforeView.practice.record?.score ?? 0,
-          rulesHash: acceptedFeedback.payload.rulesHash,
-          activity: chatActivity(),
-        });
-      }
-      queueResolvedFeedback(acceptedFeedback.payload, metadata);
-    }
-    const pendingClaim = pendingJoinClaims.get(payload.eventId);
-    if (pendingClaim !== undefined) {
-      pendingJoinClaims.delete(payload.eventId);
-      const canonicalEcho = matchesDelivery(pendingClaim.payload);
-      const rejected = afterView.rejectedClaims.some(
-        (candidate) => candidate.claimEventId === pendingClaim.payload.eventId,
-      );
-      if (
-        canonicalEcho &&
-        afterView.activity.kind === "starting" &&
-        afterView.activity.pairingId === pendingClaim.payload.eventId
-      ) {
-        queueResolvedFeedback(
-          pendingClaim.payload,
-          challengeJoinedFeedback({
-            joinerName: selfActor.displayName,
-            creatorId: pendingClaim.creatorId,
-            challengeId: pendingClaim.payload.challengeId,
-            activity: chatActivity(),
-          }),
-        );
-      } else if (rejected || !canonicalEcho) {
-        queueResolvedFeedback(pendingClaim.payload, null);
-        shell.lobbyStatus.textContent = STRINGS["lobby.claimLost"];
-      }
-    }
-    const echoedFeedback = pendingMaterializedFeedback.get(payload.eventId);
-    if (echoedFeedback !== undefined) {
-      const canonicalEcho = matchesDelivery(echoedFeedback.payload);
-      echoedFeedback.echoed = true;
-      if (!canonicalEcho) {
-        pendingMaterializedFeedback.delete(payload.eventId);
-        queueResolvedFeedback(echoedFeedback.payload, null);
-        echoedFeedback.onSettled?.();
-      }
-    }
-    for (const [eventId, feedback] of pendingMaterializedFeedback) {
-      if (!feedback.echoed) continue;
-      const status = competition.eventStatus(eventId);
-      if (status === "effective") {
-        pendingMaterializedFeedback.delete(eventId);
-        const metadata = feedback.metadata(afterView);
-        queueResolvedFeedback(feedback.payload, metadata);
-        feedback.onSettled?.();
-      } else if (status === "rejected" || (!feedback.mayDefer && status !== "unknown")) {
-        pendingMaterializedFeedback.delete(eventId);
-        queueResolvedFeedback(feedback.payload, null);
-        feedback.onSettled?.();
-      }
-    }
-    for (const [matchId, fallbackTimer] of neutralFinishFallbackTimers) {
-      if (afterView.recentResults.some((result) => result.matchId === matchId)) {
-        window.clearTimeout(fallbackTimer);
-        neutralFinishFallbackTimers.delete(matchId);
-      }
-    }
-    renderCompetitionState();
-    reconcileLobby();
   };
 
   shell.practiceButton.addEventListener("click", startPractice);
@@ -2909,7 +2123,6 @@ export async function bootstrap(): Promise<void> {
       retryPendingRecoveryResolution(recovery);
       return;
     }
-    retryRuntimeClaimsImmediately();
     reconcileLobby();
   });
   shell.endInterruptedMatchButton.addEventListener("click", () => {
@@ -2940,7 +2153,7 @@ export async function bootstrap(): Promise<void> {
     }
   });
   shell.exitSetupButton.addEventListener("click", () => {
-    const pairing = competition.view(selfActor.id).startingPairings.find(
+    const pairing = competitionView().startingPairings.find(
       (candidate) =>
         candidate.seatA.id === selfActor.id || candidate.seatB.id === selfActor.id,
     );
@@ -3014,40 +2227,28 @@ export async function bootstrap(): Promise<void> {
   }
 
   const createChallenge = (): void => {
-    const before = competition.view(selfActor.id);
-    const creationPending = [...pendingAcceptedFeedback.values()].some(
-      (entry) => entry.kind === "challenge-created",
+    const before = competitionView();
+    const creationPending = competitionLifecycle.current().intents.some((entry) =>
+      !entry.settled && entry.intent.kind === "create-challenge"
     );
-    if (
-      !realtimeAvailable ||
-      before.activity.kind !== "idle" ||
-      creationPending ||
-      pendingJoinClaims.size > 0
-    ) {
+    const joinPending = competitionLifecycle.current().intents.some((entry) =>
+      !entry.settled && entry.intent.kind === "join-challenge"
+    );
+    if (!realtimeAvailable || before.activity.kind !== "idle" || creationPending || joinPending) {
       return;
     }
-    const challengeId = createRuntimeId();
-    const base = eventBase("challenge-created");
-    const created: Extract<CompetitionEventV2, { kind: "challenge-created" }> = {
-      ...base,
-      kind: "challenge-created",
-      challengeId,
-      rulesHash: RULES_HASH,
-      vacancyId: `${base.eventId}:vacancy`,
-    };
-    shell.lobbyStatus.textContent = STRINGS["lobby.challengeCreated"];
-    rememberFeedbackIntent(created, { kind: "challenge-created" });
-    pendingAcceptedFeedback.set(created.eventId, {
-      kind: "challenge-created",
-      payload: created,
-    });
-    appendCompetition(created);
+    try {
+      competitionLifecycle.express({ kind: "create-challenge" });
+      shell.lobbyStatus.textContent = STRINGS["lobby.challengeCreated"];
+    } catch {
+      shell.lobbyStatus.textContent = STRINGS["lobby.challengeError"];
+    }
   };
 
   const cancelOwnedChallenge = (): void => {
-    const before = competition.view(selfActor.id);
-    const cancellationPending = [...pendingAcceptedFeedback.values()].some(
-      (entry) => entry.kind === "challenge-cancelled",
+    const before = competitionView();
+    const cancellationPending = competitionLifecycle.current().intents.some((entry) =>
+      !entry.settled && entry.intent.kind === "cancel-challenge"
     );
     if (before.activity.kind !== "waiting" || cancellationPending) return;
     const ownedChallengeId = before.activity.challengeId;
@@ -3055,32 +2256,23 @@ export async function bootstrap(): Promise<void> {
       (candidate) => candidate.challengeId === ownedChallengeId,
     );
     if (challenge === undefined) return;
-    const cancelled: Extract<CompetitionEventV2, { kind: "challenge-cancelled" }> = {
-      ...eventBase("challenge-cancelled"),
-      kind: "challenge-cancelled",
-      challengeId: challenge.challengeId,
-    };
-    rememberFeedbackIntent(cancelled, { kind: "challenge-cancelled" });
-    pendingAcceptedFeedback.set(cancelled.eventId, {
-      kind: "challenge-cancelled",
-      payload: cancelled,
-    });
-    appendCompetition(cancelled);
+    try {
+      competitionLifecycle.express({
+        kind: "cancel-challenge",
+        challengeId: challenge.challengeId,
+      });
+    } catch {
+      shell.lobbyStatus.textContent = STRINGS["lobby.challengeError"];
+    }
   };
 
   const joinChallenge = (challengeId: string): void => {
-    const before = competition.view(selfActor.id);
-    const creationPending = [...pendingAcceptedFeedback.values()].some(
-      (entry) => entry.kind === "challenge-created",
+    const before = competitionView();
+    const pending = competitionLifecycle.current().intents.some((entry) =>
+      !entry.settled &&
+      (entry.intent.kind === "join-challenge" || entry.intent.kind === "create-challenge")
     );
-    if (
-      !realtimeAvailable ||
-      before.activity.kind !== "idle" ||
-      pendingJoinClaims.size > 0 ||
-      creationPending
-    ) {
-      return;
-    }
+    if (!realtimeAvailable || before.activity.kind !== "idle" || pending) return;
     const challenge = before.openChallenges.find(
       (candidate) => candidate.challengeId === challengeId,
     );
@@ -3088,100 +2280,47 @@ export async function bootstrap(): Promise<void> {
       shell.lobbyStatus.textContent = STRINGS["lobby.noOpenChallenge"];
       return;
     }
-    const claimed: CompetitionEventV2 = {
-      ...eventBase("challenge-claimed"),
-      kind: "challenge-claimed",
-      challengeId: challenge.challengeId,
-      vacancyId: challenge.vacancyId,
-    };
-    rememberFeedbackIntent(claimed, {
-      kind: "challenge-joined",
-      creatorId: challenge.creator.id,
-    });
-    pendingJoinClaims.set(claimed.eventId, {
-      payload: claimed,
-      creatorId: challenge.creator.id,
-    });
-    shell.lobbyStatus.textContent = STRINGS["lobby.challengeJoined"];
-    appendCompetition(claimed);
+    try {
+      competitionLifecycle.express({ kind: "join-challenge", challengeId });
+      shell.lobbyStatus.textContent = STRINGS["lobby.challengeJoined"];
+    } catch {
+      shell.lobbyStatus.textContent = STRINGS["lobby.claimLost"];
+    }
   };
 
   function leaveStartingPairing(pairingId: string): void {
-    if (pendingPairingExitEventId !== null) return;
-    pendingPairingExitId = pairingId;
-    const before = competition.view(selfActor.id);
-    const pairing = before.startingPairings.find(
-      (candidate) => candidate.pairingId === pairingId &&
-        (candidate.seatA.id === selfActor.id || candidate.seatB.id === selfActor.id),
-    );
-    if (pairing === undefined) {
-      pendingPairingExitId = null;
-      return;
+    if (pendingPairingExitReference !== null) return;
+    try {
+      pendingPairingExitReference = competitionLifecycle.express({
+        kind: "leave-pairing",
+        pairingId,
+      });
+    } catch {
+      // A canonical revision will either make the action obsolete or allow a retry.
     }
-    if (pairing.runtimeSessionByPlayer[selfActor.id] !== runtimeId) {
-      return;
-    }
-    const left: Extract<CompetitionEventV2, { kind: "pairing-left" }> = {
-      ...eventBase("pairing-left"),
-      kind: "pairing-left",
-      pairingId: pairing.pairingId,
-      runtimeSessionId: runtimeId,
-    };
-    pendingPairingExitEventId = left.eventId;
-    appendAfterMaterialization(
-      left,
-      {
-        kind: "pairing-left",
-        source: pairing.source,
-        seatALeft: pairing.seatA.id === selfActor.id,
-        challengeId: pairing.seriesId,
-        actorName: selfActor.displayName,
-      },
-      () => pairing.source !== "challenge"
-        ? null
-        : pairing.seatA.id === selfActor.id
-          ? challengeCancelledFeedback({
-              actorName: selfActor.displayName,
-              challengeId: pairing.seriesId,
-              activity: chatActivity(),
-            })
-          : { summary: tournamentSummary(chatActivity()) },
-      {
-        onSettled: () => {
-          if (pendingPairingExitEventId === left.eventId) {
-            pendingPairingExitEventId = null;
-            pendingPairingExitId = null;
-          }
-        },
-      },
-    );
   }
 
   const acceptPendingRematch = (afterMatchId: string): void => {
-    const view = competition.view(selfActor.id);
-    if (view.activity.kind !== "idle") return;
-    const pending = view.pendingRematches.find((candidate) =>
-      candidate.afterMatchId === afterMatchId &&
-      !candidate.requestedByPlayerIds.includes(selfActor.id) &&
-      (candidate.seatA.id === selfActor.id || candidate.seatB.id === selfActor.id)
+    if (competitionView().activity.kind !== "idle") return;
+    const acceptancePending = competitionLifecycle.current().intents.some((entry) =>
+      !entry.settled &&
+      entry.intent.kind === "accept-rematch" &&
+      entry.intent.afterMatchId === afterMatchId
     );
-    if (pending === undefined) return;
-    const opponent = pending.seatA.id === selfActor.id ? pending.seatB : pending.seatA;
-    const requestedEventId = pending.requestEventIdByPlayer[opponent.id];
-    if (requestedEventId === undefined) return;
-    appendCompetition({
-      ...eventBase("rematch-accepted"),
-      kind: "rematch-accepted",
-      seriesId: pending.seriesId,
-      afterMatchId: pending.afterMatchId,
-      round: pending.round,
-      requestedEventId,
-    });
-    shell.setRematchAction("pending");
+    if (acceptancePending) {
+      shell.setRematchAction("pending");
+      return;
+    }
+    try {
+      competitionLifecycle.express({ kind: "accept-rematch", afterMatchId });
+      shell.setRematchAction("pending");
+    } catch {
+      // A concurrent request/acceptance will be reflected by the next snapshot.
+    }
   };
 
   const watchMatch = (matchId: string): void => {
-    const view = competition.view(selfActor.id);
+    const view = competitionView();
     if (view.activity.kind === "starting") return;
     const recoveringOwnedMatch = view.activity.kind === "live" &&
       view.activity.matchId === matchId &&
@@ -3204,7 +2343,7 @@ export async function bootstrap(): Promise<void> {
   };
 
   renderCompetitionState = (): void => {
-    const view = competition.view(selfActor.id);
+    const view = competitionView();
     presentCompetition({
       shell,
       view,
@@ -3251,8 +2390,47 @@ export async function bootstrap(): Promise<void> {
     }
   };
 
+  for (const intent of competitionLifecycle.current().intents) {
+    if (intent.intent.kind === "join-challenge" && intent.eventStatus === "rejected") {
+      reportedRejectedJoinReferences.add(intent.reference);
+    }
+  }
+  competitionLifecycle.observe((snapshot) => {
+    if (pendingPairingExitReference !== null) {
+      const exit = snapshot.intents.find(
+        (entry) => entry.reference === pendingPairingExitReference,
+      );
+      if (exit?.eventStatus === "effective" || exit?.eventStatus === "rejected") {
+        pendingPairingExitReference = null;
+      }
+    }
+    const newlyRejectedJoin = snapshot.intents.find((entry) =>
+      entry.intent.kind === "join-challenge" &&
+      entry.eventStatus === "rejected" &&
+      !reportedRejectedJoinReferences.has(entry.reference)
+    );
+    if (newlyRejectedJoin !== undefined) {
+      reportedRejectedJoinReferences.add(newlyRejectedJoin.reference);
+      shell.lobbyStatus.textContent = STRINGS["lobby.claimLost"];
+    }
+    for (const [matchId, fallbackTimer] of neutralFinishFallbackTimers) {
+      if (snapshot.competition.recentResults.some((result) => result.matchId === matchId)) {
+        window.clearTimeout(fallbackTimer);
+        neutralFinishFallbackTimers.delete(matchId);
+      }
+    }
+    for (const reference of recoveryResolutionStartedAtMs.keys()) {
+      const intent = snapshot.intents.find((entry) => entry.reference === reference);
+      if (intent?.eventStatus === "effective" || intent?.eventStatus === "rejected") {
+        clearRecoveryResolutionProgress(reference as CompetitionIntentReference);
+      }
+    }
+    renderCompetitionState();
+    reconcileLobby();
+  });
+
   const publishWaitingPresence = (): void => {
-    const view = competition.view(selfActor.id);
+    const view = competitionView();
     if (view.activity.kind !== "waiting") return;
     const ownedChallengeId = view.activity.challengeId;
     const challenge = view.openChallenges.find(
@@ -3278,7 +2456,7 @@ export async function bootstrap(): Promise<void> {
   shell.cancelChallengeButton.addEventListener("click", cancelOwnedChallenge);
 
   shell.joinButton.addEventListener("click", () => {
-    const challenge = competition.view(selfActor.id).openChallenges.find(
+    const challenge = competitionView().openChallenges.find(
       (candidate) => candidate.creator.id !== selfActor.id,
     );
     if (challenge !== undefined) joinChallenge(challenge.challengeId);
@@ -3290,13 +2468,15 @@ export async function bootstrap(): Promise<void> {
     session.setReady(true);
     const view = session.view();
     if (activeMatch !== null) {
-      appendCompetition({
-        ...eventBase("ready-changed"),
-        kind: "ready-changed",
-        pairingId: activeMatch.pairingId,
-        runtimeSessionId: runtimeId,
-        ready: true,
-      });
+      try {
+        competitionLifecycle.express({
+          kind: "set-readiness",
+          pairingId: activeMatch.pairingId,
+          ready: true,
+        });
+      } catch {
+        // A superseded runtime remains read-only and cannot publish readiness.
+      }
       const seatB = activeMatch.challenge.seatB;
       shell.setReadiness(view.localReady, view.peerReady, {
         localName: activeMatch.role === "a"
@@ -3315,13 +2495,15 @@ export async function bootstrap(): Promise<void> {
     session.setReady(false);
     const view = session.view();
     if (activeMatch !== null) {
-      appendCompetition({
-        ...eventBase("ready-changed"),
-        kind: "ready-changed",
-        pairingId: activeMatch.pairingId,
-        runtimeSessionId: runtimeId,
-        ready: false,
-      });
+      try {
+        competitionLifecycle.express({
+          kind: "set-readiness",
+          pairingId: activeMatch.pairingId,
+          ready: false,
+        });
+      } catch {
+        // A superseded runtime remains read-only and cannot publish readiness.
+      }
       const seatB = activeMatch.challenge.seatB;
       shell.setReadiness(view.localReady, view.peerReady, {
         localName: activeMatch.role === "a"
@@ -3426,7 +2608,7 @@ export async function bootstrap(): Promise<void> {
       phase === "playing" ||
       phase === "network-pause" ||
       phase === "finished" ||
-      match?.startedEventId !== undefined;
+      match?.committedConfigHash !== undefined;
     if (session !== null && started) {
       try {
         await settleExplicitForfeit(session);
@@ -3450,47 +2632,34 @@ export async function bootstrap(): Promise<void> {
   const requestRematch = (): void => {
     const resultView = displayedResult;
     if (resultView === null) return;
-    const requestPending = [...pendingMaterializedFeedback.values()].some(
-      (entry) => entry.payload.kind === "rematch-requested" &&
-        entry.payload.afterMatchId === resultView.matchId,
+    const requestPending = competitionLifecycle.current().intents.some(
+      (entry) => !entry.settled &&
+        entry.intent.kind === "request-rematch" &&
+        entry.intent.afterMatchId === resultView.matchId,
     );
     if (requestPending) return;
-    const view = competition.view(selfActor.id);
+    const view = competitionView();
     if (view.activity.kind !== "idle") return;
     const playerIds = resultView.result.players.map((player) => player.id);
     if (!playerIds.includes(selfActor.id)) return;
-    const opponent = resultView.result.players.find((player) => player.id !== selfActor.id);
-    if (opponent === undefined) return;
     const pending = rematchForResult(resultView, view);
     if (pending !== undefined && !pending.requestedByPlayerIds.includes(selfActor.id)) {
       acceptPendingRematch(resultView.matchId);
       return;
     }
-    const requested: Extract<CompetitionEventV2, { kind: "rematch-requested" }> = {
-      ...eventBase("rematch-requested"),
-      kind: "rematch-requested",
-      seriesId: resultView.seriesId,
-      afterMatchId: resultView.matchId,
-      round: resultView.round + 1,
-    };
-    appendAfterMaterialization(
-      requested,
-      {
-        kind: "rematch-requested",
-        opponentId: opponent.id,
-      },
-      () => rematchRequestedFeedback({
-        requesterName: selfActor.displayName,
-        opponentId: opponent.id,
-        matchId: resultView.matchId,
-        activity: chatActivity(),
-      }),
-    );
-    shell.setRematchAction("pending");
+    try {
+      competitionLifecycle.express({
+        kind: "request-rematch",
+        afterMatchId: resultView.matchId,
+      });
+      shell.setRematchAction("pending");
+    } catch {
+      // A concurrent rematch transition will be reflected by the next snapshot.
+    }
   };
   shell.requestRematchButton.addEventListener("click", requestRematch);
   shell.newChallengeButton.addEventListener("click", () => {
-    if (competition.view(selfActor.id).activity.kind !== "idle") return;
+    if (competitionView().activity.kind !== "idle") return;
     createChallenge();
     showHome();
   });
@@ -3530,7 +2699,6 @@ export async function bootstrap(): Promise<void> {
         }
       }
     } else {
-      retryRuntimeClaimsImmediately();
       const recovery = passiveLiveRecovery;
       if (recovery !== null) {
         const watchedMatch = mode === "spectator" && activeMatch?.role === "spectator"
@@ -3571,7 +2739,6 @@ export async function bootstrap(): Promise<void> {
       audio.resumeMusic();
     }
   });
-  window.addEventListener("pagehide", stopAllRuntimeClaimRetries);
   window.addEventListener("keydown", (event) => {
     if (
       (mode === "practice" || mode === "competitive" || mode === "spectator") &&
@@ -3812,27 +2979,9 @@ export async function bootstrap(): Promise<void> {
     renderCompetitionState();
   }, PRESENCE_HEARTBEAT_MS);
 
-  if (durable !== null) {
-    for (const entry of pendingChatFeedback.entries()) {
-      installPersistedFeedback(entry);
-    }
-    await durable.start(receiveDurable, 0);
-    durableReplayReady = true;
-    for (const entry of pendingChatFeedback.entries()) {
-      if (entry.resolved && entry.metadata !== undefined) {
-        enqueueDurable(projectChatUpdate(entry.payload, entry.metadata));
-        continue;
-      }
-      const status = competition.eventStatus(entry.payload.eventId);
-      if (status === "unknown") {
-        appendCompetition(entry.payload);
-      } else if (status === "rejected") {
-        pendingChatFeedback.acknowledge(entry.payload.eventId);
-        forgetRuntimeFeedback(entry.payload.eventId);
-      }
-    }
+  if (host !== undefined) {
     renderCompetitionState();
-    const viewBeforeRouting = competition.view(selfActor.id);
+    const viewBeforeRouting = competitionView();
     const ownedStartingRoutePriority = viewBeforeRouting.activity.kind === "starting";
     reconcileLobby();
     publishWaitingPresence();
@@ -3848,7 +2997,7 @@ export async function bootstrap(): Promise<void> {
     }
 
     if (recognizedRoute && !ownedStartingRoutePriority) {
-      const view = competition.view(selfActor.id);
+      const view = competitionView();
       const syntacticRoute = parseAppRoute(routeHash);
       const route = parseAppRoute(routeHash, {
         challengeExists: (challengeId) => view.openChallenges.some(

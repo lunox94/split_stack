@@ -623,6 +623,25 @@ describe("CompetitionLedgerV2", () => {
     });
   });
 
+  it("rejects a deferred pairing exit when a later cancellation removes its target", () => {
+    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const challenge = created("alice", "cancelled-before-runtime", 1);
+    const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
+    const left = pairingLeft("bob", claim.eventId, "runtime-b", 3);
+    ledger.apply({ serial: 1, payload: challenge });
+    ledger.apply({ serial: 2, payload: claim });
+    ledger.apply({ serial: 3, payload: left });
+    expect(ledger.eventStatus(left.eventId)).toBe("deferred");
+
+    ledger.apply({
+      serial: 4,
+      payload: cancelled("alice", challenge.challengeId, 4),
+    });
+
+    expect(ledger.eventStatus(left.eventId)).toBe("rejected");
+    expect(ledger.view("bob").activity).toEqual({ kind: "idle" });
+  });
+
   it("lets only the creator cancel a waiting or starting challenge", () => {
     const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "challenge", 1);

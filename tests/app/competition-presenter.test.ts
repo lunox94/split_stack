@@ -8,12 +8,14 @@ import {
 } from "../../src/app/competition-presenter";
 import type {
   CompetitionActor,
-  CompetitionLedgerView,
   CompetitionResultView,
-  LiveMatchView,
-  PracticeLeaderboardEntry,
   StartingPairingView,
 } from "../../src/app/competition-ledger-v2";
+import type {
+  CompetitionLiveMatchView,
+  CompetitionPracticeEntryView,
+  CompetitionView,
+} from "../../src/app/competition-event-lifecycle";
 import type { PlayerResultStats } from "../../src/domain/types";
 import { createAppShell } from "../../src/ui/shell";
 
@@ -35,12 +37,15 @@ function stats(score: number): PlayerResultStats {
   };
 }
 
-function practiceEntry(rank: number, player: CompetitionActor, score: number): PracticeLeaderboardEntry {
+function practiceEntry(
+  rank: number,
+  player: CompetitionActor,
+  score: number,
+): CompetitionPracticeEntryView {
   return {
     rank,
     player,
     score,
-    eventId: `practice-${player.id}`,
     runId: `run-${player.id}`,
     durationTicks: 1_200,
     finalLevel: 4,
@@ -48,7 +53,7 @@ function practiceEntry(rank: number, player: CompetitionActor, score: number): P
   };
 }
 
-function emptyView(): CompetitionLedgerView {
+function emptyView(): CompetitionView {
   return {
     counts: { waiting: 0, starting: 0, live: 0, completed: 0 },
     activity: { kind: "idle" },
@@ -87,16 +92,11 @@ function startingPairing(): StartingPairingView {
   };
 }
 
-function liveMatch(): LiveMatchView {
+function liveMatch(): CompetitionLiveMatchView {
   return {
     ...startingPairing(),
-    startedEventId: "started-1",
     start: {
-      schema: "split-stack/competition/v2",
       kind: "match-started",
-      eventId: "started-1",
-      logicalClock: 4,
-      actor: ALICE,
       pairingId: "pairing-1",
       seriesId: "challenge-1",
       round: 1,
@@ -139,7 +139,7 @@ function result(
 }
 
 function setup(
-  view: CompetitionLedgerView,
+  view: CompetitionView,
   overrides: Partial<Omit<CompetitionPresenterOptions, "shell" | "view" | "self">> = {},
 ) {
   const shell = createAppShell(document, document.createElement("div"));
@@ -156,10 +156,37 @@ function setup(
 }
 
 describe("competition presenter", () => {
+  it("preserves a transient stale-link notice while a live match is projected", () => {
+    const view: CompetitionView = {
+      ...emptyView(),
+      counts: { waiting: 0, starting: 0, live: 1, completed: 0 },
+      activity: {
+        kind: "live",
+        pairingId: "pairing-1",
+        matchId: "match-1",
+        seriesId: "challenge-1",
+        round: 1,
+      },
+      liveMatches: [liveMatch()],
+    };
+    const shell = setup(emptyView());
+    shell.lobbyStatus.textContent = "This link is no longer active.";
+
+    presentCompetition({
+      shell,
+      view,
+      self: ALICE,
+      realtimeAvailable: true,
+      isOnline: () => false,
+    });
+
+    expect(shell.lobbyStatus.textContent).toBe("This link is no longer active.");
+  });
+
   it("updates Home waiting, activity counts, and Practice records", () => {
     const personal = practiceEntry(2, ALICE, 8_200);
     const record = practiceEntry(1, BOB, 10_500);
-    const view: CompetitionLedgerView = {
+    const view: CompetitionView = {
       ...emptyView(),
       counts: { waiting: 3, starting: 1, live: 2, completed: 5 },
       activity: { kind: "waiting", challengeId: "mine" },
@@ -198,7 +225,7 @@ describe("competition presenter", () => {
   it("preserves oldest-first rows and keeps an offline creator joinable", () => {
     const joined = vi.fn();
     const presence = vi.fn((actorId: string) => actorId === "bob");
-    const view: CompetitionLedgerView = {
+    const view: CompetitionView = {
       ...emptyView(),
       counts: { waiting: 2, starting: 0, live: 0, completed: 0 },
       openChallenges: [
@@ -227,7 +254,7 @@ describe("competition presenter", () => {
   });
 
   it("contains advisory presence failures and only disables live actions for real constraints", () => {
-    const view: CompetitionLedgerView = {
+    const view: CompetitionView = {
       ...emptyView(),
       counts: { waiting: 1, starting: 0, live: 1, completed: 0 },
       openChallenges: [
@@ -261,7 +288,7 @@ describe("competition presenter", () => {
     const leftPairing = vi.fn();
     const pairing = startingPairing();
     const live = liveMatch();
-    const otherLive: LiveMatchView = {
+    const otherLive: CompetitionLiveMatchView = {
       ...live,
       pairingId: "pairing-2",
       challengeId: "challenge-2",
@@ -270,11 +297,8 @@ describe("competition presenter", () => {
       seatA: CAROL,
       seatB: DAVE,
       runtimeSessionByPlayer: { carol: "session-c", dave: "session-d" },
-      startedEventId: "started-2",
       start: {
         ...live.start,
-        eventId: "started-2",
-        actor: CAROL,
         pairingId: "pairing-2",
         seriesId: "challenge-2",
         matchId: "match-2",
@@ -284,7 +308,7 @@ describe("competition presenter", () => {
         seatBSessionId: "session-d",
       },
     };
-    const view: CompetitionLedgerView = {
+    const view: CompetitionView = {
       ...emptyView(),
       counts: { waiting: 0, starting: 1, live: 2, completed: 0 },
       activity: {
@@ -337,7 +361,7 @@ describe("competition presenter", () => {
 
   it("explains a live commitment once while blocking other Join actions", () => {
     const live = liveMatch();
-    const view: CompetitionLedgerView = {
+    const view: CompetitionView = {
       ...emptyView(),
       counts: { waiting: 1, starting: 0, live: 1, completed: 0 },
       activity: {
@@ -382,7 +406,7 @@ describe("competition presenter", () => {
       )
     );
     const pinned = practiceEntry(14, ALICE, 4_200);
-    const view: CompetitionLedgerView = {
+    const view: CompetitionView = {
       ...emptyView(),
       counts: { waiting: 0, starting: 0, live: 0, completed: 1 },
       recentResults: [result()],
@@ -405,7 +429,6 @@ describe("competition presenter", () => {
         seatA: ALICE,
         seatB: BOB,
         requestedByPlayerIds: ["bob"],
-        requestEventIdByPlayer: { bob: "rematch-request-bob" },
       }],
     };
 
@@ -457,7 +480,7 @@ describe("competition presenter", () => {
       expect(sectionFor(body).hidden).toBe(true);
     }
 
-    const populated: CompetitionLedgerView = {
+    const populated: CompetitionView = {
       ...emptyView(),
       openChallenges: [
         { challengeId: "challenge-1", creator: BOB, rulesHash: "rules", vacancyId: "vacancy-1" },

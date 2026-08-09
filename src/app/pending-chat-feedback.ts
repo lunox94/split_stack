@@ -8,6 +8,7 @@ import type { ChatUpdateMetadata } from "./chat-feedback";
 const STORAGE_SCHEMA = "split-stack/pending-chat-feedback/v2";
 const STORAGE_KEY_PREFIX = `${STORAGE_SCHEMA}:`;
 const MAX_PENDING_FEEDBACK = 64;
+const TERMINAL_FEEDBACK_RESERVE = 2;
 const MAX_STORED_CHARACTERS = 512_000;
 const MAX_ID_CHARACTERS = 256;
 const MAX_NAME_CHARACTERS = 128;
@@ -185,11 +186,18 @@ export class PendingChatFeedbackStoreV2 {
     resolver: PendingChatFeedbackResolverV2,
   ): void {
     if (payload.actor.id !== this.actorId || !resolverMatches(resolver, payload)) return;
-    if (
-      !this.entriesByEventId.has(payload.eventId) &&
-      this.entriesByEventId.size >= MAX_PENDING_FEEDBACK
-    ) {
-      return;
+    if (!this.entriesByEventId.has(payload.eventId)) {
+      if (resolver.kind !== "match-result") {
+        if (this.entriesByEventId.size >= MAX_PENDING_FEEDBACK - TERMINAL_FEEDBACK_RESERVE) {
+          return;
+        }
+      } else if (this.entriesByEventId.size >= MAX_PENDING_FEEDBACK) {
+        const optionalEntry = [...this.entriesByEventId.entries()].find(
+          ([, entry]) => entry.resolver.kind !== "match-result",
+        );
+        if (optionalEntry === undefined) return;
+        this.entriesByEventId.delete(optionalEntry[0]);
+      }
     }
     this.entriesByEventId.set(payload.eventId, {
       schema: STORAGE_SCHEMA,

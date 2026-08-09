@@ -686,6 +686,7 @@ interface MutableRematch {
 interface CompetitionMaterialization {
   readonly view: CompetitionLedgerView;
   readonly trackedEventStatus: CompetitionEventStatus;
+  readonly deferredMatchStarts: readonly MatchStartedV2[];
 }
 
 export type CompetitionEventStatus = "unknown" | "deferred" | "effective" | "rejected";
@@ -836,6 +837,14 @@ export class CompetitionLedgerV2 {
     return this.materialize(undefined, eventId).trackedEventStatus;
   }
 
+  public deferredMatchStart(matchId: string): MatchStartedV2 | undefined {
+    if (!isBoundedString(matchId, 256)) return undefined;
+    const start = this.materialize().deferredMatchStarts.find(
+      (candidate) => candidate.matchId === matchId,
+    );
+    return start === undefined ? undefined : cloneEvent(start) as MatchStartedV2;
+  }
+
   private materialize(
     playerId?: string,
     trackedEventId?: string,
@@ -864,6 +873,7 @@ export class CompetitionLedgerV2 {
     const practiceBests = new Map<string, PracticeCompletedV2>();
     const practiceBestOrderByPlayer = new Map<string, number>();
     const pendingStarts: MatchStartedV2[] = [];
+    const pendingLeaves: PairingLeftV2[] = [];
     const pendingTerminals: Array<{
       event: MatchFinishedV2 | MatchConcededV2;
       order: number;
@@ -1082,6 +1092,61 @@ export class CompetitionLedgerV2 {
         }
       }
     };
+    const tryCommitLeave = (
+      event: PairingLeftV2,
+    ): "committed" | "deferred" | "rejected" => {
+      const pairing = pairings.get(event.pairingId);
+      if (
+        pairing === undefined ||
+        pairing.status !== "starting" ||
+        !actorInPairing(pairing, event.actor.id)
+      ) {
+        markRejected(event);
+        return "rejected";
+      }
+      const claimedRuntimeSessionId = pairing.runtimeSessionByPlayer[event.actor.id];
+      if (claimedRuntimeSessionId === undefined) {
+        markDeferred(event);
+        return "deferred";
+      }
+      if (claimedRuntimeSessionId !== event.runtimeSessionId) {
+        markRejected(event);
+        return "rejected";
+      }
+      pairings.delete(pairing.pairingId);
+      commitments.delete(pairing.seatA.id);
+      commitments.delete(pairing.seatB.id);
+      if (pairing.source === "challenge" && pairing.challengeId !== undefined) {
+        const challenge = challenges.get(pairing.challengeId);
+        if (challenge !== undefined && challenge.pairingId === pairing.pairingId) {
+          if (event.actor.id === pairing.seatB.id) {
+            challenge.status = "waiting";
+            challenge.vacancyId = `${event.eventId}:vacancy`;
+            delete challenge.pairingId;
+            commitments.set(pairing.seatA.id, {
+              kind: "waiting",
+              challengeId: challenge.challengeId,
+            });
+          } else {
+            challenges.delete(challenge.challengeId);
+          }
+        }
+      } else if (pairing.source === "rematch") {
+        const rematch = rematches.get(rematchKey(pairing.seriesId, pairing.round));
+        if (rematch?.pairingId === pairing.pairingId) rematch.status = "invalidated";
+      }
+      markEffective(event);
+      return "committed";
+    };
+    const retryPendingLeaves = (): void => {
+      for (let index = 0; index < pendingLeaves.length;) {
+        if (tryCommitLeave(pendingLeaves[index]!) === "deferred") {
+          index += 1;
+        } else {
+          pendingLeaves.splice(index, 1);
+        }
+      }
+    };
     // Webxdc serials are replica-local replay cursors. The application tuple is
     // the portable total order used by every materialized view.
     const orderedEvents = [...this.eventsById.values()].sort(compareEvents);
@@ -1132,40 +1197,7 @@ export class CompetitionLedgerV2 {
         continue;
       }
       if (event.kind === "pairing-left") {
-        const pairing = pairings.get(event.pairingId);
-        if (
-          pairing === undefined ||
-          pairing.status !== "starting" ||
-          !actorInPairing(pairing, event.actor.id) ||
-          pairing.runtimeSessionByPlayer[event.actor.id] !== event.runtimeSessionId
-        ) {
-          continue;
-        }
-        pairings.delete(pairing.pairingId);
-        commitments.delete(pairing.seatA.id);
-        commitments.delete(pairing.seatB.id);
-        if (pairing.source === "challenge" && pairing.challengeId !== undefined) {
-          const challenge = challenges.get(pairing.challengeId);
-          if (challenge !== undefined && challenge.pairingId === pairing.pairingId) {
-            if (event.actor.id === pairing.seatB.id) {
-              challenge.status = "waiting";
-              challenge.vacancyId = `${event.eventId}:vacancy`;
-              delete challenge.pairingId;
-              commitments.set(pairing.seatA.id, {
-                kind: "waiting",
-                challengeId: challenge.challengeId,
-              });
-            } else {
-              challenges.delete(challenge.challengeId);
-            }
-          }
-        } else if (pairing.source === "rematch") {
-          const rematch = rematches.get(rematchKey(pairing.seriesId, pairing.round));
-          if (rematch?.pairingId === pairing.pairingId) {
-            rematch.status = "invalidated";
-          }
-        }
-        markEffective(event);
+        if (tryCommitLeave(event) === "deferred") pendingLeaves.push(event);
         continue;
       }
       if (event.kind === "challenge-cancelled") {
@@ -1202,6 +1234,7 @@ export class CompetitionLedgerV2 {
         pairing.runtimeSessionByPlayer[event.actor.id] = event.runtimeSessionId;
         pairing.readyByPlayer[event.actor.id] = false;
         markEffective(event);
+        retryPendingLeaves();
         retryPendingStarts();
         continue;
       }
@@ -1396,6 +1429,7 @@ export class CompetitionLedgerV2 {
       latestCommitmentOrderByPlayer.set(event.actor.id, eventOrder);
       markEffective(event);
     }
+    retryPendingLeaves();
     if (
       (trackedEventStatus as CompetitionEventStatus) === "deferred" &&
       trackedEventId !== undefined
@@ -1616,6 +1650,9 @@ export class CompetitionLedgerV2 {
     };
     return {
       trackedEventStatus,
+      deferredMatchStarts: pendingStarts
+        .filter((start) => pairings.get(start.pairingId)?.status === "starting")
+        .map((start) => cloneEvent(start) as MatchStartedV2),
       view: {
         counts: {
           waiting: openChallenges.length,
