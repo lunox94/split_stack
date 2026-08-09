@@ -5,8 +5,8 @@ import { MAX_DURABLE_LOGICAL_CLOCK } from "../network/webxdc-durable";
 import type {
   CompetitionActor,
   LiveMatchView,
-  MatchFinishedV2,
-} from "./competition-ledger-v2";
+  MatchFinished,
+} from "./competition-ledger";
 
 export interface LiveControllerRecoveryInput {
   readonly observedAtMs: number;
@@ -85,7 +85,7 @@ function emptyStats(): PlayerResultStats {
 export function connectionLossFallbackFor(
   match: LiveMatchView,
   actor: CompetitionActor,
-): MatchFinishedV2 {
+): MatchFinished {
   if (actor.id !== match.seatA.id && actor.id !== match.seatB.id) {
     throw new TypeError("Only a committed match participant may resolve it");
   }

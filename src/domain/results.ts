@@ -1,7 +1,7 @@
-import type { MatchResultV1 } from "./types";
+import type { MatchResult } from "./types";
 
-export function cloneMatchResult(result: MatchResultV1): MatchResultV1 {
-  const statsByPlayer: MatchResultV1["statsByPlayer"] = {};
+export function cloneMatchResult(result: MatchResult): MatchResult {
+  const statsByPlayer: MatchResult["statsByPlayer"] = {};
   for (const [playerId, stats] of Object.entries(result.statsByPlayer)) {
     statsByPlayer[playerId] = { ...stats };
   }

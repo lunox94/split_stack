@@ -12,7 +12,7 @@ import {
   isRecognizedAppRouteHash,
   parseAppRoute,
   resolveAppRoute,
-  type AppRouteV2,
+  type AppRoute,
 } from "../../src/app/routes";
 
 describe("v2 route hrefs", () => {
@@ -35,7 +35,7 @@ describe("v2 route hrefs", () => {
 
   it("round-trips bounded opaque identifiers without treating their content as paths", () => {
     const identifier = "opaque/segment?# ü %2F";
-    const routes: AppRouteV2[] = [
+    const routes: AppRoute[] = [
       { screen: "lobby", challengeId: identifier },
       { screen: "match", matchId: identifier },
       { screen: "result", matchId: identifier },

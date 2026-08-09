@@ -11,7 +11,7 @@ import {
 } from "../domain/simulation";
 import type {
   LogicalAction,
-  MatchResultV1,
+  MatchResult,
   PlayerId,
   PlayerResultStats,
   Tick,
@@ -69,7 +69,7 @@ import {
   createPlayerSnapshot,
   RemoteSnapshotStore,
   SnapshotScheduler,
-  type PlayerSnapshotV1,
+  type PlayerSnapshot,
 } from "../network/snapshots";
 
 export type CompetitiveSeat = "a" | "b";
@@ -141,7 +141,7 @@ export interface CompetitiveSessionOptions {
    * A connected forfeit winner may fire it alone after liveness grace expires.
    * Either peer may emit the same canonical neutral result after desynchronization.
    */
-  onResultConfirmed?: (result: MatchResultV1) => void;
+  onResultConfirmed?: (result: MatchResult) => void;
   onDesynchronization?: (reason: string) => void;
   /**
    * Requests that the host replace the realtime channel after sustained silence.
@@ -177,9 +177,9 @@ export interface CompetitiveSessionView {
   clockSampleIds: readonly number[];
   snapshotIntervalTicks: Tick | null;
   local?: SimulationSnapshot;
-  remote?: PlayerSnapshotV1;
+  remote?: PlayerSnapshot;
   terminal?: CompetitiveTerminalState;
-  result?: MatchResultV1;
+  result?: MatchResult;
 }
 
 export interface CompetitiveSessionViewOptions {
@@ -198,7 +198,7 @@ interface FinalPlayerClaim {
 
 interface ResultConfirmation {
   hash: string;
-  result: MatchResultV1;
+  result: MatchResult;
 }
 
 interface PendingLocalStart {
@@ -270,7 +270,7 @@ function cloneStats(stats: PlayerResultStats): PlayerResultStats {
   return { ...stats };
 }
 
-function statsFromSnapshot(snapshot: SimulationSnapshot | PlayerSnapshotV1): PlayerResultStats {
+function statsFromSnapshot(snapshot: SimulationSnapshot | PlayerSnapshot): PlayerResultStats {
   if ("player" in snapshot) {
     return {
       score: snapshot.player.score,
@@ -470,7 +470,7 @@ export class CompetitiveSession {
   private recoveryAttempt = 0;
   private forfeitRecorded = false;
   private explicitForfeitEventId: string | null = null;
-  private explicitForfeitResult: MatchResultV1 | null = null;
+  private explicitForfeitResult: MatchResult | null = null;
   private explicitForfeitFallbackQueued = false;
   private localTopOutTick: Tick | null = null;
   private peerTopOutTick: Tick | null = null;
@@ -481,7 +481,7 @@ export class CompetitiveSession {
   private peerResultConfirmation: ResultConfirmation | null = null;
   private resultSettleAfterMs: number | null = null;
   private resultConsensusDeadlineMs: number | null = null;
-  private confirmedResult: MatchResultV1 | null = null;
+  private confirmedResult: MatchResult | null = null;
   private durableResultEmitted = false;
   private eventOrdinal = 0;
   private readonly allowedSenders: ReadonlySet<string>;
@@ -979,7 +979,7 @@ export class CompetitiveSession {
     }
   }
 
-  private buildDesynchronizationResult(): MatchResultV1 | null {
+  private buildDesynchronizationResult(): MatchResult | null {
     if (this.config === null) return null;
     const seatA = this.seatA();
     const seatB = this.seatB();
@@ -3750,7 +3750,7 @@ export class CompetitiveSession {
     return this.options.seat === "b" ? this.options.identity : this.options.peer;
   }
 
-  private buildTopOutResult(): MatchResultV1 | null {
+  private buildTopOutResult(): MatchResult | null {
     if (
       this.config === null ||
       this.localFinalClaim === null ||
@@ -3777,7 +3777,7 @@ export class CompetitiveSession {
       seatATopOut !== null &&
       seatBTopOut !== null &&
       seatATopOut === seatBTopOut;
-    const outcome: MatchResultV1["outcome"] = simultaneous
+    const outcome: MatchResult["outcome"] = simultaneous
       ? "draw"
       : seatATopOut !== null &&
           (seatBTopOut === null || seatATopOut < seatBTopOut)
@@ -3893,7 +3893,7 @@ export class CompetitiveSession {
     this.options.onResultConfirmed?.(cloneResult(local.result));
   }
 
-  private buildConnectionLostResult(): MatchResultV1 | null {
+  private buildConnectionLostResult(): MatchResult | null {
     if (this.config === null) return null;
     const localSnapshot = this.simulation?.readSnapshot();
     if (localSnapshot === undefined) return null;
@@ -4029,7 +4029,7 @@ export class CompetitiveSession {
       localSnapshot.tick,
       remoteSnapshot?.stateTick ?? 0,
     );
-    const result: MatchResultV1 = {
+    const result: MatchResult = {
       schema: "split-stack/result/v1",
       matchId: this.options.matchId,
       seedHash: hashCanonicalHex({ seed: this.config.seed }),
@@ -4052,7 +4052,7 @@ export class CompetitiveSession {
     this.options.onResultConfirmed?.(cloneResult(result));
   }
 
-  private buildExplicitForfeitResult(): MatchResultV1 | null {
+  private buildExplicitForfeitResult(): MatchResult | null {
     if (this.config === null) return null;
     const localSnapshot = this.simulation?.readSnapshot();
     if (localSnapshot === undefined) return null;
@@ -4110,7 +4110,7 @@ export class CompetitiveSession {
     );
   }
 
-  private recordForfeitWin(canonicalResult?: MatchResultV1): void {
+  private recordForfeitWin(canonicalResult?: MatchResult): void {
     if (this.forfeitRecorded || this.terminal !== null) return;
     this.forfeitRecorded = true;
     this.simulation?.setPaused(true);

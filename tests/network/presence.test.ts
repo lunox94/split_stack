@@ -3,20 +3,20 @@ import { describe, expect, it } from "vitest";
 import { ManualClock } from "../../src/network/in-memory";
 import {
   AdvisoryPresenceTracker,
-  PRESENCE_SCHEMA_V2,
+  PRESENCE_SCHEMA,
   decodePresenceFrame,
   encodePresenceFrame,
-  isPresenceFrameV2,
-  type PresenceFrameV2,
+  isPresenceFrame,
+  type PresenceFrame,
 } from "../../src/network/presence";
 
 function frame(
   actorId = "alice",
   challengeId = "challenge-1",
   runtimeId = "runtime-a",
-): PresenceFrameV2 {
+): PresenceFrame {
   return {
-    schema: PRESENCE_SCHEMA_V2,
+    schema: PRESENCE_SCHEMA,
     actor: { id: actorId, displayName: actorId === "alice" ? "Alice" : "Bob" },
     challengeId,
     runtimeId,
@@ -34,19 +34,19 @@ describe("advisory presence codec", () => {
   });
 
   it("strictly rejects unknown fields, old schemas, and unbounded identities", () => {
-    expect(isPresenceFrameV2({ ...frame(), extra: true })).toBe(false);
+    expect(isPresenceFrame({ ...frame(), extra: true })).toBe(false);
     expect(
-      isPresenceFrameV2({
+      isPresenceFrame({
         ...frame(),
         actor: { ...frame().actor, online: true },
       }),
     ).toBe(false);
-    expect(isPresenceFrameV2({ ...frame(), schema: "split-stack/presence/v1" })).toBe(
+    expect(isPresenceFrame({ ...frame(), schema: "split-stack/presence/v1" })).toBe(
       false,
     );
-    expect(isPresenceFrameV2({ ...frame(), runtimeId: "x".repeat(257) })).toBe(false);
+    expect(isPresenceFrame({ ...frame(), runtimeId: "x".repeat(257) })).toBe(false);
     expect(() =>
-      encodePresenceFrame({ ...frame(), challengeId: "" } as PresenceFrameV2)
+      encodePresenceFrame({ ...frame(), challengeId: "" } as PresenceFrame)
     ).toThrow(/invalid advisory presence/i);
   });
 

@@ -10,7 +10,7 @@ import type {
   CompetitionActor,
   CompetitionResultView,
   StartingPairingView,
-} from "../../src/app/competition-ledger-v2";
+} from "../../src/app/competition-ledger";
 import type {
   CompetitionLiveMatchView,
   CompetitionPracticeEntryView,

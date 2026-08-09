@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import type { MatchResultV1 } from "../../src/domain/types";
+import type { MatchResult } from "../../src/domain/types";
 import {
   HISTORY_MAX_MATCHES,
   HISTORY_MAX_VARIANTS_PER_MATCH,
   HistoryMaterializer,
 } from "../../src/persistence/history";
 
-function result(matchId: string, outcome: MatchResultV1["outcome"]): MatchResultV1 {
+function result(matchId: string, outcome: MatchResult["outcome"]): MatchResult {
   return {
     schema: "split-stack/result/v1",
     matchId,

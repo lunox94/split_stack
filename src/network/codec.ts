@@ -1,5 +1,5 @@
 import { RULES } from "../config/rules";
-import { isMatchResultV1 } from "../persistence/history";
+import { isMatchResult } from "../persistence/history";
 import {
   isCriticalKind,
   isMessageKind,
@@ -349,7 +349,7 @@ function isValidPayload(kind: MessageKind, payload: unknown): boolean {
         hasEventId(payload) &&
         isBoundedId(payload.forfeitingPlayerId) &&
         isBoundedId(payload.resultHash) &&
-        isMatchResultV1(payload.result)
+        isMatchResult(payload.result)
       );
     case "NETWORK_PAUSE":
       return (
@@ -362,7 +362,7 @@ function isValidPayload(kind: MessageKind, payload: unknown): boolean {
       return (
         hasEventId(payload) &&
         isBoundedId(payload.resultHash) &&
-        isMatchResultV1(payload.result)
+        isMatchResult(payload.result)
       );
     default:
       return false;

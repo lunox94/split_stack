@@ -6,12 +6,12 @@ import {
   createPlayerSnapshot,
   decodeGrid,
   encodeGrid,
-  type PlayerSnapshotV1,
+  type PlayerSnapshot,
 } from "../../src/network/snapshots";
 import type { RealtimeEnvelope } from "../../src/network/messages";
 import type { Grid, PlayerGameState } from "../../src/domain/types";
 
-function snapshot(sequence: number, tick: number): PlayerSnapshotV1 {
+function snapshot(sequence: number, tick: number): PlayerSnapshot {
   return {
     schema: "split-stack/snapshot/v1",
     snapshotSeq: sequence,

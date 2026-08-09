@@ -1,11 +1,11 @@
 import { RULES } from "../config/rules";
 import { hashCanonicalHex } from "../domain/hashing";
 import { cloneMatchResult } from "../domain/results";
-import type { MatchResultV1, PlayerResultStats } from "../domain/types";
+import type { MatchResult, PlayerResultStats } from "../domain/types";
 import { MAX_DURABLE_LOGICAL_CLOCK } from "../network/webxdc-durable";
-import { isMatchResultV1 } from "../persistence/history";
+import { isMatchResult } from "../persistence/history";
 
-export const COMPETITION_EVENT_SCHEMA_V2 = "split-stack/competition/v2" as const;
+export const COMPETITION_EVENT_SCHEMA = "split-stack/competition/v2" as const;
 export const COMPETITION_LEDGER_MAX_EVENTS = 100_000;
 const MAX_RESULT_VARIANTS_PER_MATCH = 2;
 
@@ -14,51 +14,51 @@ export interface CompetitionActor {
   readonly displayName: string;
 }
 
-interface CompetitionEventBaseV2 {
-  readonly schema: typeof COMPETITION_EVENT_SCHEMA_V2;
+interface CompetitionEventBase {
+  readonly schema: typeof COMPETITION_EVENT_SCHEMA;
   readonly eventId: string;
   readonly logicalClock: number;
   readonly actor: CompetitionActor;
 }
 
-export interface ChallengeCreatedV2 extends CompetitionEventBaseV2 {
+export interface ChallengeCreated extends CompetitionEventBase {
   readonly kind: "challenge-created";
   readonly challengeId: string;
   readonly rulesHash: string;
   readonly vacancyId: string;
 }
 
-export interface ChallengeClaimedV2 extends CompetitionEventBaseV2 {
+export interface ChallengeClaimed extends CompetitionEventBase {
   readonly kind: "challenge-claimed";
   readonly challengeId: string;
   readonly vacancyId: string;
 }
 
-export interface ChallengeCancelledV2 extends CompetitionEventBaseV2 {
+export interface ChallengeCancelled extends CompetitionEventBase {
   readonly kind: "challenge-cancelled";
   readonly challengeId: string;
 }
 
-export interface PairingLeftV2 extends CompetitionEventBaseV2 {
+export interface PairingLeft extends CompetitionEventBase {
   readonly kind: "pairing-left";
   readonly pairingId: string;
   readonly runtimeSessionId: string;
 }
 
-export interface RuntimeClaimedV2 extends CompetitionEventBaseV2 {
+export interface RuntimeClaimed extends CompetitionEventBase {
   readonly kind: "runtime-claimed";
   readonly pairingId: string;
   readonly runtimeSessionId: string;
 }
 
-export interface ReadyChangedV2 extends CompetitionEventBaseV2 {
+export interface ReadyChanged extends CompetitionEventBase {
   readonly kind: "ready-changed";
   readonly pairingId: string;
   readonly runtimeSessionId: string;
   readonly ready: boolean;
 }
 
-export interface MatchStartedV2 extends CompetitionEventBaseV2 {
+export interface MatchStarted extends CompetitionEventBase {
   readonly kind: "match-started";
   readonly pairingId: string;
   readonly seriesId: string;
@@ -74,27 +74,27 @@ export interface MatchStartedV2 extends CompetitionEventBaseV2 {
   readonly seatBSessionId: string;
 }
 
-export interface MatchFinishedV2 extends CompetitionEventBaseV2 {
+export interface MatchFinished extends CompetitionEventBase {
   readonly kind: "match-finished";
   readonly matchId: string;
   readonly startedEventId: string;
-  readonly result: MatchResultV1;
+  readonly result: MatchResult;
 }
 
-export interface MatchConcededV2 extends CompetitionEventBaseV2 {
+export interface MatchConceded extends CompetitionEventBase {
   readonly kind: "match-conceded";
   readonly matchId: string;
   readonly startedEventId: string;
 }
 
-export interface RematchRequestedV2 extends CompetitionEventBaseV2 {
+export interface RematchRequested extends CompetitionEventBase {
   readonly kind: "rematch-requested";
   readonly seriesId: string;
   readonly afterMatchId: string;
   readonly round: number;
 }
 
-export interface RematchAcceptedV2 extends CompetitionEventBaseV2 {
+export interface RematchAccepted extends CompetitionEventBase {
   readonly kind: "rematch-accepted";
   readonly seriesId: string;
   readonly afterMatchId: string;
@@ -102,13 +102,13 @@ export interface RematchAcceptedV2 extends CompetitionEventBaseV2 {
   readonly requestedEventId: string;
 }
 
-export interface RematchWithdrawnV2 extends CompetitionEventBaseV2 {
+export interface RematchWithdrawn extends CompetitionEventBase {
   readonly kind: "rematch-withdrawn";
   readonly seriesId: string;
   readonly round: number;
 }
 
-export interface PracticeCompletedV2 extends CompetitionEventBaseV2 {
+export interface PracticeCompleted extends CompetitionEventBase {
   readonly kind: "practice-completed";
   readonly rulesHash: string;
   readonly runId: string;
@@ -119,20 +119,20 @@ export interface PracticeCompletedV2 extends CompetitionEventBaseV2 {
   readonly finalStats: PlayerResultStats;
 }
 
-export type CompetitionEventV2 =
-  | ChallengeCreatedV2
-  | ChallengeClaimedV2
-  | ChallengeCancelledV2
-  | PairingLeftV2
-  | RuntimeClaimedV2
-  | ReadyChangedV2
-  | MatchStartedV2
-  | MatchFinishedV2
-  | MatchConcededV2
-  | RematchRequestedV2
-  | RematchAcceptedV2
-  | RematchWithdrawnV2
-  | PracticeCompletedV2;
+export type CompetitionEvent =
+  | ChallengeCreated
+  | ChallengeClaimed
+  | ChallengeCancelled
+  | PairingLeft
+  | RuntimeClaimed
+  | ReadyChanged
+  | MatchStarted
+  | MatchFinished
+  | MatchConceded
+  | RematchRequested
+  | RematchAccepted
+  | RematchWithdrawn
+  | PracticeCompleted;
 
 export interface CompetitionDurableRecord {
   readonly serial: number;
@@ -188,14 +188,14 @@ export interface LiveMatchView {
   readonly seatB: CompetitionActor;
   readonly runtimeSessionByPlayer: Readonly<Record<string, string | undefined>>;
   readonly startedEventId: string;
-  readonly start: MatchStartedV2;
+  readonly start: MatchStarted;
 }
 
 export interface CompetitionResultView {
   readonly matchId: string;
   readonly seriesId: string;
   readonly round: number;
-  readonly result: MatchResultV1;
+  readonly result: MatchResult;
   readonly conflicted: boolean;
   readonly variantCount: number;
 }
@@ -289,7 +289,7 @@ export interface CompetitionLedgerView {
   readonly practice: PracticeLeaderboardView;
 }
 
-export interface CompetitionLedgerV2Options {
+export interface CompetitionLedgerOptions {
   readonly currentRulesHash: string;
 }
 
@@ -351,8 +351,8 @@ function isStrictResultStats(value: unknown): value is PlayerResultStats {
     keys.length === expected.length;
 }
 
-function isStrictMatchResult(value: unknown): value is MatchResultV1 {
-  if (!isMatchResultV1(value) || !isRecord(value) || !hasExactKeys(value, RESULT_KEYS)) {
+function isStrictMatchResult(value: unknown): value is MatchResult {
+  if (!isMatchResult(value) || !isRecord(value) || !hasExactKeys(value, RESULT_KEYS)) {
     return false;
   }
   if (
@@ -369,7 +369,7 @@ function isStrictMatchResult(value: unknown): value is MatchResultV1 {
   ) && Object.values(value.statsByPlayer).every(isStrictResultStats);
 }
 
-function expectedConfigHash(event: MatchStartedV2): string {
+function expectedConfigHash(event: MatchStarted): string {
   return hashCanonicalHex({
     rulesVersion: RULES.rulesVersion,
     rulesHash: event.rulesHash,
@@ -379,10 +379,10 @@ function expectedConfigHash(event: MatchStartedV2): string {
   });
 }
 
-export function isCompetitionEventV2(value: unknown): value is CompetitionEventV2 {
+export function isCompetitionEvent(value: unknown): value is CompetitionEvent {
   if (!isRecord(value) || !isRecord(value.actor)) return false;
   if (
-    value.schema !== COMPETITION_EVENT_SCHEMA_V2 ||
+    value.schema !== COMPETITION_EVENT_SCHEMA ||
     !hasExactKeys(value.actor, ["displayName", "id"]) ||
     !isBoundedString(value.eventId, 256) ||
     !Number.isSafeInteger(value.logicalClock) ||
@@ -494,7 +494,7 @@ export function isCompetitionEventV2(value: unknown): value is CompetitionEventV
     ])) {
       return false;
     }
-    const candidate = value as unknown as MatchStartedV2;
+    const candidate = value as unknown as MatchStarted;
     return isBoundedString(candidate.pairingId, 256) &&
       isBoundedString(candidate.seriesId, 256) &&
       Number.isSafeInteger(candidate.round) && candidate.round > 0 && candidate.round < 10_000 &&
@@ -623,7 +623,7 @@ function compareCodeUnits(left: string, right: string): number {
   return left === right ? 0 : left < right ? -1 : 1;
 }
 
-function compareEvents(left: CompetitionEventV2, right: CompetitionEventV2): number {
+function compareEvents(left: CompetitionEvent, right: CompetitionEvent): number {
   return left.logicalClock - right.logicalClock ||
     compareCodeUnits(left.actor.id, right.actor.id) ||
     compareCodeUnits(left.eventId, right.eventId) ||
@@ -640,8 +640,8 @@ function stableJson(value: unknown): string {
     .join(",")}}`;
 }
 
-function cloneEvent(event: CompetitionEventV2): CompetitionEventV2 {
-  return JSON.parse(stableJson(event)) as CompetitionEventV2;
+function cloneEvent(event: CompetitionEvent): CompetitionEvent {
+  return JSON.parse(stableJson(event)) as CompetitionEvent;
 }
 
 interface MutableChallenge {
@@ -665,10 +665,10 @@ interface MutablePairing {
   status: "starting" | "live" | "completed";
   readyByPlayer: Record<string, boolean>;
   runtimeSessionByPlayer: Record<string, string | undefined>;
-  started?: MatchStartedV2;
-  firstFinish?: MatchFinishedV2;
+  started?: MatchStarted;
+  firstFinish?: MatchFinished;
   firstFinishOrder?: number;
-  resultVariants: Map<string, MatchResultV1>;
+  resultVariants: Map<string, MatchResult>;
 }
 
 interface MutableRematch {
@@ -686,7 +686,7 @@ interface MutableRematch {
 interface CompetitionMaterialization {
   readonly view: CompetitionLedgerView;
   readonly trackedEventStatus: CompetitionEventStatus;
-  readonly deferredMatchStarts: readonly MatchStartedV2[];
+  readonly deferredMatchStarts: readonly MatchStarted[];
 }
 
 export type CompetitionEventStatus = "unknown" | "deferred" | "effective" | "rejected";
@@ -708,7 +708,7 @@ function actorInPairing(pairing: MutablePairing, actorId: string): boolean {
   return actorId === pairing.seatA.id || actorId === pairing.seatB.id;
 }
 
-function resultMatchesPairing(result: MatchResultV1, pairing: MutablePairing): boolean {
+function resultMatchesPairing(result: MatchResult, pairing: MutablePairing): boolean {
   const start = pairing.started;
   return start !== undefined &&
     result.matchId === start.matchId &&
@@ -718,9 +718,9 @@ function resultMatchesPairing(result: MatchResultV1, pairing: MutablePairing): b
 }
 
 function concessionResult(
-  event: MatchConcededV2,
+  event: MatchConceded,
   pairing: MutablePairing,
-): MatchResultV1 | undefined {
+): MatchResult | undefined {
   const start = pairing.started;
   if (start === undefined || !actorInPairing(pairing, event.actor.id)) return undefined;
   const emptyStats = (): PlayerResultStats => ({
@@ -784,11 +784,11 @@ function rematchKey(seriesId: string, round: number): string {
 }
 
 /** Deterministically materializes the v2 durable competition log. */
-export class CompetitionLedgerV2 {
+export class CompetitionLedger {
   private readonly currentRulesHash: string;
-  private readonly eventsById = new Map<string, CompetitionEventV2>();
+  private readonly eventsById = new Map<string, CompetitionEvent>();
 
-  public constructor(options: CompetitionLedgerV2Options) {
+  public constructor(options: CompetitionLedgerOptions) {
     if (!isBoundedString(options.currentRulesHash, 256)) {
       throw new TypeError("Current rules hash must be a bounded non-empty string");
     }
@@ -799,7 +799,7 @@ export class CompetitionLedgerV2 {
     if (
       !Number.isSafeInteger(record.serial) ||
       record.serial < 1 ||
-      !isCompetitionEventV2(record.payload)
+      !isCompetitionEvent(record.payload)
     ) {
       return false;
     }
@@ -819,7 +819,7 @@ export class CompetitionLedgerV2 {
     return true;
   }
 
-  public hasCanonicalEvent(event: CompetitionEventV2): boolean {
+  public hasCanonicalEvent(event: CompetitionEvent): boolean {
     const existing = this.eventsById.get(event.eventId);
     return existing !== undefined && stableJson(existing) === stableJson(event);
   }
@@ -837,12 +837,12 @@ export class CompetitionLedgerV2 {
     return this.materialize(undefined, eventId).trackedEventStatus;
   }
 
-  public deferredMatchStart(matchId: string): MatchStartedV2 | undefined {
+  public deferredMatchStart(matchId: string): MatchStarted | undefined {
     if (!isBoundedString(matchId, 256)) return undefined;
     const start = this.materialize().deferredMatchStarts.find(
       (candidate) => candidate.matchId === matchId,
     );
-    return start === undefined ? undefined : cloneEvent(start) as MatchStartedV2;
+    return start === undefined ? undefined : cloneEvent(start) as MatchStarted;
   }
 
   private materialize(
@@ -850,16 +850,16 @@ export class CompetitionLedgerV2 {
     trackedEventId?: string,
   ): CompetitionMaterialization {
     let trackedEventStatus: CompetitionEventStatus = "unknown";
-    const markSeen = (event: CompetitionEventV2): void => {
+    const markSeen = (event: CompetitionEvent): void => {
       if (event.eventId === trackedEventId) trackedEventStatus = "rejected";
     };
-    const markEffective = (event: CompetitionEventV2): void => {
+    const markEffective = (event: CompetitionEvent): void => {
       if (event.eventId === trackedEventId) trackedEventStatus = "effective";
     };
-    const markDeferred = (event: CompetitionEventV2): void => {
+    const markDeferred = (event: CompetitionEvent): void => {
       if (event.eventId === trackedEventId) trackedEventStatus = "deferred";
     };
-    const markRejected = (event: CompetitionEventV2): void => {
+    const markRejected = (event: CompetitionEvent): void => {
       if (event.eventId === trackedEventId) trackedEventStatus = "rejected";
     };
     const challenges = new Map<string, MutableChallenge>();
@@ -870,12 +870,12 @@ export class CompetitionLedgerV2 {
     const latestCompletedBySeries = new Map<string, MutablePairing>();
     const rematches = new Map<string, MutableRematch>();
     const practiceRuns = new Set<string>();
-    const practiceBests = new Map<string, PracticeCompletedV2>();
+    const practiceBests = new Map<string, PracticeCompleted>();
     const practiceBestOrderByPlayer = new Map<string, number>();
-    const pendingStarts: MatchStartedV2[] = [];
-    const pendingLeaves: PairingLeftV2[] = [];
+    const pendingStarts: MatchStarted[] = [];
+    const pendingLeaves: PairingLeft[] = [];
     const pendingTerminals: Array<{
-      event: MatchFinishedV2 | MatchConcededV2;
+      event: MatchFinished | MatchConceded;
       order: number;
     }> = [];
     const rejectedClaims: RejectedClaimView[] = [];
@@ -934,7 +934,7 @@ export class CompetitionLedgerV2 {
       return true;
     };
     const tryCommitFinish = (
-      event: MatchFinishedV2,
+      event: MatchFinished,
       eventOrder: number,
     ): "committed" | "deferred" | "rejected" => {
       const pairing = matches.get(event.matchId);
@@ -1001,7 +1001,7 @@ export class CompetitionLedgerV2 {
       return "committed";
     };
     const tryCommitConcession = (
-      event: MatchConcededV2,
+      event: MatchConceded,
       eventOrder: number,
     ): "committed" | "deferred" | "rejected" => {
       const pairing = matches.get(event.matchId);
@@ -1014,7 +1014,7 @@ export class CompetitionLedgerV2 {
         markRejected(event);
         return "rejected";
       }
-      const finish: MatchFinishedV2 = {
+      const finish: MatchFinished = {
         ...event,
         kind: "match-finished",
         result,
@@ -1034,7 +1034,7 @@ export class CompetitionLedgerV2 {
         }
       }
     };
-    const tryCommitStart = (event: MatchStartedV2): "committed" | "deferred" | "rejected" => {
+    const tryCommitStart = (event: MatchStarted): "committed" | "deferred" | "rejected" => {
       const pairing = pairings.get(event.pairingId);
       if (pairing === undefined) {
         markRejected(event);
@@ -1093,7 +1093,7 @@ export class CompetitionLedgerV2 {
       }
     };
     const tryCommitLeave = (
-      event: PairingLeftV2,
+      event: PairingLeft,
     ): "committed" | "deferred" | "rejected" => {
       const pairing = pairings.get(event.pairingId);
       if (
@@ -1471,7 +1471,7 @@ export class CompetitionLedgerV2 {
         runtimeSessionByPlayer: { ...pairing.runtimeSessionByPlayer },
       }));
     const liveMatches: LiveMatchView[] = [...pairings.values()]
-      .filter((pairing): pairing is MutablePairing & { started: MatchStartedV2 } =>
+      .filter((pairing): pairing is MutablePairing & { started: MatchStarted } =>
         pairing.status === "live" && pairing.started !== undefined
       )
       .map((pairing) => ({
@@ -1485,11 +1485,11 @@ export class CompetitionLedgerV2 {
         seatB: { ...pairing.seatB },
         runtimeSessionByPlayer: { ...pairing.runtimeSessionByPlayer },
         startedEventId: pairing.started.eventId,
-        start: cloneEvent(pairing.started) as MatchStartedV2,
+        start: cloneEvent(pairing.started) as MatchStarted,
       }));
     const completed = [...pairings.values()]
       .filter((pairing): pairing is MutablePairing & {
-        firstFinish: MatchFinishedV2;
+        firstFinish: MatchFinished;
         firstFinishOrder: number;
       } =>
         pairing.status === "completed" &&
@@ -1652,7 +1652,7 @@ export class CompetitionLedgerV2 {
       trackedEventStatus,
       deferredMatchStarts: pendingStarts
         .filter((start) => pairings.get(start.pairingId)?.status === "starting")
-        .map((start) => cloneEvent(start) as MatchStartedV2),
+        .map((start) => cloneEvent(start) as MatchStarted),
       view: {
         counts: {
           waiting: openChallenges.length,

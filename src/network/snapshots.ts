@@ -20,7 +20,7 @@ import type {
 import type { RealtimeEnvelope, SessionId, StreamCursor } from "./messages";
 import type { SnapshotRejectionReason } from "./diagnostics";
 
-export interface PlayerSnapshotV1 {
+export interface PlayerSnapshot {
   schema: "split-stack/snapshot/v1";
   snapshotSeq: number;
   stateTick: Tick;
@@ -145,7 +145,7 @@ export function decodeGrid(encoded: readonly number[]): Grid {
   return grid;
 }
 
-export function createPlayerSnapshot(input: CreatePlayerSnapshotInput): PlayerSnapshotV1 {
+export function createPlayerSnapshot(input: CreatePlayerSnapshotInput): PlayerSnapshot {
   const { player } = input;
   return {
     schema: "split-stack/snapshot/v1",
@@ -189,7 +189,7 @@ export function createPlayerSnapshot(input: CreatePlayerSnapshotInput): PlayerSn
   };
 }
 
-function cloneSnapshot(snapshot: PlayerSnapshotV1): PlayerSnapshotV1 {
+function cloneSnapshot(snapshot: PlayerSnapshot): PlayerSnapshot {
   return {
     ...snapshot,
     grid: [...snapshot.grid],
@@ -376,9 +376,9 @@ function isStreamCursor(value: unknown): boolean {
   );
 }
 
-export function isPlayerSnapshot(value: unknown): value is PlayerSnapshotV1 {
+export function isPlayerSnapshot(value: unknown): value is PlayerSnapshot {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const candidate = value as Partial<PlayerSnapshotV1>;
+  const candidate = value as Partial<PlayerSnapshot>;
   if (
     candidate.schema !== "split-stack/snapshot/v1" ||
     typeof candidate.playerId !== "string" ||
@@ -513,7 +513,7 @@ export class SnapshotScheduler {
  */
 export class RemoteSnapshotStore {
   private readonly boundSessions = new Map<PlayerId, SessionId>();
-  private readonly snapshots = new Map<PlayerId, PlayerSnapshotV1>();
+  private readonly snapshots = new Map<PlayerId, PlayerSnapshot>();
 
   public bind(playerId: PlayerId, sessionId: SessionId): void {
     const previousSession = this.boundSessions.get(playerId);
@@ -551,14 +551,14 @@ export class RemoteSnapshotStore {
     return this.acceptDetailed(envelope).accepted;
   }
 
-  public latest(playerId: PlayerId): PlayerSnapshotV1 | undefined {
+  public latest(playerId: PlayerId): PlayerSnapshot | undefined {
     return this.latestAfter(playerId);
   }
 
   public latestAfter(
     playerId: PlayerId,
     snapshotSeq?: number,
-  ): PlayerSnapshotV1 | undefined {
+  ): PlayerSnapshot | undefined {
     const snapshot = this.snapshots.get(playerId);
     return snapshot === undefined ||
       (snapshotSeq !== undefined && snapshot.snapshotSeq <= snapshotSeq)

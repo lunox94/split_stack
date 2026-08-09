@@ -3,7 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { updateHud } from "../../src/app/bootstrap";
-import type { PlayerSnapshotV1 } from "../../src/network/snapshots";
+import type { PlayerSnapshot } from "../../src/network/snapshots";
 import { createAppShell } from "../../src/ui/shell";
 
 const PREVIEW_OPTIONS = {
@@ -13,7 +13,7 @@ const PREVIEW_OPTIONS = {
   elapsedMs: 0,
 } as const;
 
-function snapshot(overrides: Partial<PlayerSnapshotV1> = {}): PlayerSnapshotV1 {
+function snapshot(overrides: Partial<PlayerSnapshot> = {}): PlayerSnapshot {
   return {
     score: 120,
     level: 2,
@@ -28,7 +28,7 @@ function snapshot(overrides: Partial<PlayerSnapshotV1> = {}): PlayerSnapshotV1 {
     nextFive: [{ source: "base", shape: "I" }],
     replacementMode: null,
     ...overrides,
-  } as PlayerSnapshotV1;
+  } as PlayerSnapshot;
 }
 
 describe("HUD rendering", () => {

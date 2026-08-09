@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  COMPETITION_EVENT_SCHEMA_V2,
-  type CompetitionEventV2,
-} from "../../src/app/competition-ledger-v2";
-import { PendingChatFeedbackStoreV2 } from "../../src/app/pending-chat-feedback";
+  COMPETITION_EVENT_SCHEMA,
+  type CompetitionEvent,
+} from "../../src/app/competition-ledger";
+import { PendingChatFeedbackStore } from "../../src/app/pending-chat-feedback";
 import type { StoragePort } from "../../src/persistence/settings";
 
 class MemoryStorage implements StoragePort {
@@ -19,9 +19,9 @@ class MemoryStorage implements StoragePort {
   }
 }
 
-function challengeCreated(eventId = "create-1"): CompetitionEventV2 {
+function challengeCreated(eventId = "create-1"): CompetitionEvent {
   return {
-    schema: COMPETITION_EVENT_SCHEMA_V2,
+    schema: COMPETITION_EVENT_SCHEMA,
     kind: "challenge-created",
     eventId,
     logicalClock: 1,
@@ -32,9 +32,9 @@ function challengeCreated(eventId = "create-1"): CompetitionEventV2 {
   };
 }
 
-function matchConceded(eventId = "concede-1"): CompetitionEventV2 {
+function matchConceded(eventId = "concede-1"): CompetitionEvent {
   return {
-    schema: COMPETITION_EVENT_SCHEMA_V2,
+    schema: COMPETITION_EVENT_SCHEMA,
     kind: "match-conceded",
     eventId,
     logicalClock: 8,
@@ -47,14 +47,14 @@ function matchConceded(eventId = "concede-1"): CompetitionEventV2 {
 describe("pending chat feedback recovery journal", () => {
   it("survives reload until a durable metadata receipt acknowledges it", () => {
     const storage = new MemoryStorage();
-    const first = new PendingChatFeedbackStoreV2(
+    const first = new PendingChatFeedbackStore(
       storage,
       "rules-v2",
       "alice@example.test",
     );
     first.add(challengeCreated(), { kind: "challenge-created" });
 
-    const afterRawAcceptance = new PendingChatFeedbackStoreV2(
+    const afterRawAcceptance = new PendingChatFeedbackStore(
       storage,
       "rules-v2",
       "alice@example.test",
@@ -70,7 +70,7 @@ describe("pending chat feedback recovery journal", () => {
       href: "index.html#lobby/challenge/challenge-1",
       summary: "1 wait · 0 live",
     });
-    const beforeMetadataReceipt = new PendingChatFeedbackStoreV2(
+    const beforeMetadataReceipt = new PendingChatFeedbackStore(
       storage,
       "rules-v2",
       "alice@example.test",
@@ -81,7 +81,7 @@ describe("pending chat feedback recovery journal", () => {
     }]);
 
     beforeMetadataReceipt.acknowledge("create-1");
-    expect(new PendingChatFeedbackStoreV2(
+    expect(new PendingChatFeedbackStore(
       storage,
       "rules-v2",
       "alice@example.test",
@@ -90,19 +90,19 @@ describe("pending chat feedback recovery journal", () => {
 
   it("scopes recovery to the event actor and rules version", () => {
     const storage = new MemoryStorage();
-    const alice = new PendingChatFeedbackStoreV2(
+    const alice = new PendingChatFeedbackStore(
       storage,
       "rules-v2",
       "alice@example.test",
     );
     alice.add(challengeCreated(), { kind: "challenge-created" });
 
-    expect(new PendingChatFeedbackStoreV2(
+    expect(new PendingChatFeedbackStore(
       storage,
       "rules-v2",
       "bob@example.test",
     ).entries()).toEqual([]);
-    expect(new PendingChatFeedbackStoreV2(
+    expect(new PendingChatFeedbackStore(
       storage,
       "rules-v3",
       "alice@example.test",
@@ -111,7 +111,7 @@ describe("pending chat feedback recovery journal", () => {
 
   it("does not persist a resolver that does not match its event kind", () => {
     const storage = new MemoryStorage();
-    const store = new PendingChatFeedbackStoreV2(
+    const store = new PendingChatFeedbackStore(
       storage,
       "rules-v2",
       "alice@example.test",
@@ -124,7 +124,7 @@ describe("pending chat feedback recovery journal", () => {
 
   it("keeps concession feedback pending until its result message is received", () => {
     const storage = new MemoryStorage();
-    const first = new PendingChatFeedbackStoreV2(
+    const first = new PendingChatFeedbackStore(
       storage,
       "rules-v2",
       "alice@example.test",
@@ -132,7 +132,7 @@ describe("pending chat feedback recovery journal", () => {
 
     first.add(matchConceded(), { kind: "match-result" });
 
-    expect(new PendingChatFeedbackStoreV2(
+    expect(new PendingChatFeedbackStore(
       storage,
       "rules-v2",
       "alice@example.test",
@@ -145,7 +145,7 @@ describe("pending chat feedback recovery journal", () => {
 
   it("reserves two recovery slots for terminal result feedback", () => {
     const storage = new MemoryStorage();
-    const store = new PendingChatFeedbackStoreV2(
+    const store = new PendingChatFeedbackStore(
       storage,
       "rules-v2",
       "alice@example.test",

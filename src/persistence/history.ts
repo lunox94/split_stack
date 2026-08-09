@@ -1,5 +1,5 @@
 import { cloneMatchResult } from "../domain/results";
-import type { MatchResultV1 } from "../domain/types";
+import type { MatchResult } from "../domain/types";
 
 export interface DurableResultRecord {
   serial: number;
@@ -7,7 +7,7 @@ export interface DurableResultRecord {
 }
 
 export interface MaterializedResult {
-  result: MatchResultV1;
+  result: MatchResult;
   serial: number;
   conflicted: boolean;
   variantCount: number;
@@ -24,7 +24,7 @@ export interface HistoryView {
 }
 
 interface ResultEntry {
-  variants: Map<string, MatchResultV1>;
+  variants: Map<string, MatchResult>;
   firstSerial: number;
 }
 
@@ -69,7 +69,7 @@ function isPlayerResultStats(value: unknown): boolean {
   return stats.topOutTick === undefined || isNonNegativeInteger(stats.topOutTick);
 }
 
-function isResultPlayer(value: unknown): value is MatchResultV1["players"][number] {
+function isResultPlayer(value: unknown): value is MatchResult["players"][number] {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const player = value as Record<string, unknown>;
   return (
@@ -81,9 +81,9 @@ function isResultPlayer(value: unknown): value is MatchResultV1["players"][numbe
   );
 }
 
-export function isMatchResultV1(value: unknown): value is MatchResultV1 {
+export function isMatchResult(value: unknown): value is MatchResult {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const result = value as Partial<MatchResultV1>;
+  const result = value as Partial<MatchResult>;
   if (
     result.schema !== "split-stack/result/v1" ||
     typeof result.matchId !== "string" ||
@@ -140,7 +140,7 @@ function compareCodeUnits(left: string, right: string): number {
   return left === right ? 0 : left < right ? -1 : 1;
 }
 
-function conflictResult(variants: readonly MatchResultV1[]): MatchResultV1 {
+function conflictResult(variants: readonly MatchResult[]): MatchResult {
   const base = [...variants].sort((left, right) =>
     compareCodeUnits(stableJson(left), stableJson(right)),
   )[0];
@@ -174,7 +174,7 @@ export class HistoryMaterializer {
   private reachedCapacity = false;
 
   public apply(record: DurableResultRecord): boolean {
-    if (!Number.isSafeInteger(record.serial) || record.serial < 1 || !isMatchResultV1(record.payload)) {
+    if (!Number.isSafeInteger(record.serial) || record.serial < 1 || !isMatchResult(record.payload)) {
       return false;
     }
     const accepted = cloneMatchResult(record.payload);

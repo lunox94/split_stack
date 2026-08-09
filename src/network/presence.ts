@@ -1,6 +1,6 @@
 import type { MonotonicClock } from "./clock";
 
-export const PRESENCE_SCHEMA_V2 = "split-stack/presence/v2" as const;
+export const PRESENCE_SCHEMA = "split-stack/presence/v2" as const;
 export const DEFAULT_PRESENCE_MAX_AGE_MS = 15_000;
 export const DEFAULT_PRESENCE_MAX_FRAME_BYTES = 1_024;
 export const DEFAULT_PRESENCE_MAX_ENTRIES = 512;
@@ -8,7 +8,7 @@ export const DEFAULT_PRESENCE_MAX_ENTRIES = 512;
 const MAX_ID_CHARACTERS = 256;
 const MAX_DISPLAY_NAME_CHARACTERS = 128;
 
-export interface PresenceActorV2 {
+export interface PresenceActor {
   id: string;
   displayName: string;
 }
@@ -17,9 +17,9 @@ export interface PresenceActorV2 {
  * Passive chat presence. It carries no readiness, seat, or matchmaking claim
  * and must never be used to accept or reject an authoritative durable event.
  */
-export interface PresenceFrameV2 {
-  schema: typeof PRESENCE_SCHEMA_V2;
-  actor: PresenceActorV2;
+export interface PresenceFrame {
+  schema: typeof PRESENCE_SCHEMA;
+  actor: PresenceActor;
   challengeId: string;
   runtimeId: string;
 }
@@ -31,7 +31,7 @@ export type PresenceDecodeError =
   | "invalid-frame";
 
 export type PresenceDecodeResult =
-  | { ok: true; value: PresenceFrameV2 }
+  | { ok: true; value: PresenceFrame }
   | { ok: false; error: PresenceDecodeError };
 
 export interface PresenceDecodeOptions {
@@ -46,7 +46,7 @@ export interface AdvisoryPresenceTrackerOptions {
 }
 
 export interface PresenceObservation {
-  actor: PresenceActorV2;
+  actor: PresenceActor;
   challengeId: string;
   runtimeId: string;
   lastSeenAtMs: number;
@@ -66,7 +66,7 @@ export interface PresenceListOptions {
 }
 
 interface TrackedPresence {
-  frame: PresenceFrameV2;
+  frame: PresenceFrame;
   lastSeenAtMs: number;
 }
 
@@ -126,16 +126,16 @@ function assertLookupId(value: string, label: string): string {
   return value;
 }
 
-function cloneFrame(frame: PresenceFrameV2): PresenceFrameV2 {
+function cloneFrame(frame: PresenceFrame): PresenceFrame {
   return {
-    schema: PRESENCE_SCHEMA_V2,
+    schema: PRESENCE_SCHEMA,
     actor: { ...frame.actor },
     challengeId: frame.challengeId,
     runtimeId: frame.runtimeId,
   };
 }
 
-function trackingKey(frame: PresenceFrameV2): string {
+function trackingKey(frame: PresenceFrame): string {
   return `${frame.actor.id.length}:${frame.actor.id}` +
     `${frame.challengeId.length}:${frame.challengeId}` +
     `${frame.runtimeId.length}:${frame.runtimeId}`;
@@ -145,11 +145,11 @@ function compareCodeUnits(left: string, right: string): number {
   return left === right ? 0 : left < right ? -1 : 1;
 }
 
-export function isPresenceFrameV2(value: unknown): value is PresenceFrameV2 {
+export function isPresenceFrame(value: unknown): value is PresenceFrame {
   if (
     !isRecord(value) ||
     !hasExactKeys(value, ["schema", "actor", "challengeId", "runtimeId"]) ||
-    value.schema !== PRESENCE_SCHEMA_V2 ||
+    value.schema !== PRESENCE_SCHEMA ||
     !isRecord(value.actor) ||
     !hasExactKeys(value.actor, ["id", "displayName"])
   ) {
@@ -164,10 +164,10 @@ export function isPresenceFrameV2(value: unknown): value is PresenceFrameV2 {
 }
 
 export function encodePresenceFrame(
-  frame: PresenceFrameV2,
+  frame: PresenceFrame,
   options: PresenceDecodeOptions = {},
 ): Uint8Array {
-  if (!isPresenceFrameV2(frame)) {
+  if (!isPresenceFrame(frame)) {
     throw new TypeError("Invalid advisory presence frame");
   }
   const maximum = assertMaximumBytes(
@@ -200,7 +200,7 @@ export function decodePresenceFrame(
   } catch {
     return { ok: false, error: "invalid-json" };
   }
-  if (!isPresenceFrameV2(parsed)) return { ok: false, error: "invalid-frame" };
+  if (!isPresenceFrame(parsed)) return { ok: false, error: "invalid-frame" };
   return { ok: true, value: cloneFrame(parsed) };
 }
 
@@ -237,10 +237,10 @@ export class AdvisoryPresenceTracker {
   }
 
   public observe(
-    frame: PresenceFrameV2,
+    frame: PresenceFrame,
     receivedAtMs = this.clock.now(),
   ): void {
-    if (!isPresenceFrameV2(frame)) throw new TypeError("Invalid advisory presence frame");
+    if (!isPresenceFrame(frame)) throw new TypeError("Invalid advisory presence frame");
     const receivedAt = assertTimestamp(receivedAtMs);
     const key = trackingKey(frame);
     const existing = this.entries.get(key);

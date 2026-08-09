@@ -2,7 +2,7 @@ export const MAX_ROUTE_ID_CHARACTERS = 256;
 
 const MAX_HASH_CHARACTERS = 4_096;
 
-export type AppRouteV2 =
+export type AppRoute =
   | { screen: "home" }
   | { screen: "lobby"; challengeId?: string }
   | { screen: "match"; matchId: string }
@@ -16,11 +16,11 @@ export interface RouteTargetAvailability {
   rulesHashIsCurrent?: (rulesHash: string) => boolean;
 }
 
-function homeRoute(): AppRouteV2 {
+function homeRoute(): AppRoute {
   return { screen: "home" };
 }
 
-function lobbyRoute(): AppRouteV2 {
+function lobbyRoute(): AppRoute {
   return { screen: "lobby" };
 }
 
@@ -78,7 +78,7 @@ export function isRecognizedAppRouteHash(value: string): boolean {
   );
 }
 
-function malformedFallback(hash: string): AppRouteV2 {
+function malformedFallback(hash: string): AppRoute {
   const prefix = hash.split("/", 1)[0];
   return prefix === "lobby" ||
       prefix === "match" ||
@@ -88,7 +88,7 @@ function malformedFallback(hash: string): AppRouteV2 {
     : homeRoute();
 }
 
-function parseSyntacticRoute(value: string): AppRouteV2 {
+function parseSyntacticRoute(value: string): AppRoute {
   const hash = routeHash(value);
   if (hash === null || hash === "" || hash === "home") return homeRoute();
   if (hash.length > MAX_HASH_CHARACTERS) return malformedFallback(hash);
@@ -145,9 +145,9 @@ function safelyAvailable(
 }
 
 export function resolveAppRoute(
-  route: AppRouteV2,
+  route: AppRoute,
   availability: RouteTargetAvailability = {},
-): AppRouteV2 {
+): AppRoute {
   if (
     route.screen === "lobby" &&
     route.challengeId !== undefined &&
@@ -180,7 +180,7 @@ export function resolveAppRoute(
 export function parseAppRoute(
   value: string,
   availability: RouteTargetAvailability = {},
-): AppRouteV2 {
+): AppRoute {
   try {
     return resolveAppRoute(parseSyntacticRoute(value), availability);
   } catch {
@@ -188,7 +188,7 @@ export function parseAppRoute(
   }
 }
 
-export function buildAppRouteHref(route: AppRouteV2): string {
+export function buildAppRouteHref(route: AppRoute): string {
   switch (route.screen) {
     case "home":
       return "index.html";

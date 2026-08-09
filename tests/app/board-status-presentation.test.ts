@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 
 import { updateHud } from "../../src/app/bootstrap";
-import type { PlayerSnapshotV1 } from "../../src/network/snapshots";
+import type { PlayerSnapshot } from "../../src/network/snapshots";
 import { SPECIAL_ICON_PATHS } from "../../src/render/special-icons";
 import { createAppShell } from "../../src/ui/shell";
 
@@ -15,8 +15,8 @@ const PREVIEW_OPTIONS = {
 } as const;
 
 function snapshot(
-  statuses: PlayerSnapshotV1["statuses"],
-): PlayerSnapshotV1 {
+  statuses: PlayerSnapshot["statuses"],
+): PlayerSnapshot {
   return {
     score: 0,
     level: 1,
@@ -30,7 +30,7 @@ function snapshot(
     hold: null,
     nextFive: [],
     replacementMode: null,
-  } as unknown as PlayerSnapshotV1;
+  } as unknown as PlayerSnapshot;
 }
 
 describe("board status presentation", () => {

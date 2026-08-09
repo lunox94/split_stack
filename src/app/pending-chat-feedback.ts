@@ -1,8 +1,8 @@
 import type { StoragePort } from "../persistence/settings";
 import {
-  isCompetitionEventV2,
-  type CompetitionEventV2,
-} from "./competition-ledger-v2";
+  isCompetitionEvent,
+  type CompetitionEvent,
+} from "./competition-ledger";
 import type { ChatUpdateMetadata } from "./chat-feedback";
 
 const STORAGE_SCHEMA = "split-stack/pending-chat-feedback/v2";
@@ -16,7 +16,7 @@ const MAX_HREF_CHARACTERS = 1_024;
 const MAX_INFO_CHARACTERS = 50;
 const MAX_SUMMARY_CHARACTERS = 20;
 
-export type PendingChatFeedbackResolverV2 =
+export type PendingChatFeedbackResolver =
   | { readonly kind: "challenge-created" }
   | { readonly kind: "challenge-cancelled" }
   | { readonly kind: "practice-record" }
@@ -42,10 +42,10 @@ export type PendingChatFeedbackResolverV2 =
       readonly opponentId: string;
     };
 
-export interface PendingChatFeedbackV2 {
+export interface PendingChatFeedback {
   readonly schema: typeof STORAGE_SCHEMA;
-  readonly payload: CompetitionEventV2;
-  readonly resolver: PendingChatFeedbackResolverV2;
+  readonly payload: CompetitionEvent;
+  readonly resolver: PendingChatFeedbackResolver;
   readonly resolved: boolean;
   readonly metadata?: ChatUpdateMetadata;
 }
@@ -56,8 +56,8 @@ function isBoundedString(value: unknown, maximum: number): value is string {
 
 function resolverMatches(
   resolver: unknown,
-  payload: CompetitionEventV2,
-): resolver is PendingChatFeedbackResolverV2 {
+  payload: CompetitionEvent,
+): resolver is PendingChatFeedbackResolver {
   if (typeof resolver !== "object" || resolver === null || Array.isArray(resolver)) {
     return false;
   }
@@ -129,12 +129,12 @@ function isMetadata(value: unknown): value is ChatUpdateMetadata {
   return true;
 }
 
-function parseRecord(value: unknown, actorId: string): PendingChatFeedbackV2 | null {
+function parseRecord(value: unknown, actorId: string): PendingChatFeedback | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   if (
     record.schema !== STORAGE_SCHEMA ||
-    !isCompetitionEventV2(record.payload) ||
+    !isCompetitionEvent(record.payload) ||
     record.payload.actor.id !== actorId ||
     !resolverMatches(record.resolver, record.payload) ||
     typeof record.resolved !== "boolean"
@@ -144,7 +144,7 @@ function parseRecord(value: unknown, actorId: string): PendingChatFeedbackV2 | n
   if (record.resolved ? !isMetadata(record.metadata) : record.metadata !== undefined) {
     return null;
   }
-  return record as unknown as PendingChatFeedbackV2;
+  return record as unknown as PendingChatFeedback;
 }
 
 function cloneMetadata(metadata: ChatUpdateMetadata): ChatUpdateMetadata {
@@ -160,8 +160,8 @@ function cloneMetadata(metadata: ChatUpdateMetadata): ChatUpdateMetadata {
  * A small, player-scoped recovery journal. Entries survive until a replayed
  * metadata-bearing durable update proves that chat feedback was accepted.
  */
-export class PendingChatFeedbackStoreV2 {
-  private readonly entriesByEventId = new Map<string, PendingChatFeedbackV2>();
+export class PendingChatFeedbackStore {
+  private readonly entriesByEventId = new Map<string, PendingChatFeedback>();
   private readonly storageKey: string;
 
   public constructor(
@@ -173,17 +173,17 @@ export class PendingChatFeedbackStoreV2 {
     this.load();
   }
 
-  public entries(): readonly PendingChatFeedbackV2[] {
+  public entries(): readonly PendingChatFeedback[] {
     return [...this.entriesByEventId.values()];
   }
 
-  public get(eventId: string): PendingChatFeedbackV2 | undefined {
+  public get(eventId: string): PendingChatFeedback | undefined {
     return this.entriesByEventId.get(eventId);
   }
 
   public add(
-    payload: CompetitionEventV2,
-    resolver: PendingChatFeedbackResolverV2,
+    payload: CompetitionEvent,
+    resolver: PendingChatFeedbackResolver,
   ): void {
     if (payload.actor.id !== this.actorId || !resolverMatches(resolver, payload)) return;
     if (!this.entriesByEventId.has(payload.eventId)) {

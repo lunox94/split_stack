@@ -3,7 +3,7 @@ import type {
   CompetitionResultView,
   PlayerCompetitionActivity,
   StartingPairingView,
-} from "./competition-ledger-v2";
+} from "./competition-ledger";
 import type {
   CompetitionPendingRematchView,
   CompetitionPracticeEntryView,

@@ -3,7 +3,7 @@ import { RULES } from "../../src/config/rules";
 import { clearLines, findCompleteLines, mergePiece } from "../../src/domain/board";
 import { collides } from "../../src/domain/collision";
 import { getGhostY } from "../../src/domain/movement";
-import type { MatchResultV1 } from "../../src/domain/types";
+import type { MatchResult } from "../../src/domain/types";
 import type { ActivePiece, Grid, Rotation } from "../../src/domain/types";
 import type { SimulationEffect } from "../../src/domain/simulation";
 import {
@@ -35,8 +35,8 @@ function createPair(overrides: {
     value?: number,
   ) => void;
   onASimulationEffects?: (effects: readonly SimulationEffect[]) => void;
-  onAResultConfirmed?: (result: MatchResultV1) => void;
-  onBResultConfirmed?: (result: MatchResultV1) => void;
+  onAResultConfirmed?: (result: MatchResult) => void;
+  onBResultConfirmed?: (result: MatchResult) => void;
   onAStartCommitted?: () => void;
   onBStartCommitted?: () => void;
   onADesynchronization?: (reason: string) => void;
@@ -1762,7 +1762,7 @@ describe("CompetitiveSession", () => {
 
   it("stops neutrally instead of advancing through an implausible remote target tick", () => {
     const onDesynchronization = vi.fn<(reason: string) => void>();
-    const onResult = vi.fn<(result: MatchResultV1) => void>();
+    const onResult = vi.fn<(result: MatchResult) => void>();
     const diagnostics = new NetworkDiagnostics({ clock: new ManualClock(20_000) });
     const pair = createPair({
       aDiagnostics: diagnostics,
@@ -2043,7 +2043,7 @@ describe("CompetitiveSession", () => {
 
   it("stops neutrally when a top-out contradicts its terminal snapshot hash", () => {
     const onDesynchronization = vi.fn<(reason: string) => void>();
-    const onResult = vi.fn<(result: MatchResultV1) => void>();
+    const onResult = vi.fn<(result: MatchResult) => void>();
     const diagnostics = new NetworkDiagnostics({ clock: new ManualClock(1_000) });
     const pair = createPair({
       onADesynchronization: onDesynchronization,
@@ -2141,8 +2141,8 @@ describe("CompetitiveSession", () => {
   });
 
   it("exchanges identical result confirmations and lets only Seat A publish a normal result", () => {
-    const onAResult = vi.fn<(result: MatchResultV1) => void>();
-    const onBResult = vi.fn<(result: MatchResultV1) => void>();
+    const onAResult = vi.fn<(result: MatchResult) => void>();
+    const onBResult = vi.fn<(result: MatchResult) => void>();
     const pair = createPair({
       onAResultConfirmed: onAResult,
       onBResultConfirmed: onBResult,
@@ -2193,7 +2193,7 @@ describe("CompetitiveSession", () => {
   });
 
   it("retries a dropped result confirmation before Seat A publishes", () => {
-    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const onAResult = vi.fn<(result: MatchResult) => void>();
     const pair = createPair({ onAResultConfirmed: onAResult });
     ready(pair);
     advanceBoth(pair, 3_000);
@@ -2210,7 +2210,7 @@ describe("CompetitiveSession", () => {
   });
 
   it("finishes neutrally when top-out result consensus cannot recover", () => {
-    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const onAResult = vi.fn<(result: MatchResult) => void>();
     const onDesynchronization = vi.fn<(reason: string) => void>();
     const pair = createPair({
       onAResultConfirmed: onAResult,
@@ -2236,7 +2236,7 @@ describe("CompetitiveSession", () => {
   });
 
   it("settles simultaneous top-outs at the same tick as one confirmed draw", () => {
-    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const onAResult = vi.fn<(result: MatchResult) => void>();
     const pair = createPair({ onAResultConfirmed: onAResult });
     ready(pair);
     advanceBoth(pair, 3_000);
@@ -5132,7 +5132,7 @@ describe("CompetitiveSession", () => {
 
   it("ends neutrally once after twenty seconds of visible peer silence", () => {
     const onForfeitWin = vi.fn();
-    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const onAResult = vi.fn<(result: MatchResult) => void>();
     const pair = createPair({
       onAForfeitWin: onForfeitWin,
       onAResultConfirmed: onAResult,
@@ -5170,7 +5170,7 @@ describe("CompetitiveSession", () => {
   });
 
   it("ends when a peer stays hidden but keeps sending realtime heartbeats", () => {
-    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const onAResult = vi.fn<(result: MatchResult) => void>();
     const pair = createPair({ onAResultConfirmed: onAResult });
     ready(pair);
     advanceBoth(pair, 3_000);
@@ -5210,7 +5210,7 @@ describe("CompetitiveSession", () => {
   });
 
   it("gives a later peer-silence incident a fresh grace after verified recovery", () => {
-    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const onAResult = vi.fn<(result: MatchResult) => void>();
     const pair = createPair({ onAResultConfirmed: onAResult });
     ready(pair);
     advanceBoth(pair, 3_600, 100);
@@ -5250,7 +5250,7 @@ describe("CompetitiveSession", () => {
   });
 
   it("starts a fresh peer-silence grace period after returning visible", () => {
-    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const onAResult = vi.fn<(result: MatchResult) => void>();
     const pair = createPair({ onAResultConfirmed: onAResult });
     ready(pair);
     advanceBoth(pair, 3_000);
@@ -5275,7 +5275,7 @@ describe("CompetitiveSession", () => {
   });
 
   it("starts a fresh grace when returning before a still-hidden peer", () => {
-    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const onAResult = vi.fn<(result: MatchResult) => void>();
     const pair = createPair({ onAResultConfirmed: onAResult });
     ready(pair);
     advanceBoth(pair, 3_000);
@@ -5298,7 +5298,7 @@ describe("CompetitiveSession", () => {
   });
 
   it("keeps the visible peer-loss deadline across repeated visible notifications", () => {
-    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const onAResult = vi.fn<(result: MatchResult) => void>();
     const pair = createPair({ onAResultConfirmed: onAResult });
     ready(pair);
     advanceBoth(pair, 3_000);
@@ -5321,7 +5321,7 @@ describe("CompetitiveSession", () => {
   });
 
   it("preserves one visible peer-loss deadline across transport replacements", () => {
-    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const onAResult = vi.fn<(result: MatchResult) => void>();
     const pair = createPair({ onAResultConfirmed: onAResult });
     ready(pair);
     advanceBoth(pair, 3_000);
@@ -5347,8 +5347,8 @@ describe("CompetitiveSession", () => {
   });
 
   it("lets only the connected visible controller record a neutral loss", () => {
-    const onAResult = vi.fn<(result: MatchResultV1) => void>();
-    const onBResult = vi.fn<(result: MatchResultV1) => void>();
+    const onAResult = vi.fn<(result: MatchResult) => void>();
+    const onBResult = vi.fn<(result: MatchResult) => void>();
     const pair = createPair({
       onAResultConfirmed: onAResult,
       onBResultConfirmed: onBResult,
@@ -5378,8 +5378,8 @@ describe("CompetitiveSession", () => {
   });
 
   it("retries a dropped explicit forfeit before reporting canonical delivery", () => {
-    const onAResult = vi.fn<(result: MatchResultV1) => void>();
-    const onBResult = vi.fn<(result: MatchResultV1) => void>();
+    const onAResult = vi.fn<(result: MatchResult) => void>();
+    const onBResult = vi.fn<(result: MatchResult) => void>();
     const pair = createPair({
       onAResultConfirmed: onAResult,
       onBResultConfirmed: onBResult,
@@ -5415,7 +5415,7 @@ describe("CompetitiveSession", () => {
   });
 
   it("timestamps an explicit forfeit at its canonical simulation snapshot", () => {
-    const onAResult = vi.fn<(result: MatchResultV1) => void>();
+    const onAResult = vi.fn<(result: MatchResult) => void>();
     const pair = createPair({ onAResultConfirmed: onAResult });
     ready(pair);
     advanceBoth(pair, 3_000);
@@ -5429,8 +5429,8 @@ describe("CompetitiveSession", () => {
   });
 
   it("queues one canonical self-loss fallback when explicit forfeit cannot be acknowledged", () => {
-    const onAResult = vi.fn<(result: MatchResultV1) => void>();
-    const onBResult = vi.fn<(result: MatchResultV1) => void>();
+    const onAResult = vi.fn<(result: MatchResult) => void>();
+    const onBResult = vi.fn<(result: MatchResult) => void>();
     const pair = createPair({
       onAResultConfirmed: onAResult,
       onBResultConfirmed: onBResult,

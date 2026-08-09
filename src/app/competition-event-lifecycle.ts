@@ -1,6 +1,6 @@
 import { RULES } from "../config/rules";
 import { canonicalize, hashCanonicalHex } from "../domain/hashing";
-import type { MatchResultV1, PlayerResultStats } from "../domain/types";
+import type { MatchResult, PlayerResultStats } from "../domain/types";
 import type { StoragePort } from "../persistence/settings";
 import {
   DurableLamportClock,
@@ -10,15 +10,15 @@ import {
   type DurableWebxdcHost,
 } from "../network/webxdc-durable";
 import {
-  COMPETITION_EVENT_SCHEMA_V2,
-  CompetitionLedgerV2,
-  isCompetitionEventV2,
+  COMPETITION_EVENT_SCHEMA,
+  CompetitionLedger,
+  isCompetitionEvent,
   type CompetitionActor,
   type CompetitionEventStatus,
-  type CompetitionEventV2,
+  type CompetitionEvent,
   type CompetitionLedgerView,
-  type MatchStartedV2,
-} from "./competition-ledger-v2";
+  type MatchStarted,
+} from "./competition-ledger";
 import {
   challengeCancelledFeedback,
   challengeJoinedFeedback,
@@ -32,8 +32,8 @@ import {
   type ChatUpdateMetadata,
 } from "./chat-feedback";
 import {
-  PendingChatFeedbackStoreV2,
-  type PendingChatFeedbackV2,
+  PendingChatFeedbackStore,
+  type PendingChatFeedback,
 } from "./pending-chat-feedback";
 import { connectionLossFallbackFor } from "./live-session-recovery";
 
@@ -90,7 +90,7 @@ export type CompetitionIntent =
     };
 
 export type CompetitionMatchCompletion = Omit<
-  MatchResultV1,
+  MatchResult,
   "schema" | "matchId" | "seedHash" | "players"
 >;
 
@@ -108,7 +108,7 @@ export interface CompetitionIntentLifecycle {
 }
 
 export type CompetitionMatchStartView = Omit<
-  MatchStartedV2,
+  MatchStarted,
   "schema" | "eventId" | "logicalClock" | "actor"
 >;
 
@@ -188,7 +188,7 @@ interface PersistedIntentRecord {
   readonly schema: typeof STORAGE_SCHEMA;
   readonly reference: CompetitionIntentReference;
   readonly intent: CompetitionIntent;
-  readonly payload: CompetitionEventV2;
+  readonly payload: CompetitionEvent;
   readonly feedbackContext?:
     | {
         readonly kind: "challenge-joined";
@@ -222,7 +222,7 @@ interface PersistedIntentRecord {
 }
 
 interface DurableOutboxEntry {
-  readonly update: DurableOutboundUpdate<CompetitionEventV2>;
+  readonly update: DurableOutboundUpdate<CompetitionEvent>;
   readonly successfulSendLimit: number;
   attempts: number;
   successfulSends: number;
@@ -234,7 +234,7 @@ interface DurableOutboxEntry {
 interface PersistedDerivedEvent {
   readonly schema: typeof DERIVED_STORAGE_SCHEMA;
   readonly key: string;
-  readonly payload: CompetitionEventV2;
+  readonly payload: CompetitionEvent;
 }
 
 interface RuntimeClaimRepairState {
@@ -256,7 +256,7 @@ interface ObserverSubscription {
 }
 
 interface PendingDurableAppend {
-  readonly update: DurableOutboundUpdate<CompetitionEventV2>;
+  readonly update: DurableOutboundUpdate<CompetitionEvent>;
   readonly owner: DurableOutboxEntry;
   readonly terminal: boolean;
   readonly resolve: () => void;
@@ -350,7 +350,7 @@ function projectCompetitionView(view: CompetitionLedgerView): CompetitionView {
 }
 
 function metadataMatches(
-  expected: DurableOutboundUpdate<CompetitionEventV2>,
+  expected: DurableOutboundUpdate<CompetitionEvent>,
   received: DurableReceivedUpdate<unknown>,
 ): boolean {
   const expectsMetadata = expected.info !== undefined ||
@@ -368,25 +368,25 @@ function metadataMatches(
   }
 }
 
-function eventRequiresFeedback(payload: CompetitionEventV2): boolean {
+function eventRequiresFeedback(payload: CompetitionEvent): boolean {
   return payload.kind !== "runtime-claimed" &&
     payload.kind !== "ready-changed" &&
     payload.kind !== "rematch-accepted" &&
     payload.kind !== "rematch-withdrawn";
 }
 
-function isTerminalIntentPayload(payload: CompetitionEventV2): boolean {
+function isTerminalIntentPayload(payload: CompetitionEvent): boolean {
   return payload.kind === "match-finished" || payload.kind === "match-conceded";
 }
 
-function carriesChatMetadata(update: DurableOutboundUpdate<CompetitionEventV2>): boolean {
+function carriesChatMetadata(update: DurableOutboundUpdate<CompetitionEvent>): boolean {
   return update.info !== undefined ||
     update.href !== undefined ||
     update.summary !== undefined ||
     update.notify !== undefined;
 }
 
-function competitionIdentifiers(payload: CompetitionEventV2): readonly string[] {
+function competitionIdentifiers(payload: CompetitionEvent): readonly string[] {
   const identifiers = new Set<string>();
   const visit = (value: unknown, key = ""): void => {
     if (typeof value === "string") {
@@ -446,7 +446,7 @@ function isPersistedFeedbackMetadata(value: unknown): value is ChatUpdateMetadat
   );
 }
 
-function intentForPayload(payload: CompetitionEventV2): CompetitionIntent | null {
+function intentForPayload(payload: CompetitionEvent): CompetitionIntent | null {
   if (payload.kind === "challenge-created") return { kind: "create-challenge" };
   if (payload.kind === "challenge-claimed") {
     return { kind: "join-challenge", challengeId: payload.challengeId };
@@ -519,7 +519,7 @@ function intentForPayload(payload: CompetitionEventV2): CompetitionIntent | null
 
 function intentExactlyMatchesPayload(
   value: unknown,
-  payload: CompetitionEventV2,
+  payload: CompetitionEvent,
 ): value is CompetitionIntent {
   const expected = intentForPayload(payload);
   if (expected === null) return false;
@@ -543,7 +543,7 @@ function isBoundedRecoveryString(value: unknown, maximum: number): value is stri
 
 function feedbackContextMatchesPayload(
   context: unknown,
-  payload: CompetitionEventV2,
+  payload: CompetitionEvent,
 ): boolean {
   if (payload.kind === "challenge-claimed") {
     return isRecord(context) &&
@@ -587,7 +587,7 @@ function feedbackContextMatchesPayload(
 
 function isPersistedIntentRecord(value: unknown, actorId: string): value is PersistedIntentRecord {
   if (!isRecord(value)) return false;
-  if (!isCompetitionEventV2(value.payload)) return false;
+  if (!isCompetitionEvent(value.payload)) return false;
   return value.schema === STORAGE_SCHEMA &&
     typeof value.reference === "string" &&
     value.reference.length > 0 &&
@@ -616,8 +616,8 @@ class CompetitionEventLifecycleImplementation {
   private readonly createId: () => string;
   private readonly durable: WebxdcDurableLog<unknown> | null;
   private readonly clock = new DurableLamportClock();
-  private readonly ledger: CompetitionLedgerV2;
-  private readonly feedback: PendingChatFeedbackStoreV2;
+  private readonly ledger: CompetitionLedger;
+  private readonly feedback: PendingChatFeedbackStore;
   private readonly recordsByReference = new Map<CompetitionIntentReference, PersistedIntentRecord>();
   private readonly referenceByEventId = new Map<string, CompetitionIntentReference>();
   private readonly durableOutbox = new Map<string, DurableOutboxEntry>();
@@ -651,8 +651,8 @@ class CompetitionEventLifecycleImplementation {
     this.usedPrivateIds.add(options.actor.id);
     this.usedPrivateIds.add(options.runtimeSessionId);
     this.durable = options.host === null ? null : new WebxdcDurableLog(options.host);
-    this.ledger = new CompetitionLedgerV2({ currentRulesHash: options.currentRulesHash });
-    this.feedback = new PendingChatFeedbackStoreV2(
+    this.ledger = new CompetitionLedger({ currentRulesHash: options.currentRulesHash });
+    this.feedback = new PendingChatFeedbackStore(
       options.storage,
       options.currentRulesHash,
       options.actor.id,
@@ -741,7 +741,7 @@ class CompetitionEventLifecycleImplementation {
     }
     let connectionLossAdmission: {
       readonly matchId: string;
-      readonly payload: CompetitionEventV2;
+      readonly payload: CompetitionEvent;
     } | undefined;
     if (intent.kind === "settle-connection-loss") {
       const matchId = this.boundedId(intent.matchId, "match ID", 256);
@@ -803,7 +803,7 @@ class CompetitionEventLifecycleImplementation {
       [eventId],
     ) as CompetitionIntentReference;
     let admittedIntent: CompetitionIntent;
-    let payload: CompetitionEventV2;
+    let payload: CompetitionEvent;
     let feedbackContext: PersistedIntentRecord["feedbackContext"];
     if (intent.kind === "create-challenge") {
       const challengeId = this.freshPrivateId("challenge ID", [eventId, reference]);
@@ -813,7 +813,7 @@ class CompetitionEventLifecycleImplementation {
       );
       admittedIntent = { kind: "create-challenge" };
       payload = {
-        schema: COMPETITION_EVENT_SCHEMA_V2,
+        schema: COMPETITION_EVENT_SCHEMA,
         kind: "challenge-created",
         eventId,
         logicalClock,
@@ -832,7 +832,7 @@ class CompetitionEventLifecycleImplementation {
       }
       admittedIntent = { kind: "join-challenge", challengeId };
       payload = {
-        schema: COMPETITION_EVENT_SCHEMA_V2,
+        schema: COMPETITION_EVENT_SCHEMA,
         kind: "challenge-claimed",
         eventId,
         logicalClock,
@@ -851,7 +851,7 @@ class CompetitionEventLifecycleImplementation {
       }
       admittedIntent = { kind: "cancel-challenge", challengeId };
       payload = {
-        schema: COMPETITION_EVENT_SCHEMA_V2,
+        schema: COMPETITION_EVENT_SCHEMA,
         kind: "challenge-cancelled",
         eventId,
         logicalClock,
@@ -869,7 +869,7 @@ class CompetitionEventLifecycleImplementation {
       }
       admittedIntent = { kind: "set-readiness", pairingId, ready: intent.ready };
       payload = {
-        schema: COMPETITION_EVENT_SCHEMA_V2,
+        schema: COMPETITION_EVENT_SCHEMA,
         kind: "ready-changed",
         eventId,
         logicalClock,
@@ -889,7 +889,7 @@ class CompetitionEventLifecycleImplementation {
       }
       admittedIntent = { kind: "leave-pairing", pairingId };
       payload = {
-        schema: COMPETITION_EVENT_SCHEMA_V2,
+        schema: COMPETITION_EVENT_SCHEMA,
         kind: "pairing-left",
         eventId,
         logicalClock,
@@ -926,7 +926,7 @@ class CompetitionEventLifecycleImplementation {
       }
       admittedIntent = { kind: "start-match", pairingId, seed };
       payload = {
-        schema: COMPETITION_EVENT_SCHEMA_V2,
+        schema: COMPETITION_EVENT_SCHEMA,
         kind: "match-started",
         eventId,
         logicalClock,
@@ -977,7 +977,7 @@ class CompetitionEventLifecycleImplementation {
         matchId,
         result: clone(completion),
       };
-      const result: MatchResultV1 = {
+      const result: MatchResult = {
         ...clone(completion),
         schema: "split-stack/result/v1",
         matchId,
@@ -985,7 +985,7 @@ class CompetitionEventLifecycleImplementation {
         players: [clone(match.seatA), clone(match.seatB)],
       };
       payload = {
-        schema: COMPETITION_EVENT_SCHEMA_V2,
+        schema: COMPETITION_EVENT_SCHEMA,
         kind: "match-finished",
         eventId,
         logicalClock,
@@ -994,7 +994,7 @@ class CompetitionEventLifecycleImplementation {
         startedEventId: match.startedEventId,
         result,
       };
-      if (!isCompetitionEventV2(payload)) {
+      if (!isCompetitionEvent(payload)) {
         throw new TypeError("Match completion is not a valid canonical result");
       }
     } else if (intent.kind === "concede-match") {
@@ -1008,7 +1008,7 @@ class CompetitionEventLifecycleImplementation {
       }
       admittedIntent = { kind: "concede-match", matchId };
       payload = {
-        schema: COMPETITION_EVENT_SCHEMA_V2,
+        schema: COMPETITION_EVENT_SCHEMA,
         kind: "match-conceded",
         eventId,
         logicalClock,
@@ -1038,7 +1038,7 @@ class CompetitionEventLifecycleImplementation {
       }
       admittedIntent = { kind: "request-rematch", afterMatchId };
       payload = {
-        schema: COMPETITION_EVENT_SCHEMA_V2,
+        schema: COMPETITION_EVENT_SCHEMA,
         kind: "rematch-requested",
         eventId,
         logicalClock,
@@ -1066,7 +1066,7 @@ class CompetitionEventLifecycleImplementation {
       }
       admittedIntent = { kind: "accept-rematch", afterMatchId };
       payload = {
-        schema: COMPETITION_EVENT_SCHEMA_V2,
+        schema: COMPETITION_EVENT_SCHEMA,
         kind: "rematch-accepted",
         eventId,
         logicalClock,
@@ -1096,7 +1096,7 @@ class CompetitionEventLifecycleImplementation {
         finalStats: clone(finalStats),
       };
       payload = {
-        schema: COMPETITION_EVENT_SCHEMA_V2,
+        schema: COMPETITION_EVENT_SCHEMA,
         kind: "practice-completed",
         eventId,
         logicalClock,
@@ -1112,7 +1112,7 @@ class CompetitionEventLifecycleImplementation {
           topOutTick: intent.durationTicks,
         },
       };
-      if (!isCompetitionEventV2(payload)) {
+      if (!isCompetitionEvent(payload)) {
         throw new TypeError("Practice completion is not a valid canonical record");
       }
       feedbackContext = {
@@ -1122,7 +1122,7 @@ class CompetitionEventLifecycleImplementation {
     } else {
       throw new TypeError("Unsupported Competition Intent");
     }
-    if (!isCompetitionEventV2(payload)) {
+    if (!isCompetitionEvent(payload)) {
       throw new TypeError("Intent did not produce a valid Competition Event");
     }
     if (!this.hasIntentCapacity(payload)) {
@@ -1200,7 +1200,7 @@ class CompetitionEventLifecycleImplementation {
 
   private receive(update: DurableReceivedUpdate<unknown>): void {
     const { payload, serial } = update;
-    if (!Number.isSafeInteger(serial) || serial < 1 || !isCompetitionEventV2(payload)) return;
+    if (!Number.isSafeInteger(serial) || serial < 1 || !isCompetitionEvent(payload)) return;
     this.reservePayloadIdentifiers(payload);
     const before = this.ledger.view(this.actor.id);
     this.clock.observe(payload.logicalClock);
@@ -1263,8 +1263,8 @@ class CompetitionEventLifecycleImplementation {
     const key = `runtime:${this.runtimeSessionId}:${pairing.pairingId}`;
     let derived = this.derivedByKey.get(key);
     if (derived === undefined) {
-      const payload: CompetitionEventV2 = {
-        schema: COMPETITION_EVENT_SCHEMA_V2,
+      const payload: CompetitionEvent = {
+        schema: COMPETITION_EVENT_SCHEMA,
         kind: "runtime-claimed",
         eventId: this.freshPrivateId("Competition Event ID"),
         logicalClock: this.clock.next(),
@@ -1394,7 +1394,7 @@ class CompetitionEventLifecycleImplementation {
   }
 
   private matchContext(matchId: string): {
-    readonly start: MatchStartedV2;
+    readonly start: MatchStarted;
     readonly startedEventId: string;
     readonly seatA: CompetitionActor;
     readonly seatB: CompetitionActor;
@@ -1425,7 +1425,7 @@ class CompetitionEventLifecycleImplementation {
 
   private receiveLocal(
     record: PersistedIntentRecord,
-    payload: CompetitionEventV2,
+    payload: CompetitionEvent,
     update: DurableReceivedUpdate<unknown>,
     before: CompetitionLedgerView,
     outboxAcknowledgement: OutboxAcknowledgement,
@@ -1711,7 +1711,7 @@ class CompetitionEventLifecycleImplementation {
   }
 
   private matchResultMetadata(
-    result: MatchResultV1,
+    result: MatchResult,
     view: CompetitionLedgerView,
     reasonOverride?: "concession",
   ): ChatUpdateMetadata | null {
@@ -1881,7 +1881,7 @@ class CompetitionEventLifecycleImplementation {
   }
 
   private acknowledgeOutbox(
-    payload: CompetitionEventV2,
+    payload: CompetitionEvent,
     received: DurableReceivedUpdate<unknown>,
   ): OutboxAcknowledgement {
     const entry = this.durableOutbox.get(payload.eventId);
@@ -1902,7 +1902,7 @@ class CompetitionEventLifecycleImplementation {
   }
 
   private enqueue(
-    update: DurableOutboundUpdate<CompetitionEventV2>,
+    update: DurableOutboundUpdate<CompetitionEvent>,
     successfulSendLimit = DURABLE_SUCCESS_SEND_LIMIT,
   ): void {
     if (this.durable === null) return;
@@ -1961,7 +1961,7 @@ class CompetitionEventLifecycleImplementation {
   }
 
   private async sendOnce(
-    update: DurableOutboundUpdate<CompetitionEventV2>,
+    update: DurableOutboundUpdate<CompetitionEvent>,
     owner: DurableOutboxEntry,
   ): Promise<void> {
     if (this.durable === null) return;
@@ -2057,7 +2057,7 @@ class CompetitionEventLifecycleImplementation {
       for (const candidate of parsed) {
         if (
           isRecord(candidate) &&
-          isCompetitionEventV2(candidate.payload) &&
+          isCompetitionEvent(candidate.payload) &&
           candidate.payload.actor.id === this.actor.id
         ) {
           this.claimedIntentStoreEventIds.add(candidate.payload.eventId);
@@ -2160,7 +2160,7 @@ class CompetitionEventLifecycleImplementation {
   }
 
   private legacyFeedbackContext(
-    entry: PendingChatFeedbackV2,
+    entry: PendingChatFeedback,
   ): PersistedIntentRecord["feedbackContext"] {
     const resolver = entry.resolver;
     if (resolver.kind === "challenge-joined") {
@@ -2207,7 +2207,7 @@ class CompetitionEventLifecycleImplementation {
           !isRecord(candidate) ||
           candidate.schema !== DERIVED_STORAGE_SCHEMA ||
           typeof candidate.key !== "string" ||
-          !isCompetitionEventV2(candidate.payload)
+          !isCompetitionEvent(candidate.payload)
         ) {
           continue;
         }
@@ -2312,13 +2312,13 @@ class CompetitionEventLifecycleImplementation {
     return value;
   }
 
-  private reservePayloadIdentifiers(payload: CompetitionEventV2): void {
+  private reservePayloadIdentifiers(payload: CompetitionEvent): void {
     for (const identifier of competitionIdentifiers(payload)) {
       this.usedPrivateIds.add(identifier);
     }
   }
 
-  private hasIntentCapacity(payload: CompetitionEventV2): boolean {
+  private hasIntentCapacity(payload: CompetitionEvent): boolean {
     const active = [...this.recordsByReference.values()].filter((record) => !record.settled);
     if (active.length >= MAX_PENDING_INTENT_RECORDS) return false;
     if (isTerminalIntentPayload(payload)) return true;

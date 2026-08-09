@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { RULES } from "../../src/config/rules";
 import { RULES_HASH } from "../../src/config/rules-hash";
 import { hashCanonicalHex } from "../../src/domain/hashing";
-import type { LiveMatchView } from "../../src/app/competition-ledger-v2";
+import type { LiveMatchView } from "../../src/app/competition-ledger";
 import {
   connectionLossFallbackFor,
   liveControllerRecoveryStatus,

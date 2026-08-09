@@ -2,24 +2,24 @@ import { describe, expect, it } from "vitest";
 
 import { RULES } from "../../src/config/rules";
 import { hashCanonicalHex } from "../../src/domain/hashing";
-import type { MatchResultV1 } from "../../src/domain/types";
+import type { MatchResult } from "../../src/domain/types";
 import {
-  CompetitionLedgerV2,
-  type ChallengeCreatedV2,
-  type ChallengeClaimedV2,
-  type ChallengeCancelledV2,
-  type PairingLeftV2,
-  type RuntimeClaimedV2,
-  type ReadyChangedV2,
-  type MatchStartedV2,
-  type MatchFinishedV2,
-  type MatchConcededV2,
-  type RematchRequestedV2,
-  type RematchAcceptedV2,
-  type PracticeCompletedV2,
-  type RematchWithdrawnV2,
-  isCompetitionEventV2,
-} from "../../src/app/competition-ledger-v2";
+  CompetitionLedger,
+  type ChallengeCreated,
+  type ChallengeClaimed,
+  type ChallengeCancelled,
+  type PairingLeft,
+  type RuntimeClaimed,
+  type ReadyChanged,
+  type MatchStarted,
+  type MatchFinished,
+  type MatchConceded,
+  type RematchRequested,
+  type RematchAccepted,
+  type PracticeCompleted,
+  type RematchWithdrawn,
+  isCompetitionEvent,
+} from "../../src/app/competition-ledger";
 
 const RULES_HASH = "rules-current";
 
@@ -27,7 +27,7 @@ function created(
   actorId: string,
   challengeId: string,
   logicalClock: number,
-): ChallengeCreatedV2 {
+): ChallengeCreated {
   return {
     schema: "split-stack/competition/v2",
     kind: "challenge-created",
@@ -45,7 +45,7 @@ function claimed(
   challengeId: string,
   vacancyId: string,
   logicalClock: number,
-): ChallengeClaimedV2 {
+): ChallengeClaimed {
   return {
     schema: "split-stack/competition/v2",
     kind: "challenge-claimed",
@@ -62,7 +62,7 @@ function pairingLeft(
   pairingId: string,
   runtimeSessionId: string,
   logicalClock: number,
-): PairingLeftV2 {
+): PairingLeft {
   return {
     schema: "split-stack/competition/v2",
     kind: "pairing-left",
@@ -78,7 +78,7 @@ function cancelled(
   actorId: string,
   challengeId: string,
   logicalClock: number,
-): ChallengeCancelledV2 {
+): ChallengeCancelled {
   return {
     schema: "split-stack/competition/v2",
     kind: "challenge-cancelled",
@@ -94,7 +94,7 @@ function runtimeClaimed(
   pairingId: string,
   runtimeSessionId: string,
   logicalClock: number,
-): RuntimeClaimedV2 {
+): RuntimeClaimed {
   return {
     schema: "split-stack/competition/v2",
     kind: "runtime-claimed",
@@ -112,7 +112,7 @@ function readyChanged(
   runtimeSessionId: string,
   ready: boolean,
   logicalClock: number,
-): ReadyChangedV2 {
+): ReadyChanged {
   return {
     schema: "split-stack/competition/v2",
     kind: "ready-changed",
@@ -133,7 +133,7 @@ function started(
   round: number,
   logicalClock: number,
   seed = MATCH_SEED,
-): MatchStartedV2 {
+): MatchStarted {
   const seatAPlayerId = "alice";
   const seatBPlayerId = "bob";
   return {
@@ -170,7 +170,7 @@ function startedForPlayers(
   seatAPlayerId: string,
   seatBPlayerId: string,
   seed: string,
-): MatchStartedV2 {
+): MatchStarted {
   return {
     schema: "split-stack/competition/v2",
     kind: "match-started",
@@ -200,9 +200,9 @@ function startedForPlayers(
 
 function result(
   matchId: string,
-  outcome: MatchResultV1["outcome"],
+  outcome: MatchResult["outcome"],
   seed = MATCH_SEED,
-): MatchResultV1 {
+): MatchResult {
   const stats = (score: number) => ({
     score,
     lines: 2,
@@ -230,7 +230,7 @@ function result(
   };
 }
 
-function finished(start: MatchStartedV2, outcome: MatchResultV1["outcome"], logicalClock: number): MatchFinishedV2 {
+function finished(start: MatchStarted, outcome: MatchResult["outcome"], logicalClock: number): MatchFinished {
   return {
     schema: "split-stack/competition/v2",
     kind: "match-finished",
@@ -244,10 +244,10 @@ function finished(start: MatchStartedV2, outcome: MatchResultV1["outcome"], logi
 }
 
 function conceded(
-  start: MatchStartedV2,
+  start: MatchStarted,
   actorId: "alice" | "bob",
   logicalClock: number,
-): MatchConcededV2 {
+): MatchConceded {
   return {
     schema: "split-stack/competition/v2",
     kind: "match-conceded",
@@ -265,7 +265,7 @@ function rematchRequested(
   afterMatchId: string,
   round: number,
   logicalClock: number,
-): RematchRequestedV2 {
+): RematchRequested {
   return {
     schema: "split-stack/competition/v2",
     kind: "rematch-requested",
@@ -280,9 +280,9 @@ function rematchRequested(
 
 function rematchAccepted(
   actorId: string,
-  request: RematchRequestedV2,
+  request: RematchRequested,
   logicalClock: number,
-): RematchAcceptedV2 {
+): RematchAccepted {
   return {
     schema: "split-stack/competition/v2",
     kind: "rematch-accepted",
@@ -301,7 +301,7 @@ function practiceCompleted(
   score: number,
   logicalClock: number,
   rulesHash = RULES_HASH,
-): PracticeCompletedV2 {
+): PracticeCompleted {
   return {
     schema: "split-stack/competition/v2",
     kind: "practice-completed",
@@ -333,7 +333,7 @@ function rematchWithdrawn(
   seriesId: string,
   round: number,
   logicalClock: number,
-): RematchWithdrawnV2 {
+): RematchWithdrawn {
   return {
     schema: "split-stack/competition/v2",
     kind: "rematch-withdrawn",
@@ -346,11 +346,11 @@ function rematchWithdrawn(
 }
 
 function appendCompletedMatch(
-  ledger: CompetitionLedgerV2,
+  ledger: CompetitionLedger,
   seriesId: string,
   firstClock: number,
-  outcome: MatchResultV1["outcome"],
-): MatchStartedV2 {
+  outcome: MatchResult["outcome"],
+): MatchStarted {
   const challenge = created("alice", seriesId, firstClock);
   const claim = claimed("bob", seriesId, challenge.vacancyId, firstClock + 1);
   const start = started(claim.eventId, seriesId, 1, firstClock + 6);
@@ -370,9 +370,9 @@ function appendCompletedMatch(
   return start;
 }
 
-describe("CompetitionLedgerV2", () => {
+describe("CompetitionLedger", () => {
   it("materializes one waiting commitment per player in canonical event order", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
 
     ledger.apply({ serial: 2, payload: created("alice", "later", 2) });
     ledger.apply({ serial: 1, payload: created("alice", "first", 1) });
@@ -385,7 +385,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("materializes four disjoint live pairs concurrently without a global match cap", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const pairs = Array.from({ length: 4 }, (_, index) => ({
       seriesId: `series-${index + 1}`,
       seatA: `player-${index * 2 + 1}`,
@@ -393,7 +393,7 @@ describe("CompetitionLedgerV2", () => {
     }));
     let logicalClock = 0;
     let serial = 0;
-    const apply = (payload: Parameters<CompetitionLedgerV2["apply"]>[0]["payload"]): void => {
+    const apply = (payload: Parameters<CompetitionLedger["apply"]>[0]["payload"]): void => {
       ledger.apply({ serial: ++serial, payload });
     };
     const challenges = pairs.map((pair) => {
@@ -472,7 +472,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("gives a vacancy to the first canonical eligible claimant", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "challenge", 1);
 
     ledger.apply({
@@ -509,10 +509,10 @@ describe("CompetitionLedgerV2", () => {
 
   it("explains every structurally valid rejected claim to its claimant", () => {
     const rejection = (
-      events: readonly (ChallengeCreatedV2 | ChallengeClaimedV2)[],
+      events: readonly (ChallengeCreated | ChallengeClaimed)[],
       playerId: string,
     ) => {
-      const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+      const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
       events.forEach((payload, index) => ledger.apply({ serial: index + 1, payload }));
       return ledger.view(playerId).rejectedClaims[0];
     };
@@ -540,7 +540,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("allows one player to win only one claim across different challenges", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const alice = created("alice", "alice-series", 1);
     const charlie = created("charlie", "charlie-series", 1);
     const records = [
@@ -566,7 +566,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("reopens a challenge with a fresh vacancy when its joiner leaves", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "challenge", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const runtime = runtimeClaimed("bob", claim.eventId, "runtime-b", 3);
@@ -593,7 +593,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("ignores a pre-start exit from a superseded runtime binding", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "guarded-pairing", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const events = [
@@ -624,7 +624,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("rejects a deferred pairing exit when a later cancellation removes its target", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "cancelled-before-runtime", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const left = pairingLeft("bob", claim.eventId, "runtime-b", 3);
@@ -643,7 +643,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("lets only the creator cancel a waiting or starting challenge", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "challenge", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const forgedCancellation = cancelled("mallory", challenge.challengeId, 3);
@@ -664,7 +664,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("commits and finishes an elected match, then aggregates its official result", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "series", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const start = started(claim.eventId, challenge.challengeId, 1, 7);
@@ -702,7 +702,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("requires both players' requests before creating exactly one rematch pairing", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "series", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const start = started(claim.eventId, challenge.challengeId, 1, 7);
@@ -746,7 +746,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("creates a rematch from one request and the opponent's explicit acceptance", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const first = appendCompletedMatch(ledger, "accepted-series", 1, "seat-a");
     const request = rematchRequested("alice", first.seriesId, first.matchId, 2, 9);
     const acceptance = rematchAccepted("bob", request, 10);
@@ -767,7 +767,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("ignores stale, self, and foreign rematch acceptances", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const first = appendCompletedMatch(ledger, "guarded-series", 1, "seat-a");
     const request = rematchRequested("alice", first.seriesId, first.matchId, 2, 9);
     ledger.apply({ serial: 9, payload: request });
@@ -785,7 +785,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("requires every accepted round in a series to use a fresh seed", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const first = appendCompletedMatch(ledger, "fresh-seed-series", 1, "seat-a");
     const request = rematchRequested("alice", first.seriesId, first.matchId, 2, 9);
     const acceptance = rematchAccepted("bob", request, 10);
@@ -823,7 +823,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("does not resurrect a rematch after either player takes another commitment", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "series", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const start = started(claim.eventId, challenge.challengeId, 1, 7);
@@ -856,7 +856,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("does not create a late rematch request after an intervening commitment", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "series", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const start = started(claim.eventId, challenge.challengeId, 1, 7);
@@ -883,7 +883,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("shows current-rules Practice bests as a top ten with an outside player pinned", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     for (let rank = 1; rank <= 11; rank += 1) {
       const player = `player-${rank.toString().padStart(2, "0")}`;
       ledger.apply({
@@ -916,7 +916,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("keeps same-duration Practice games distinct when their run ids differ", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const first = practiceCompleted("alice", 1_000, 1);
     const second = practiceCompleted("alice", 2_000, 2);
     expect(first.durationTicks).toBe(second.durationTicks);
@@ -933,7 +933,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("lets either participant withdraw a pending rematch without reserving a seat", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "series", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const start = started(claim.eventId, challenge.challengeId, 1, 7);
@@ -983,23 +983,23 @@ describe("CompetitionLedgerV2", () => {
     ];
 
     for (const event of valid) {
-      expect(isCompetitionEventV2(event), event.kind).toBe(true);
-      expect(isCompetitionEventV2({ ...event, unexpected: true }), event.kind).toBe(false);
+      expect(isCompetitionEvent(event), event.kind).toBe(true);
+      expect(isCompetitionEvent({ ...event, unexpected: true }), event.kind).toBe(false);
     }
-    expect(isCompetitionEventV2({ ...practiceCompleted("alice", 1_000, 12), score: -1 }))
+    expect(isCompetitionEvent({ ...practiceCompleted("alice", 1_000, 12), score: -1 }))
       .toBe(false);
     const { runtimeSessionId: _runtimeSessionId, ...leftWithoutRuntime } = left;
-    expect(isCompetitionEventV2(leftWithoutRuntime)).toBe(false);
-    expect(isCompetitionEventV2({ ...left, runtimeSessionId: "" })).toBe(false);
-    expect(isCompetitionEventV2({ ...start, configHash: "forged" })).toBe(false);
+    expect(isCompetitionEvent(leftWithoutRuntime)).toBe(false);
+    expect(isCompetitionEvent({ ...left, runtimeSessionId: "" })).toBe(false);
+    expect(isCompetitionEvent({ ...start, configHash: "forged" })).toBe(false);
     const { startedEventId: _startedEventId, ...concessionWithoutStart } = concession;
-    expect(isCompetitionEventV2(concessionWithoutStart)).toBe(false);
-    expect(isCompetitionEventV2({ ...finished(start, "seat-a", 13), result: { ...result(start.matchId, "seat-a"), extra: true } }))
+    expect(isCompetitionEvent(concessionWithoutStart)).toBe(false);
+    expect(isCompetitionEvent({ ...finished(start, "seat-a", 13), result: { ...result(start.matchId, "seat-a"), extra: true } }))
       .toBe(false);
   });
 
   it("orders open challenges oldest first regardless of replay order", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     [
       { serial: 3, payload: created("charlie", "third", 3) },
       { serial: 1, payload: created("alice", "first", 1) },
@@ -1011,7 +1011,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("resets readiness before start and rejects backdated mutations after start", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "series", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const setup = [
@@ -1069,7 +1069,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("defers a valid start until a later canonical ready event closes the realtime race", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "ready-race", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const start = started(claim.eventId, challenge.challengeId, 1, 6);
@@ -1096,7 +1096,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("retries a finish that arrives while its valid start is still deferred", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "finish-race", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const start = started(claim.eventId, challenge.challengeId, 1, 6);
@@ -1127,7 +1127,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("makes deferred start and finish events terminal when the pairing closes", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "closed-race", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const start = started(claim.eventId, challenge.challengeId, 1, 6);
@@ -1153,7 +1153,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("counts draws, excludes neutral endings, and ranks standings by wins then win rate", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     appendCompletedMatch(ledger, "draw-series", 1, "draw");
     appendCompletedMatch(ledger, "neutral-series", 20, "desync");
     appendCompletedMatch(ledger, "bob-series", 40, "seat-b");
@@ -1172,7 +1172,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("records an explicit participant concession as an opponent win", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "concession-series", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const start = started(claim.eventId, challenge.challengeId, 1, 7);
@@ -1215,7 +1215,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("retries a concession that arrives while its valid start is still deferred", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "concession-race", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const start = started(claim.eventId, challenge.challengeId, 1, 6);
@@ -1249,11 +1249,11 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("rejects a concession from an actor outside the committed pairing", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "outsider-concession", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const start = started(claim.eventId, challenge.challengeId, 1, 7);
-    const outsider: MatchConcededV2 = {
+    const outsider: MatchConceded = {
       ...conceded(start, "alice", 8),
       eventId: `${start.matchId}:conceded:charlie`,
       actor: { id: "charlie", displayName: "CHARLIE" },
@@ -1274,7 +1274,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("preserves canonical concession precedence when multiple terminals wait on a deferred start", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "terminal-race", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const start = started(claim.eventId, challenge.challengeId, 1, 6);
@@ -1302,7 +1302,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("keeps a normal first finish authoritative over a later connection-loss fallback", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const start = appendCompletedMatch(ledger, "series", 1, "seat-a");
     const connectionLossFallback = {
       ...finished(start, "desync", 9),
@@ -1329,7 +1329,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("lets a concession supersede an earlier technical fallback", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const start = appendCompletedMatch(ledger, "concession-after-fallback", 1, "desync");
     const fallback = finished(start, "desync", 8);
     const concession = conceded(start, "bob", 9);
@@ -1346,7 +1346,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("rejects a concession after a normal result is already authoritative", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const start = appendCompletedMatch(ledger, "late-concession", 1, "seat-a");
     const normal = finished(start, "seat-a", 8);
     const concession = conceded(start, "alice", 9);
@@ -1362,7 +1362,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("lets a committed simulation result supersede an earlier technical fallback", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const start = appendCompletedMatch(ledger, "series", 1, "desync");
     const fallback = finished(start, "desync", 8);
     const laterNormalFinish = finished(start, "seat-a", 9);
@@ -1387,8 +1387,8 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("converges on a normal result over a technical fallback with unrelated serials", () => {
-    const first = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
-    const second = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const first = new CompetitionLedger({ currentRulesHash: RULES_HASH });
+    const second = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "finish-authority", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const start = started(claim.eventId, challenge.challengeId, 1, 7);
@@ -1421,8 +1421,8 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("keeps canonical first authority when two normal finishes disagree", () => {
-    const first = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
-    const second = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const first = new CompetitionLedger({ currentRulesHash: RULES_HASH });
+    const second = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "normal-conflict", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const start = started(claim.eventId, challenge.challengeId, 1, 7);
@@ -1452,7 +1452,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("keeps only the latest twenty result rows while retaining all aggregates", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     for (let index = 0; index < 21; index += 1) {
       appendCompletedMatch(ledger, `series-${index}`, index * 10 + 1, "seat-a");
     }
@@ -1467,7 +1467,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("uses canonical event order for recent history presentation", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const older = appendCompletedMatch(ledger, "logical-older", 1, "seat-a");
     const newer = appendCompletedMatch(ledger, "logical-newer", 20, "seat-a");
 
@@ -1481,7 +1481,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("orders tied Practice records by the convergent application tuple", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     ledger.apply({ serial: 20, payload: practiceCompleted("alice", 1_000, 1) });
     ledger.apply({ serial: 10, payload: practiceCompleted("bob", 1_000, 2) });
 
@@ -1491,8 +1491,8 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("resolves a conflicting event id from payload bytes on every replica", () => {
-    const first = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
-    const second = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const first = new CompetitionLedger({ currentRulesHash: RULES_HASH });
+    const second = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const canonical = created("alice", "canonical", 1);
     const conflicting = {
       ...canonical,
@@ -1511,7 +1511,7 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("ignores a lexicographically later conflicting payload regardless of receipt order", () => {
-    const ledger = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const ledger = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const canonical = created("alice", "canonical", 1);
     const conflicting = {
       ...canonical,
@@ -1525,8 +1525,8 @@ describe("CompetitionLedgerV2", () => {
   });
 
   it("converges when replicas assign unrelated serial cursors", () => {
-    const first = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
-    const second = new CompetitionLedgerV2({ currentRulesHash: RULES_HASH });
+    const first = new CompetitionLedger({ currentRulesHash: RULES_HASH });
+    const second = new CompetitionLedger({ currentRulesHash: RULES_HASH });
     const challenge = created("alice", "replica-order", 1);
     const claim = claimed("bob", challenge.challengeId, challenge.vacancyId, 2);
     const start = started(claim.eventId, challenge.challengeId, 1, 7);

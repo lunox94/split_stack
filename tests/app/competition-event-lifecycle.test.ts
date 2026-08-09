@@ -13,7 +13,7 @@ import type {
   DurableWebxdcHost,
 } from "../../src/network/webxdc-durable";
 import type { StoragePort } from "../../src/persistence/settings";
-import { PendingChatFeedbackStoreV2 } from "../../src/app/pending-chat-feedback";
+import { PendingChatFeedbackStore } from "../../src/app/pending-chat-feedback";
 
 class MemoryStorage implements StoragePort {
   public readonly writes: Array<{ key: string; value: string }> = [];
@@ -426,7 +426,7 @@ describe("Competition Event Lifecycle", () => {
       matchId: "legacy-match",
       startedEventId: "legacy-start",
     };
-    new PendingChatFeedbackStoreV2(
+    new PendingChatFeedbackStore(
       storage,
       "rules-current",
       actor.id,
@@ -488,7 +488,7 @@ describe("Competition Event Lifecycle", () => {
       summary: "0 wait · 0 live",
       info: "Alice conceded · opponent wins",
     };
-    const journal = new PendingChatFeedbackStoreV2(
+    const journal = new PendingChatFeedbackStore(
       storage,
       "rules-current",
       actor.id,
@@ -521,7 +521,7 @@ describe("Competition Event Lifecycle", () => {
       feedbackStatus: "confirmed",
     }]);
     expect(host.sent).toEqual([]);
-    expect(new PendingChatFeedbackStoreV2(
+    expect(new PendingChatFeedbackStore(
       storage,
       "rules-current",
       actor.id,
@@ -559,7 +559,7 @@ describe("Competition Event Lifecycle", () => {
         topOutTick: 60,
       },
     };
-    new PendingChatFeedbackStoreV2(
+    new PendingChatFeedbackStore(
       storage,
       "rules-current",
       actor.id,

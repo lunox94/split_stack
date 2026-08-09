@@ -170,7 +170,7 @@ export interface MatchState {
   localPlayerId: PlayerId;
   players: Record<PlayerId, PlayerGameState>;
   practice: boolean;
-  result?: MatchResultV1;
+  result?: MatchResult;
 }
 
 export interface PlayerResultStats extends PlayerLiveStats {
@@ -178,7 +178,7 @@ export interface PlayerResultStats extends PlayerLiveStats {
   lines: number;
 }
 
-export interface MatchResultV1 {
+export interface MatchResult {
   schema: "split-stack/result/v1";
   matchId: string;
   seedHash: string;

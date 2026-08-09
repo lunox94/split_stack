@@ -8,7 +8,7 @@ import type {
   ReplacementMode,
   StatusState,
 } from "../domain/types";
-import { decodeGrid, type PlayerSnapshotV1 } from "../network/snapshots";
+import { decodeGrid, type PlayerSnapshot } from "../network/snapshots";
 import type {
   BoardRenderModel,
   RenderCellKind,
@@ -145,7 +145,7 @@ export function boardModelFromSimulation(
 }
 
 export function boardModelFromRemoteSnapshot(
-  snapshot: PlayerSnapshotV1,
+  snapshot: PlayerSnapshot,
   focused: boolean,
   concealed: boolean,
 ): BoardRenderModel {

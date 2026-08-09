@@ -11,7 +11,7 @@ import {
 } from "../domain/simulation";
 import type {
   LogicalAction,
-  MatchResultV1,
+  MatchResult,
   PieceDescriptor,
   PlayerGameState,
   PowerKind,
@@ -29,16 +29,12 @@ import {
 } from "../match/competitive-session";
 import { decodeEnvelope } from "../network/codec";
 import { NetworkDiagnostics } from "../network/diagnostics";
-import { RemoteSnapshotStore, type PlayerSnapshotV1 } from "../network/snapshots";
+import { RemoteSnapshotStore, type PlayerSnapshot } from "../network/snapshots";
 import { parseSnapshotProfile } from "../network/snapshot-profile";
 import { RealtimeHub } from "../network/realtime-hub";
 import {
-  type LobbyActor,
-  type MaterializedChallenge,
-} from "../network/webxdc-durable";
-import {
   AdvisoryPresenceTracker,
-  PRESENCE_SCHEMA_V2,
+  PRESENCE_SCHEMA,
   encodePresenceFrame,
 } from "../network/presence";
 import { createPowerTipTracker } from "../persistence/power-tips";
@@ -99,9 +95,10 @@ import {
   type AppRuntimeMode,
 } from "./runtime-helpers";
 import {
+  type CompetitionActor,
   type CompetitionResultView,
   type StartingPairingView,
-} from "./competition-ledger-v2";
+} from "./competition-ledger";
 import { presentCompetition } from "./competition-presenter";
 import { isRecognizedAppRouteHash, parseAppRoute } from "./routes";
 import { liveControllerRecoveryStatus } from "./live-session-recovery";
@@ -135,11 +132,21 @@ const SNAPSHOT_PROFILE = parseSnapshotProfile(
   import.meta.env.VITE_SPLIT_STACK_SNAPSHOT_HZ,
 );
 
+interface ActiveMatchParticipant {
+  readonly playerId: string;
+  readonly displayName: string;
+}
+
+interface ActiveMatchParticipants {
+  readonly seatA: ActiveMatchParticipant;
+  readonly seatB: ActiveMatchParticipant | null;
+}
+
 interface ActiveMatch {
   pairingId: string;
   seriesId: string;
   source: "challenge" | "rematch";
-  challenge: MaterializedChallenge;
+  participants: ActiveMatchParticipants;
   round: number;
   matchId: string;
   role: "a" | "b" | "spectator";
@@ -161,7 +168,7 @@ interface SpectatorRuntime {
 
 interface RemoteRenderCache {
   matchId: string;
-  snapshot: PlayerSnapshotV1;
+  snapshot: PlayerSnapshot;
   board: BoardRenderModel;
   concealed: boolean;
 }
@@ -278,7 +285,7 @@ function setDefinitionList(
   }
 }
 
-function playerStateFrom(snapshot: SimulationSnapshot | PlayerSnapshotV1): PlayerGameState | null {
+function playerStateFrom(snapshot: SimulationSnapshot | PlayerSnapshot): PlayerGameState | null {
   return "player" in snapshot ? snapshot.player : null;
 }
 
@@ -306,7 +313,7 @@ function setTimedEffectsIfChanged(
 export function updateHud(
   hud: HudElements,
   name: string,
-  snapshot: SimulationSnapshot | PlayerSnapshotV1 | undefined,
+  snapshot: SimulationSnapshot | PlayerSnapshot | undefined,
   previewOptions: PiecePreviewOptions,
 ): void {
   setTextContentIfChanged(hud.name, name);
@@ -332,21 +339,21 @@ export function updateHud(
     return;
   }
   const player = playerStateFrom(snapshot);
-  const score = player?.score ?? (snapshot as PlayerSnapshotV1).score;
+  const score = player?.score ?? (snapshot as PlayerSnapshot).score;
   const level = "level" in snapshot ? snapshot.level : 1;
-  const lines = player?.lines ?? (snapshot as PlayerSnapshotV1).lines;
-  const powerCharge = player?.powerCharge ?? (snapshot as PlayerSnapshotV1).powerCharge;
-  const upcomingPower = player?.upcomingPower ?? (snapshot as PlayerSnapshotV1).upcomingPower;
-  const statuses = player?.statuses ?? (snapshot as PlayerSnapshotV1).statuses;
+  const lines = player?.lines ?? (snapshot as PlayerSnapshot).lines;
+  const powerCharge = player?.powerCharge ?? (snapshot as PlayerSnapshot).powerCharge;
+  const upcomingPower = player?.upcomingPower ?? (snapshot as PlayerSnapshot).upcomingPower;
+  const statuses = player?.statuses ?? (snapshot as PlayerSnapshot).statuses;
   setHudScrambled(
     hud,
     statuses.some((status) => status.kind === "scramble"),
   );
   const replacementMode = player?.replacementMode ??
-    (snapshot as PlayerSnapshotV1).replacementMode;
-  const incoming = player?.incomingGarbage ?? (snapshot as PlayerSnapshotV1).incomingGarbage;
+    (snapshot as PlayerSnapshot).replacementMode;
+  const incoming = player?.incomingGarbage ?? (snapshot as PlayerSnapshot).incomingGarbage;
   const powerDeckCursor = player?.powerDeckCursor ??
-    (snapshot as PlayerSnapshotV1).powerDeckCursor;
+    (snapshot as PlayerSnapshot).powerDeckCursor;
   const currentTick = "tick" in snapshot ? snapshot.tick : snapshot.stateTick;
   setTextContentIfChanged(hud.score, String(score));
   setTextContentIfChanged(hud.level, String(level));
@@ -584,7 +591,7 @@ export async function bootstrap(): Promise<void> {
   };
 
   const host = window.webxdc;
-  const selfActor: LobbyActor = {
+  const selfActor: CompetitionActor = {
     id: host?.selfAddr ?? "local-practice",
     displayName: host?.selfName?.slice(0, 128) || STRINGS["common.playerFallback"],
   };
@@ -809,28 +816,21 @@ export async function bootstrap(): Promise<void> {
     const readOnlyRuntime = duplicateRuntime ||
       (forceSpectator && assignedRole !== "spectator");
     const role = forceSpectator || duplicateRuntime ? "spectator" : assignedRole;
-    const challenge: MaterializedChallenge = {
-      challengeId: pairing.seriesId,
-      rulesHash: RULES_HASH,
-      coordinatorPlayerId: pairing.seatA.id,
+    const participants: ActiveMatchParticipants = {
       seatA: {
         playerId: pairing.seatA.id,
         displayName: pairing.seatA.displayName,
-        occupancyEventId: `${pairing.pairingId}:seat-a`,
       },
       seatB: {
         playerId: pairing.seatB.id,
         displayName: pairing.seatB.displayName,
-        occupancyEventId: `${pairing.pairingId}:seat-b`,
       },
-      currentSeatBVacancyId: `${pairing.pairingId}:closed`,
-      closed: false,
     };
     return {
       pairingId: pairing.pairingId,
       seriesId: pairing.seriesId,
       source: pairing.source,
-      challenge,
+      participants,
       round: pairing.round,
       matchId: pairing.matchId,
       role,
@@ -849,7 +849,7 @@ export async function bootstrap(): Promise<void> {
   const publishCommittedStartWhenReady = (): void => {
     const pending = pendingCommittedStart;
     if (pending === null || announcedConfigHash !== null) return;
-    const seatB = pending.match.challenge.seatB;
+    const seatB = pending.match.participants.seatB;
     if (seatB === null) return;
     announcedConfigHash = pending.configHash;
     try {
@@ -954,7 +954,7 @@ export async function bootstrap(): Promise<void> {
   };
 
   const renderCompetitiveResultSummary = (
-    result: MatchResultV1,
+    result: MatchResult,
     resultContext: CompetitionResultView | null,
   ): void => {
     const seatA = result.players[0];
@@ -987,7 +987,7 @@ export async function bootstrap(): Promise<void> {
   };
 
   const showResult = (
-    result: MatchResultV1,
+    result: MatchResult,
     localPlayerId: string | null,
     resultContext?: CompetitionResultView,
   ): void => {
@@ -1218,7 +1218,7 @@ export async function bootstrap(): Promise<void> {
     shell.left.pane.setAttribute("aria-disabled", String(!enabled));
   };
 
-  const restoreCompletedMatch = (match: ActiveMatch, result: MatchResultV1): void => {
+  const restoreCompletedMatch = (match: ActiveMatch, result: MatchResult): void => {
     stopCompetitivePump();
     competitive?.disconnect("session-teardown");
     competitive = null;
@@ -1278,16 +1278,16 @@ export async function bootstrap(): Promise<void> {
   };
 
   const spectatorRuntime = (match: ActiveMatch): SpectatorRuntime | null => {
-    const seatB = match.challenge.seatB;
+    const seatB = match.participants.seatB;
     if (seatB === null) return null;
     const hub = ensureRealtimeHub();
     if (hub === null) return null;
     const channel = hub.transport();
     const snapshots = new RemoteSnapshotStore();
     let lastSnapshotAtMs: number | null = null;
-    snapshots.bind(match.challenge.seatA.playerId, match.seatASessionId);
+    snapshots.bind(match.participants.seatA.playerId, match.seatASessionId);
     snapshots.bind(seatB.playerId, match.seatBSessionId);
-    const allowed = new Set([match.challenge.seatA.playerId, seatB.playerId]);
+    const allowed = new Set([match.participants.seatA.playerId, seatB.playerId]);
     try {
       channel.setListener((bytes) => {
         const decoded = decodeEnvelope(bytes, {
@@ -1349,7 +1349,7 @@ export async function bootstrap(): Promise<void> {
 
   const publishMatchResult = (
     match: ActiveMatch,
-    result: MatchResultV1,
+    result: MatchResult,
   ): void => {
     const view = competitionView();
     if (
@@ -1753,7 +1753,7 @@ export async function bootstrap(): Promise<void> {
     if (match.role === "spectator") {
       mode = "spectator";
       shell.right.pane.setAttribute("aria-disabled", "true");
-      audio.startMusic(match.challenge.challengeId, match.round - 1);
+      audio.startMusic(match.seriesId, match.round - 1);
       currentMusicMatchId = match.matchId;
       spectator = spectatorRuntime(match);
       if (spectator === null) {
@@ -1776,7 +1776,7 @@ export async function bootstrap(): Promise<void> {
       return;
     }
 
-    const seatB = match.challenge.seatB;
+    const seatB = match.participants.seatB;
     shell.right.pane.removeAttribute("aria-disabled");
     if (seatB === null) {
       shell.overlay.hidden = false;
@@ -1793,8 +1793,8 @@ export async function bootstrap(): Promise<void> {
     const channel = hub.transport();
     shell.left.pane.classList.add("is-local");
     shell.right.pane.classList.add("is-remote");
-    const local = match.role === "a" ? match.challenge.seatA : seatB;
-    const peer = match.role === "a" ? seatB : match.challenge.seatA;
+    const local = match.role === "a" ? match.participants.seatA : seatB;
+    const peer = match.role === "a" ? seatB : match.participants.seatA;
     try {
       competitive = new CompetitiveSession({
         matchId: match.matchId,
@@ -1829,7 +1829,7 @@ export async function bootstrap(): Promise<void> {
           if (
             view?.configHash === undefined ||
             view.seed === undefined ||
-            match.challenge.seatB === null
+            match.participants.seatB === null
           ) {
             return;
           }
@@ -1844,7 +1844,7 @@ export async function bootstrap(): Promise<void> {
           const view = competitive?.view();
           if (phase === "countdown" || phase === "playing") {
             if (currentMusicMatchId !== match.matchId) {
-              audio.startMusic(match.challenge.challengeId, match.round - 1);
+              audio.startMusic(match.seriesId, match.round - 1);
               currentMusicMatchId = match.matchId;
             } else {
               audio.resumeMusic();
@@ -2439,7 +2439,7 @@ export async function bootstrap(): Promise<void> {
     const hub = ensureRealtimeHub();
     if (challenge === undefined || hub === null) return;
     const frame = {
-      schema: PRESENCE_SCHEMA_V2,
+      schema: PRESENCE_SCHEMA,
       actor: { ...selfActor },
       challengeId: challenge.challengeId,
       runtimeId,
@@ -2477,14 +2477,14 @@ export async function bootstrap(): Promise<void> {
       } catch {
         // A superseded runtime remains read-only and cannot publish readiness.
       }
-      const seatB = activeMatch.challenge.seatB;
+      const seatB = activeMatch.participants.seatB;
       shell.setReadiness(view.localReady, view.peerReady, {
         localName: activeMatch.role === "a"
-          ? activeMatch.challenge.seatA.displayName
+          ? activeMatch.participants.seatA.displayName
           : seatB?.displayName ?? selfActor.displayName,
         opponentName: activeMatch.role === "a"
           ? seatB?.displayName ?? STRINGS["common.playerFallback"]
-          : activeMatch.challenge.seatA.displayName,
+          : activeMatch.participants.seatA.displayName,
       });
     }
   });
@@ -2504,14 +2504,14 @@ export async function bootstrap(): Promise<void> {
       } catch {
         // A superseded runtime remains read-only and cannot publish readiness.
       }
-      const seatB = activeMatch.challenge.seatB;
+      const seatB = activeMatch.participants.seatB;
       shell.setReadiness(view.localReady, view.peerReady, {
         localName: activeMatch.role === "a"
-          ? activeMatch.challenge.seatA.displayName
+          ? activeMatch.participants.seatA.displayName
           : seatB?.displayName ?? selfActor.displayName,
         opponentName: activeMatch.role === "a"
           ? seatB?.displayName ?? STRINGS["common.playerFallback"]
-          : activeMatch.challenge.seatA.displayName,
+          : activeMatch.participants.seatA.displayName,
       });
     }
   });
@@ -2824,11 +2824,11 @@ export async function bootstrap(): Promise<void> {
       } else {
         lastCountdownSecond = 0;
       }
-      const seatB = activeMatch.challenge.seatB;
-      const localName = activeMatch.role === "a" ? activeMatch.challenge.seatA.displayName : seatB?.displayName ?? selfActor.displayName;
+      const seatB = activeMatch.participants.seatB;
+      const localName = activeMatch.role === "a" ? activeMatch.participants.seatA.displayName : seatB?.displayName ?? selfActor.displayName;
       const peerName = activeMatch.role === "a"
         ? seatB?.displayName ?? STRINGS["common.playerFallback"]
-        : activeMatch.challenge.seatA.displayName;
+        : activeMatch.participants.seatA.displayName;
       if (view.local !== undefined) leftBoard = boardModelFromSimulation(view.local, true, false);
       const remoteConcealed = remote?.concealed ?? false;
       rightBoard = remote?.board ?? null;
@@ -2850,12 +2850,12 @@ export async function bootstrap(): Promise<void> {
       if (view.result !== undefined) showResult(view.result, selfActor.id);
     } else if (mode === "spectator" && spectator !== null && activeMatch !== null) {
       stopGlitchPreview();
-      const seatB = activeMatch.challenge.seatB;
+      const seatB = activeMatch.participants.seatB;
       const previousLeft = spectatorLeftCache?.matchId === activeMatch.matchId
         ? spectatorLeftCache
         : null;
       const nextLeft = spectator.snapshots.latestAfter(
-        activeMatch.challenge.seatA.playerId,
+        activeMatch.participants.seatA.playerId,
         previousLeft?.snapshot.snapshotSeq,
       );
       if (nextLeft !== undefined) {
@@ -2910,7 +2910,7 @@ export async function bootstrap(): Promise<void> {
       rightBoard = right?.board ?? null;
       updateHud(
         shell.left,
-        activeMatch.challenge.seatA.displayName,
+        activeMatch.participants.seatA.displayName,
         left?.snapshot,
         previewOptions(now),
       );

@@ -1,10 +1,10 @@
 import type {
-  MatchResultV1,
+  MatchResult,
   PlayerId,
   PlayerResultStats,
   Tick,
 } from "../domain/types";
-import type { PlayerSnapshotV1 } from "./snapshots";
+import type { PlayerSnapshot } from "./snapshots";
 
 export type SessionId = string;
 
@@ -46,7 +46,7 @@ export interface MatchConfigPayload extends CriticalPayload {
 export interface ResumeStatePayload extends CriticalPayload {
   pauseEpoch: number;
   configHash: string;
-  snapshot: PlayerSnapshotV1;
+  snapshot: PlayerSnapshot;
   inboundCritical: StreamCursor[];
 }
 
@@ -162,7 +162,7 @@ export interface RealtimePayloadMap {
     echoProbeSeq?: number;
     inboundCritical: StreamCursor[];
   };
-  SNAPSHOT: PlayerSnapshotV1;
+  SNAPSHOT: PlayerSnapshot;
   MATCH_CONFIG: MatchConfigPayload;
   START: CriticalPayload & {
     epoch: number;
@@ -197,7 +197,7 @@ export interface RealtimePayloadMap {
   FORFEIT: CriticalPayload & {
     forfeitingPlayerId: PlayerId;
     resultHash: string;
-    result: MatchResultV1;
+    result: MatchResult;
   };
   NETWORK_PAUSE: CriticalPayload & {
     pauseEpoch: number;
@@ -207,7 +207,7 @@ export interface RealtimePayloadMap {
   RESUME_STATE: ResumeStatePayload;
   RESULT_CONFIRM: CriticalPayload & {
     resultHash: string;
-    result: MatchResultV1;
+    result: MatchResult;
   };
 }
 
