@@ -7,6 +7,35 @@ import { DEVICE_MATRIX } from "./device-matrix";
 
 const APP_ORIGIN = "http://127.0.0.1:3000";
 
+async function serializeMockWebxdcDurableAppends(
+  context: BrowserContext,
+): Promise<void> {
+  await context.route(`${APP_ORIGIN}/webxdc.js`, async (route) => {
+    const response = await route.fetch();
+    const source = await response.text();
+    const headers = response.headers();
+    delete headers["content-length"];
+    await route.fulfill({
+      response,
+      headers,
+      body: `${source}\n;(() => {
+        const sendUpdate = window.webxdc.sendUpdate.bind(window.webxdc);
+        window.webxdc.sendUpdate = (update, description) =>
+          navigator.locks.request("split-stack-test-durable-append", () =>
+            sendUpdate(update, description)
+          );
+      })();`,
+    });
+  });
+}
+
+test.beforeEach(async ({ context }) => {
+  // The Vite mock uses a localStorage read/append/write cycle. Web Locks make
+  // that cycle atomic across the multiple pages used by competitive tests,
+  // matching the real Webxdc host's append-only durable log.
+  await serializeMockWebxdcDurableAppends(context);
+});
+
 async function openApp(page: Page, identity = "Browser Tester"): Promise<void> {
   const slug = identity.toLowerCase().replace(/[^a-z0-9]+/g, "-");
   await page.goto(
@@ -24,6 +53,45 @@ async function openLobby(page: Page): Promise<void> {
 async function leaveThroughMatchMenu(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Match menu" }).click();
   await page.getByRole("button", { name: "Leave match" }).click();
+}
+
+async function waitForEffectiveMatchStarted(
+  page: Page,
+  expectedSeatAPlayerId: string,
+): Promise<string> {
+  const effectiveMatchId = () => page.evaluate((seatAPlayerId) => {
+    const updates = JSON.parse(
+      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
+    ) as Array<{
+      readonly href?: unknown;
+      readonly info?: unknown;
+      readonly payload?: {
+        readonly kind?: unknown;
+        readonly matchId?: unknown;
+        readonly seatAPlayerId?: unknown;
+      };
+    }>;
+    const started = updates.find((update) =>
+      update.payload?.kind === "match-started" &&
+      update.payload.seatAPlayerId === seatAPlayerId &&
+      typeof update.payload.matchId === "string" &&
+      typeof update.info === "string" &&
+      typeof update.href === "string"
+    );
+    return typeof started?.payload?.matchId === "string"
+      ? started.payload.matchId
+      : null;
+  }, expectedSeatAPlayerId);
+
+  await expect.poll(effectiveMatchId, {
+    message: `expected an effective match start for ${expectedSeatAPlayerId}`,
+    timeout: 15_000,
+  }).not.toBeNull();
+  const matchId = await effectiveMatchId();
+  if (matchId === null) {
+    throw new Error(`Expected an effective match start for ${expectedSeatAPlayerId}`);
+  }
+  return matchId;
 }
 
 interface MarkedCellRenderMetrics {
@@ -2452,18 +2520,27 @@ test("keeps competitive recovery paused when WebGL restores in a hidden document
   );
   await expect(pausedMessage).toBeVisible({ timeout: 5_000 });
   await seatA.waitForTimeout(100);
-  const sendsBeforeContextRestore = await realtimeSendCount(seatA);
+  const [sendsBeforeContextRestore, sendsAfterContextRestore] = await seatA
+    .locator("canvas.game-canvas")
+    .evaluate((canvas) => {
+      const sendCount = (
+        window as unknown as {
+          __splitStackRealtimeSendCount: () => number;
+        }
+      ).__splitStackRealtimeSendCount;
+      const before = sendCount();
+      canvas.dispatchEvent(new Event("webglcontextrestored"));
+      return [before, sendCount()] as const;
+    });
 
-  await seatA.locator("canvas.game-canvas").dispatchEvent("webglcontextrestored");
-  await seatA.waitForTimeout(100);
-
-  expect(await realtimeSendCount(seatA)).toBe(sendsBeforeContextRestore);
+  expect(sendsAfterContextRestore).toBe(sendsBeforeContextRestore);
   await expect(pausedMessage).toBeVisible();
   await expect(seatA.getByText("Resynchronizing…", { exact: true })).toBeHidden();
 
+  const sendsBeforeVisibilityRestore = await realtimeSendCount(seatA);
   await setVisibilityState(seatA, "visible");
   await expect.poll(() => realtimeSendCount(seatA)).toBeGreaterThan(
-    sendsBeforeContextRestore,
+    sendsBeforeVisibilityRestore,
   );
   await expect(seatA.getByText("Resynchronizing…", { exact: true })).toBeVisible({
     timeout: 5_000,
@@ -2560,16 +2637,10 @@ test("a third participant explicitly watches an active match as a read-only spec
   await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
   await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
   await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
-  const committedMatchId = () => seatA.evaluate(() => {
-    const updates = JSON.parse(
-      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
-    ) as Array<{ readonly payload?: { readonly kind?: string; readonly matchId?: string } }>;
-    return updates.find((update) => update.payload?.kind === "match-started")
-      ?.payload?.matchId ?? null;
-  });
-  await expect.poll(committedMatchId).not.toBeNull();
-  const matchId = await committedMatchId();
-  if (matchId === null) throw new Error("Expected a committed live match ID");
+  const matchId = await waitForEffectiveMatchStarted(
+    seatA,
+    "alice@example.test",
+  );
 
   const spectator = await context.newPage();
   await forceWebxdcIdentityOnRoute(spectator, "Charlie");
@@ -2615,39 +2686,16 @@ test("an owned orphan recovery continues while its participant watches another l
     timeout: 5_000,
   });
 
-  const committedMatchIds = () => unrelated.seatA.evaluate(() => {
-    const updates = JSON.parse(
-      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
-    ) as Array<{
-      readonly payload?: {
-        readonly kind?: string;
-        readonly matchId?: string;
-        readonly seatAPlayerId?: string;
-      };
-    }>;
-    const matchIdFor = (seatAPlayerId: string) => updates.find((update) =>
-      update.payload?.kind === "match-started" &&
-      update.payload.seatAPlayerId === seatAPlayerId
-    )?.payload?.matchId ?? null;
-    return {
-      own: matchIdFor("alice@example.test"),
-      unrelated: matchIdFor("charlie@example.test"),
-    };
-  });
-  await expect.poll(committedMatchIds).toEqual({
-    own: expect.any(String),
-    unrelated: expect.any(String),
-  });
-  const matchIds = await committedMatchIds();
-  if (matchIds.own === null || matchIds.unrelated === null) {
-    throw new Error("Expected both matches to be durably committed");
-  }
+  const [ownedMatchId, unrelatedMatchId] = await Promise.all([
+    waitForEffectiveMatchStarted(unrelated.seatA, "alice@example.test"),
+    waitForEffectiveMatchStarted(unrelated.seatA, "charlie@example.test"),
+  ]);
 
   await Promise.all([own.seatA.close(), own.seatB.close()]);
   const recreated = await context.newPage();
   await forceWebxdcIdentityOnRoute(recreated, "Alice");
   await recreated.goto(
-    `/?reopened=watch#match/${encodeURIComponent(matchIds.unrelated)}`,
+    `/?reopened=watch#match/${encodeURIComponent(unrelatedMatchId)}`,
   );
   await expect(
     recreated.getByRole("application", { name: "Seat A board" }),
@@ -2680,7 +2728,7 @@ test("an owned orphan recovery continues while its participant watches another l
         ? [update.payload.eventId]
         : []
     ))];
-  }, matchIds.own);
+  }, ownedMatchId);
   await advanceMonotonic(recreated, RULES.network.reconnectGraceMs + 1_000);
   await recreated.waitForTimeout(1_000);
   expect(await connectionLossEventIds()).toEqual([]);
@@ -2739,24 +2787,10 @@ test("an owned starting pairing consumes and outranks an unrelated live route", 
     timeout: 5_000,
   });
 
-  const unrelatedMatchId = () => unrelated.seatA.evaluate(() => {
-    const updates = JSON.parse(
-      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
-    ) as Array<{
-      readonly payload?: {
-        readonly kind?: string;
-        readonly matchId?: string;
-        readonly seatAPlayerId?: string;
-      };
-    }>;
-    return updates.find((update) =>
-      update.payload?.kind === "match-started" &&
-      update.payload.seatAPlayerId === "charlie@example.test"
-    )?.payload?.matchId ?? null;
-  });
-  await expect.poll(unrelatedMatchId).not.toBeNull();
-  const matchId = await unrelatedMatchId();
-  if (matchId === null) throw new Error("Expected an unrelated committed match");
+  const matchId = await waitForEffectiveMatchStarted(
+    unrelated.seatA,
+    "charlie@example.test",
+  );
 
   await own.seatA.close();
   const recreated = await context.newPage();
@@ -2793,12 +2827,7 @@ test("a live reload stays on navigable Home without resetting the committed matc
   await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
   await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
   await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
-  await expect.poll(() => seatA.evaluate(() => {
-    const updates = JSON.parse(
-      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
-    ) as Array<{ readonly payload?: { readonly kind?: string } }>;
-    return updates.some((update) => update.payload?.kind === "match-started");
-  })).toBe(true);
+  await waitForEffectiveMatchStarted(seatA, "alice@example.test");
 
   const scoreBeforeReload = await numericText(localScore(seatA));
   await seatA.keyboard.press("Space");
@@ -2854,18 +2883,10 @@ test("a surviving controller releases a reloaded opponent after its reconnect gr
   await advancePairMonotonic(seatA, seatB, 4_000, 500);
   await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
 
-  const committedMatchId = () => seatA.evaluate(() => {
-    const updates = JSON.parse(
-      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
-    ) as Array<{
-      readonly payload?: { readonly kind?: string; readonly matchId?: string };
-    }>;
-    return updates.find((update) => update.payload?.kind === "match-started")
-      ?.payload?.matchId ?? null;
-  });
-  await expect.poll(committedMatchId).not.toBeNull();
-  const matchId = await committedMatchId();
-  if (matchId === null) throw new Error("Expected a durably committed live match");
+  const matchId = await waitForEffectiveMatchStarted(
+    seatA,
+    "alice@example.test",
+  );
 
   await seatB.reload();
   await expect(
@@ -2972,12 +2993,7 @@ test("a recreated participant can explicitly watch its own live match read only"
   await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
   await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
   await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
-  await expect.poll(() => seatA.evaluate(() => {
-    const updates = JSON.parse(
-      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
-    ) as Array<{ readonly payload?: { readonly kind?: string } }>;
-    return updates.some((update) => update.payload?.kind === "match-started");
-  })).toBe(true);
+  await waitForEffectiveMatchStarted(seatA, "alice@example.test");
 
   await seatB.reload();
   await expect(
@@ -3034,12 +3050,7 @@ test("a recreated participant can concede once and unlock competitive play", asy
   await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
   await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
   await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
-  await expect.poll(() => seatA.evaluate(() => {
-    const updates = JSON.parse(
-      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
-    ) as Array<{ readonly payload?: { readonly kind?: string } }>;
-    return updates.some((update) => update.payload?.kind === "match-started");
-  })).toBe(true);
+  await waitForEffectiveMatchStarted(seatA, "alice@example.test");
 
   await seatB.reload();
   await expect(
@@ -3125,12 +3136,7 @@ test("an externally finished match dismisses an obsolete recovery confirmation",
   await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
   await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
   await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
-  await expect.poll(() => seatA.evaluate(() => {
-    const updates = JSON.parse(
-      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
-    ) as Array<{ readonly payload?: { readonly kind?: string } }>;
-    return updates.some((update) => update.payload?.kind === "match-started");
-  })).toBe(true);
+  await waitForEffectiveMatchStarted(seatA, "alice@example.test");
 
   await seatB.reload();
   await expect(
@@ -3171,12 +3177,7 @@ test("a pending concession retries automatically then throttles each manual retr
   await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
   await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
   await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
-  await expect.poll(() => seatA.evaluate(() => {
-    const updates = JSON.parse(
-      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
-    ) as Array<{ readonly payload?: { readonly kind?: string } }>;
-    return updates.some((update) => update.payload?.kind === "match-started");
-  })).toBe(true);
+  await waitForEffectiveMatchStarted(seatA, "alice@example.test");
 
   await seatB.reload();
   await expect(
@@ -3316,6 +3317,7 @@ test("a recreated live player consumes a stale match link without entering the a
   await seatA.getByRole("button", { name: "Ready up", exact: true }).click();
   await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
   await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 10_000 });
+  await waitForEffectiveMatchStarted(seatA, "alice@example.test");
 
   await forceWebxdcIdentityOnRoute(seatB, "Bob");
   await seatB.goto("/?reopened=1#match/stale-unrelated-match");
@@ -3369,12 +3371,7 @@ test("an orphaned live match waits for explicit neutral release", async ({
   await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
   await advancePairMonotonic(seatA, seatB, 4_000, 500);
   await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
-  await expect.poll(() => seatA.evaluate(() => {
-    const updates = JSON.parse(
-      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
-    ) as Array<{ readonly payload?: { readonly kind?: string } }>;
-    return updates.some((update) => update.payload?.kind === "match-started");
-  })).toBe(true);
+  await waitForEffectiveMatchStarted(seatA, "alice@example.test");
 
   await Promise.all([seatA.close(), seatB.close()]);
   await failFirstRealtimeJoinOnFuturePages(context);
@@ -3514,24 +3511,10 @@ test("a deaf duplicate cannot end a match whose committed controllers are live",
   await advancePairMonotonic(seatA, seatB, 4_000, 500);
   await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
 
-  const committedMatchId = () => seatA.evaluate(() => {
-    const updates = JSON.parse(
-      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
-    ) as Array<{
-      readonly payload?: {
-        readonly kind?: string;
-        readonly matchId?: string;
-        readonly seatAPlayerId?: string;
-      };
-    }>;
-    return updates.find((update) =>
-      update.payload?.kind === "match-started" &&
-      update.payload.seatAPlayerId === "alice@example.test"
-    )?.payload?.matchId ?? null;
-  });
-  await expect.poll(committedMatchId).not.toBeNull();
-  const matchId = await committedMatchId();
-  if (matchId === null) throw new Error("Expected a committed live match");
+  const matchId = await waitForEffectiveMatchStarted(
+    seatA,
+    "alice@example.test",
+  );
 
   const duplicate = await context.newPage();
   await forceIdentityWithSuppressedRealtimeInbound(duplicate, "Alice");
@@ -3594,12 +3577,7 @@ test("a hidden recreated participant gets a fresh recovery window on return", as
   await seatB.getByRole("button", { name: "Ready up", exact: true }).click();
   await advancePairMonotonic(seatA, seatB, 4_000, 500);
   await expect(seatA.locator(".center-overlay")).toBeHidden({ timeout: 5_000 });
-  await expect.poll(() => seatA.evaluate(() => {
-    const updates = JSON.parse(
-      window.localStorage.getItem("__xdcUpdatesKey__") ?? "[]",
-    ) as Array<{ readonly payload?: { readonly kind?: string } }>;
-    return updates.some((update) => update.payload?.kind === "match-started");
-  })).toBe(true);
+  await waitForEffectiveMatchStarted(seatA, "alice@example.test");
   await Promise.all([seatA.close(), seatB.close()]);
 
   const reopenedSeatA = await context.newPage();

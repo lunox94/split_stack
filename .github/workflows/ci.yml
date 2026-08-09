@@ -40,3 +40,10 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser -- --workers=1
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: split-stack-playwright-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results
+          retention-days: 3
+          if-no-files-found: ignore

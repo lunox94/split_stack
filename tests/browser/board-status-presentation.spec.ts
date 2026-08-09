@@ -34,16 +34,23 @@ test("keeps Special Pieces readable and cycling without narrow-screen overflow",
     ? { width: 72, height: 64, gridWidth: 60 }
     : { width: 88, height: 72, gridWidth: 68 };
   for (const illustration of await illustrations.all()) {
-    const [sampleBounds, gridBounds] = await Promise.all([
-      illustration.boundingBox(),
-      illustration.locator(".piece-preview-grid").boundingBox(),
-    ]);
-    if (sampleBounds === null || gridBounds === null) {
+    const bounds = await illustration.evaluate((sample) => {
+      const grid = sample.querySelector(".piece-preview-grid");
+      if (!(grid instanceof HTMLElement)) return null;
+      const sampleBounds = sample.getBoundingClientRect();
+      const gridBounds = grid.getBoundingClientRect();
+      return {
+        gridWidth: gridBounds.width,
+        sampleHeight: sampleBounds.height,
+        sampleWidth: sampleBounds.width,
+      };
+    });
+    if (bounds === null) {
       throw new Error("Expected a visible Special Piece illustration");
     }
-    expect(sampleBounds.width).toBeCloseTo(expectedIllustration.width, 0);
-    expect(sampleBounds.height).toBeCloseTo(expectedIllustration.height, 0);
-    expect(gridBounds.width).toBeCloseTo(expectedIllustration.gridWidth, 0);
+    expect(bounds.sampleWidth).toBeCloseTo(expectedIllustration.width, 0);
+    expect(bounds.sampleHeight).toBeCloseTo(expectedIllustration.height, 0);
+    expect(bounds.gridWidth).toBeCloseTo(expectedIllustration.gridWidth, 0);
   }
 
   const glitch = page.locator(

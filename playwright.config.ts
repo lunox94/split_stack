@@ -11,8 +11,8 @@ const deviceMatrix = new RegExp(`${DEVICE_MATRIX_TAG}\\b`);
 export default defineConfig({
   testDir: "./tests/browser",
   // Multi-page Webxdc cases share an origin-scoped localStorage transport.
-  // Keep tests within each file sequential so concurrent read/append cycles
-  // cannot overwrite the browser stub's update log.
+  // Keep tests within each file sequential; app.spec additionally serializes
+  // same-test page appends so the browser stub models one durable log.
   fullyParallel: false,
   reporter: "list",
   use: {
