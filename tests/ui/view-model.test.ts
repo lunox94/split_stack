@@ -60,6 +60,25 @@ describe("board view projection", () => {
     expect(kindsFor("ghost")).toEqual(["I", "T", "J", "S", "Z", "L", "O", "cross"]);
   });
 
+  it("projects active Acid projectiles as acid cells without relaxing board persistence", () => {
+    const snapshot = createSimulation({
+      seed: "00112233445566778899aabbccddeeff",
+      playerId: "a",
+      practice: true,
+    }).readSnapshot();
+    if (snapshot.player.active === null) throw new Error("Expected an active piece");
+    snapshot.player.active.descriptor = { source: "acid", shape: "acid" };
+
+    const cells = boardModelFromSimulation(snapshot, true, false).cells;
+
+    expect(cells.filter((cell) => cell.role === "active")).toMatchObject([
+      { kind: "acid" },
+    ]);
+    expect(cells.filter((cell) => cell.role === "ghost")).toMatchObject([
+      { kind: "acid" },
+    ]);
+  });
+
   it("projects no board cells when Blackout conceals a remote owner", () => {
     const snapshot = createSimulation({
       seed: "00112233445566778899aabbccddeeff",

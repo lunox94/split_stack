@@ -104,8 +104,6 @@ export class PresentationRouter {
           });
         } else if (effect.power === "monomino-rush") {
           this.#schedule({ id, kind: "monomino-rush", board });
-        } else if (effect.power === "acid-rain") {
-          this.#schedule({ id, kind: "acid-rain", board });
         } else if (effect.power === "collapse") {
           this.#schedule({
             id,

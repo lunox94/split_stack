@@ -17,7 +17,7 @@ import type {
 import type { SimulationSnapshot } from "../domain/simulation";
 
 function descriptorKind(descriptor: PieceDescriptor, index: number): RenderCellKind {
-  return getPieceCellKind(descriptor, index);
+  return descriptor.source === "acid" ? "acid" : getPieceCellKind(descriptor, index);
 }
 
 function activePieceKey(

@@ -83,7 +83,6 @@ describe("PresentationRouter", () => {
       "line-clear",
       "offensive-transfer",
       "nuke",
-      "acid-rain",
       "collapse",
       "acid-dissolve",
       "collapse",
@@ -98,22 +97,22 @@ describe("PresentationRouter", () => {
     expect(scheduler.cues[2]).toMatchObject({
       center: { column: 4, row: 18 },
     });
-    expect(scheduler.cues[3]).toMatchObject({
+    expect(scheduler.cues).not.toContainEqual(expect.objectContaining({
       id: "acid-power-1",
       kind: "acid-rain",
-    });
-    expect(scheduler.cues[4]).toMatchObject({
+    }));
+    expect(scheduler.cues[3]).toMatchObject({
       id: "collapse-1",
       movements: [],
     });
-    expect(scheduler.cues[5]).toMatchObject({
+    expect(scheduler.cues[4]).toMatchObject({
       column: 6,
       occupiedRows: [7, 15],
     });
-    expect(scheduler.cues[6]).toMatchObject({
+    expect(scheduler.cues[5]).toMatchObject({
       movements: [{ from: { x: 8, y: 17 }, to: { x: 8, y: 21 } }],
     });
-    expect(scheduler.cues[7]).toMatchObject({
+    expect(scheduler.cues[6]).toMatchObject({
       triggers: [
         { special: "column-bomb", row: 20, column: 4 },
         { special: "garbage-core", row: 21, column: 2 },
