@@ -3,6 +3,7 @@ import type {
   PlayerId,
   PlayerResultStats,
   Tick,
+  HollowCrossVariant,
 } from "../domain/types";
 import type { PlayerSnapshot } from "./snapshots";
 
@@ -181,7 +182,10 @@ export interface RealtimePayloadMap {
     targetPlayerId: PlayerId;
     rows: number;
   };
-  HOLLOW_CROSS: CriticalPayload & { targetPlayerId: PlayerId };
+  HOLLOW_CROSS: CriticalPayload & {
+    targetPlayerId: PlayerId;
+    crossVariant: HollowCrossVariant;
+  };
   GLITCH_PIECE: CriticalPayload & { targetPlayerId: PlayerId };
   OVERSIZE_PIECE: CriticalPayload & { targetPlayerId: PlayerId };
   SCRAMBLE_START: CriticalPayload & { targetPlayerId: PlayerId };

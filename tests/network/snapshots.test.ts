@@ -223,6 +223,43 @@ describe("remote snapshot replacement", () => {
     expect(store.accept(malformed)).toBe(false);
   });
 
+  it("preserves Cross variants through active, hold, preview, and forced queues", () => {
+    const store = new RemoteSnapshotStore();
+    store.bind("player-a", "session-a");
+    const value = envelope(1, 6);
+    value.payload.active = {
+      descriptor: { source: "cross", shape: "cross", crossVariant: "small" },
+      x: 3,
+      y: 0,
+      rotation: 0,
+      lockTicksRemaining: 30,
+      lockResetCount: 0,
+    } as never;
+    value.payload.hold = { source: "cross", shape: "cross", crossVariant: "large" };
+    value.payload.nextFive = [
+      { source: "cross", shape: "cross", crossVariant: "small" },
+    ];
+    value.payload.forcedQueue = [
+      { source: "cross", shape: "cross", crossVariant: "large", eventId: "cross-1" },
+    ];
+
+    expect(store.accept(value)).toBe(true);
+    const accepted = store.latest("player-a")!;
+    expect(accepted.active?.descriptor).toMatchObject({ crossVariant: "small" });
+    expect(accepted.hold).toMatchObject({ crossVariant: "large" });
+    expect(accepted.nextFive[0]).toMatchObject({ crossVariant: "small" });
+    expect(accepted.forcedQueue[0]).toMatchObject({ crossVariant: "large" });
+
+    for (const descriptor of [
+      { source: "cross", shape: "cross" },
+      { source: "base", shape: "T", crossVariant: "small" },
+    ]) {
+      const malformed = envelope(2, 12);
+      malformed.payload.nextFive = [descriptor as never];
+      expect(store.accept(malformed)).toBe(false);
+    }
+  });
+
   it("accepts bounded meter overflow retained by rules version two", () => {
     const store = new RemoteSnapshotStore();
     store.bind("player-a", "session-a");
@@ -240,6 +277,10 @@ describe("compact snapshot grids", () => {
       new Array(10).fill(null) as Grid[number],
     );
     grid[21]![0] = { kind: "garbage" };
+    grid[21]![1] = { kind: "small-cross" };
+    for (const [column, kind] of ["I", "T", "J", "S", "Z", "L", "O", "cross"].entries()) {
+      grid[17]![column] = { kind } as Grid[number][number];
+    }
     grid[20]![4] = { kind: "T", special: "glitch-core" };
     grid[19]![3] = { kind: "J", special: "blackout" } as never;
     grid[18]![2] = { kind: "L", special: "barrier" } as never;
@@ -252,6 +293,10 @@ describe("compact snapshot grids", () => {
       special: "glitch-core",
     });
     expect(decodeGrid(encoded)[21]![0]).toEqual({ kind: "garbage" });
+    expect(decodeGrid(encoded)[21]![1]).toEqual({ kind: "small-cross" });
+    expect(decodeGrid(encoded)[17]!.slice(0, 8)).toEqual(
+      ["I", "T", "J", "S", "Z", "L", "O", "cross"].map((kind) => ({ kind })),
+    );
     expect(decodeGrid(encoded)[19]![3]).toEqual({ kind: "J", special: "blackout" });
     expect(decodeGrid(encoded)[18]![2]).toEqual({ kind: "L", special: "barrier" });
   });

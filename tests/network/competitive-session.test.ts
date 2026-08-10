@@ -1624,7 +1624,11 @@ describe("CompetitiveSession", () => {
       ...base,
       kind: "HOLLOW_CROSS",
       seq: 4,
-      payload: { eventId: "b:cross:1", targetPlayerId: "player-a" },
+      payload: {
+        eventId: "b:cross:1",
+        targetPlayerId: "player-a",
+        crossVariant: "small",
+      },
     });
     sendFromB({
       ...base,
@@ -1659,6 +1663,11 @@ describe("CompetitiveSession", () => {
     });
     expect(local?.player.forcedQueue).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({
+          source: "cross",
+          eventId: "b:cross:1",
+          crossVariant: "small",
+        }),
         expect.objectContaining({ source: "oversize", eventId: "b:oversize:1" }),
       ]),
     );
@@ -1673,6 +1682,56 @@ describe("CompetitiveSession", () => {
       ["oversize", "b:oversize:1"],
       ["ghost-jam", "b:ghost-jam:1"],
     ]);
+  });
+
+  it("converges mixed Cross variants after recovery and notifies overflow attacks", () => {
+    const onIncomingAttack = vi.fn();
+    const onIncomingGarbage = vi.fn();
+    const pair = createPair({
+      onAIncomingAttack: onIncomingAttack,
+      onAIncomingGarbage: onIncomingGarbage,
+    });
+    ready(pair);
+    advanceBoth(pair, 3_000);
+    pair.a.setHidden(true);
+
+    for (const [seq, eventId, crossVariant] of [
+      [2, "b:cross:large", "large"],
+      [3, "b:cross:small", "small"],
+    ] as const) {
+      pair.bEndpoint.send(encodeEnvelope({
+        protocol: 1,
+        matchId: "match-1",
+        senderId: "player-b",
+        sessionId: "session-b",
+        kind: "HOLLOW_CROSS",
+        seq,
+        matchTick: 0,
+        sentAtMonotonicMs: pair.bClock.now(),
+        payload: { eventId, targetPlayerId: "player-a", crossVariant },
+      }));
+    }
+
+    expect(onIncomingAttack).not.toHaveBeenCalled();
+    pair.a.setHidden(false);
+    stabilizeRecovery(pair);
+
+    const player = pair.a.view().local!.player;
+    expect(player.forcedQueue).toEqual([
+      expect.objectContaining({
+        source: "cross",
+        eventId: "b:cross:large",
+        crossVariant: "large",
+      }),
+    ]);
+    expect(player.incomingGarbage).toEqual([
+      expect.objectContaining({ id: "b:cross:small:overflow", rows: 2 }),
+    ]);
+    expect(onIncomingAttack.mock.calls).toEqual([
+      ["hollow-cross", "b:cross:large"],
+      ["hollow-cross", "b:cross:small"],
+    ]);
+    expect(onIncomingGarbage).not.toHaveBeenCalled();
   });
 
   it("converts a second pending Oversize into source-timed warned garbage", () => {

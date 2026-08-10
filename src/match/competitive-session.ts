@@ -12,6 +12,7 @@ import {
 import type {
   LogicalAction,
   MatchResult,
+  HollowCrossVariant,
   PlayerId,
   PlayerResultStats,
   Tick,
@@ -2387,9 +2388,14 @@ export class CompetitiveSession {
           tick,
         );
       } else if (effect.kind === "hollow-cross") {
+        const crossVariant: HollowCrossVariant = effect.crossVariant!;
         this.reliability.sendCritical(
           "HOLLOW_CROSS",
-          { eventId, targetPlayerId: this.options.peer.senderId },
+          {
+            eventId,
+            targetPlayerId: this.options.peer.senderId,
+            crossVariant,
+          },
           tick,
         );
       } else if (effect.kind === "glitch-piece") {
@@ -2517,7 +2523,10 @@ export class CompetitiveSession {
         if (notify) {
           this.options.onIncomingAttack?.("hollow-cross", message.payload.eventId);
         }
-        this.simulation?.receiveHollowCross(message.payload.eventId);
+        this.simulation?.receiveHollowCross(
+          message.payload.eventId,
+          message.payload.crossVariant,
+        );
         simulationChanged = this.simulation !== null;
         break;
       }

@@ -76,6 +76,8 @@ const CELL_KINDS: readonly CellKind[] = [
   "cross",
   "monomino",
   "garbage",
+  // Append-only: compact codes for all pre-Cross-variant cells stay stable.
+  "small-cross",
 ];
 const SPECIAL_KINDS: readonly SpecialKind[] = [
   "column-bomb",
@@ -234,6 +236,10 @@ function isPieceDescriptor(value: unknown): value is PieceDescriptor {
   const hasSpecialIndex = value.specialCellIndex !== undefined;
   const hasSpecialKind = value.specialKind !== undefined;
   const standard = ["I", "J", "L", "O", "S", "T", "Z"].includes(String(shape));
+  const crossVariantValid =
+    source === "cross"
+      ? value.crossVariant === "small" || value.crossVariant === "large"
+      : value.crossVariant === undefined;
   const compatible =
     ((source === "base" || source === "glitch") && standard) ||
     (source === "oversize" &&
@@ -254,6 +260,7 @@ function isPieceDescriptor(value: unknown): value is PieceDescriptor {
       cosmetics.finalShapeConcealed === true);
   return (
     compatible &&
+    crossVariantValid &&
     cosmeticsValid &&
     hasSpecialIndex === hasSpecialKind &&
     (!hasSpecialIndex ||

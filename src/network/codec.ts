@@ -328,6 +328,10 @@ function isValidPayload(kind: MessageKind, payload: unknown): boolean {
         payload.rows <= 256
       );
     case "HOLLOW_CROSS":
+      return (
+        isTargetEvent(payload) &&
+        (payload.crossVariant === "small" || payload.crossVariant === "large")
+      );
     case "GLITCH_PIECE":
     case "OVERSIZE_PIECE":
     case "SCRAMBLE_START":

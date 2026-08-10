@@ -205,6 +205,38 @@ describe("realtime envelope codec", () => {
     }
   });
 
+  it("round-trips only explicit bounded Hollow Cross variants", () => {
+    for (const crossVariant of ["small", "large"] as const) {
+      const attack: RealtimeEnvelope<"HOLLOW_CROSS"> = {
+        ...keepalive,
+        kind: "HOLLOW_CROSS",
+        seq: 1,
+        payload: {
+          eventId: `cross-${crossVariant}`,
+          targetPlayerId: "player-b",
+          crossVariant,
+        },
+      };
+      expect(decodeEnvelope(encodeEnvelope(attack))).toEqual({ ok: true, value: attack });
+    }
+
+    for (const crossVariant of [undefined, "medium", 1]) {
+      const attack = {
+        ...keepalive,
+        kind: "HOLLOW_CROSS",
+        seq: 1,
+        payload: {
+          eventId: "cross-invalid",
+          targetPlayerId: "player-b",
+          ...(crossVariant === undefined ? {} : { crossVariant }),
+        },
+      };
+      expect(
+        decodeEnvelope(new TextEncoder().encode(JSON.stringify(attack))),
+      ).toMatchObject({ ok: false, error: "invalid-envelope" });
+    }
+  });
+
   it("accepts bounded Oversize and Ghost Jam attack messages", () => {
     for (const [kind, eventId] of [
       ["OVERSIZE_PIECE", "oversize-1"],
