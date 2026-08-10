@@ -1215,20 +1215,6 @@ export class ThreeRenderer {
       } else {
         this.#drawParticleBurst(effect, viewport, centerX, centerY, 0xc5f5ff);
       }
-    } else if (effect.kind === "acid-rain") {
-      if (effect.stage !== "follow-through") {
-        for (const column of [2, 5, 7]) {
-          this.#drawCell(
-            {
-              column,
-              row: RULES.board.hiddenRows + 1,
-              kind: "acid",
-              role: "active",
-            },
-            viewport,
-          );
-        }
-      }
     } else if (effect.kind === "special-chain") {
       for (const special of effect.resolvedSpecials ?? []) {
         const point = this.#cellPoint(viewport, special.column, special.row);

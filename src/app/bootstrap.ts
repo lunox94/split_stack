@@ -2982,6 +2982,41 @@ export async function bootstrap(): Promise<void> {
     window.requestAnimationFrame(renderFrame);
   };
 
+  if (import.meta.env.DEV) {
+    type PracticeAcidRainTestState = {
+      readonly tick: number | null;
+      readonly activeSource: string | null;
+      readonly presentationKinds: readonly string[];
+    };
+    const testHookWindow = window as unknown as {
+      __splitStackPracticeAcidRain: {
+        spawn: () => void;
+        read: () => PracticeAcidRainTestState;
+      };
+    };
+    testHookWindow.__splitStackPracticeAcidRain = {
+      spawn: () => {
+        if (mode !== "practice" || practice === null) {
+          throw new Error("Practice must be active before spawning Acid Rain");
+        }
+        processEffects(practice.activatePower("acid-rain"));
+        processEffects(practice.tick(RULES.timing.powerImpactTicks));
+        for (let attempts = 0; attempts < 3; attempts += 1) {
+          if (practice.readSnapshot().player.active?.descriptor.source === "acid") return;
+          processEffects(practice.dispatchWithResult("hard-drop").effects);
+        }
+        throw new Error("Acid Rain did not spawn an Acid projectile");
+      },
+      read: () => ({
+        tick: practice?.currentTick() ?? null,
+        activeSource: practice?.readSnapshot().player.active?.descriptor.source ?? null,
+        presentationKinds: presentationTimeline.frameAt(performance.now()).effects.map(
+          (effect) => effect.kind,
+        ),
+      }),
+    };
+  }
+
   shell.createButton.disabled = !realtimeAvailable;
   shell.joinButton.disabled = true;
   shell.lobbyStatus.textContent = !realtimeAvailable
