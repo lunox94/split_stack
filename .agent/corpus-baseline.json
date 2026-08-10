@@ -1,7 +1,7 @@
 {
   "always": {
-    "bytes": 3254,
-    "estimatedTokens": 814,
+    "bytes": 3559,
+    "estimatedTokens": 890,
     "files": [
       "AGENTS.md",
       "CONTEXT.md"
