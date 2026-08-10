@@ -95,6 +95,23 @@ describe("board operations", () => {
     expect(grid.every((row) => row.every((cell) => cell === null))).toBe(true);
   });
 
+  it("persists the distinct Small Cross cell kind after lock", () => {
+    const piece: ActivePiece = {
+      descriptor: { source: "cross", shape: "cross", crossVariant: "small" },
+      x: 3,
+      y: 19,
+      rotation: 0,
+      lockTicksRemaining: 0,
+      lockResetCount: 0,
+    };
+
+    expect(mergePiece(createBoard(), piece).flat().filter((cell) => cell !== null))
+      .toEqual([
+        { kind: "small-cross" }, { kind: "small-cross" },
+        { kind: "small-cross" }, { kind: "small-cross" },
+      ]);
+  });
+
   it("persists configured Large Cross cell kinds in configured cell order", () => {
     const piece: ActivePiece = {
       descriptor: { source: "cross", shape: "cross", crossVariant: "large" },

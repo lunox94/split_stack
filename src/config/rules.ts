@@ -118,6 +118,7 @@ export const RULES = {
     variants: {
       small: {
         cells: [[1, 0], [0, 1], [2, 1], [1, 2]] as const,
+        cellKind: "small-cross",
         spawnX: 3,
         spawnY: 0,
       },

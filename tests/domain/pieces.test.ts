@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   getDescriptorCells,
+  getPieceCellKind,
   getPieceCells,
   getSpawnPosition,
   isHoldable,
@@ -98,6 +99,15 @@ describe("canonical piece geometry", () => {
         { x: 3, y: 2, index: 4 }, { x: 4, y: 2, index: 5 },
         { x: 2, y: 3, index: 6 }, { x: 2, y: 4, index: 7 },
       ]);
+  });
+
+  it("maps Small and Large Cross cell identities distinctly", () => {
+    const small = { source: "cross", shape: "cross", crossVariant: "small" } as const;
+    const large = { source: "cross", shape: "cross", crossVariant: "large" } as const;
+
+    expect(getPieceCellKind(small, 0)).toBe("small-cross");
+    expect(getPieceCellKind(large, 0)).toBe("I");
+    expect(getPieceCellKind(large, 7)).toBe("cross");
   });
 
   it("models monomino and acid projectiles as one-cell shapes", () => {

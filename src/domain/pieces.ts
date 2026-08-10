@@ -138,7 +138,9 @@ export function getPieceCellKind(
   index: number,
 ): CellKind {
   if (descriptor.source === "cross") {
-    if (descriptor.crossVariant === "small") return "cross";
+    if (descriptor.crossVariant === "small") {
+      return RULES.hollowCross.variants.small.cellKind;
+    }
     const kind = RULES.hollowCross.variants.large.cellKinds[index];
     if (kind === undefined) throw new RangeError("Large Cross cell index is outside its geometry");
     return kind;

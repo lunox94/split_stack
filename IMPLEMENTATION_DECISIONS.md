@@ -88,9 +88,10 @@ rules version 2 and must change together with the peer rules hash.
   Small Hollow Cross and five or more emit a Large Hollow Cross, regardless of
   the controlled piece source; collapse and other power-only clears emit none.
   Both Cross descriptors are nonrotating and Holdable. Small uses cells
-  `(1,0), (0,1), (2,1), (1,2)` at `(3,0)` and persists `cross` cells. Large
-  retains the existing eight-cell geometry at `(2,0)` and persists the
-  configured ordered cell kinds `I,T,J,S,Z,L,O,cross`. The one-item Cross
+  `(1,0), (0,1), (2,1), (1,2)` at `(3,0)` and persists distinct
+  `small-cross` cells. Large retains the existing eight-cell geometry at
+  `(2,0)` and persists the configured ordered cell kinds `I,T,J,S,Z,L,O,cross`,
+  including its pale-lemon final `cross` cell. The one-item Cross
   forced-queue cap counts only queued Cross descriptors across both variants;
   active and held Crosses do not count, and overflow remains two warned garbage
   rows. Cross variant is authoritative descriptor/checkpoint/hash state and is
