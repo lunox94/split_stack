@@ -252,7 +252,7 @@ export interface Simulation {
     senderId?: string,
     sourceTick?: number,
   ): void;
-  receiveHollowCross(eventId: string, crossVariant?: HollowCrossVariant): void;
+  receiveHollowCross(eventId: string, crossVariant: HollowCrossVariant): void;
   receiveGlitch(eventId: string): void;
   receiveOversize(
     eventId: string,
@@ -1159,7 +1159,7 @@ class LocalSimulation implements Simulation {
 
   receiveHollowCross(
     eventId: string,
-    crossVariant: HollowCrossVariant = "large",
+    crossVariant: HollowCrossVariant,
   ): void {
     const queued = enqueueHollowCross(this.#player.forcedQueue, crossVariant, eventId);
     this.#player.forcedQueue = queued.queue;

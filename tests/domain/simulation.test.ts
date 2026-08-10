@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { createBoard } from "../../src/domain/board";
 import { spawnPiece } from "../../src/domain/movement";
 import { createSimulation } from "../../src/domain/simulation";
 import { createGlitchDescriptor } from "../../src/domain/specials";
 import { createPlayerState } from "../../src/domain/state";
+import type { HollowCrossVariant } from "../../src/domain/types";
 
 const SEED = "00112233445566778899aabbccddeeff";
 
@@ -288,7 +289,10 @@ describe("simulation facade", () => {
     );
   });
 
-  it("checkpoints and hashes queued Cross variants distinctly", () => {
+  it("requires and checkpoints Cross variants distinctly", () => {
+    expectTypeOf<Parameters<ReturnType<typeof createSimulation>["receiveHollowCross"]>>()
+      .toEqualTypeOf<[string, HollowCrossVariant]>();
+
     const small = createSimulation({ seed: SEED, playerId: "a", practice: true });
     small.receiveHollowCross("cross:1", "small");
     const checkpoint = small.checkpoint();
