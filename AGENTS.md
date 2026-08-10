@@ -7,3 +7,5 @@ Use `npm ci` for application dependencies and `npm run check` as the integrated 
 Preserve deterministic simulation order, rules hashing/version compatibility, convergent Webxdc state, bounded and validated messages, offline runtime assets, and privacy-safe telemetry. When game semantics change, update the relevant tests, `src/config/rules-hash.ts`, and `IMPLEMENTATION_DECISIONS.md` together. Never add server, account, analytics, advertising, or external runtime dependencies without an explicit product decision.
 
 Default to solo execution. Use the flat team only for genuinely separable investigation, implementation, or risk-based validation; assign exact file scopes where `src/app` or tests overlap. External GitHub writes always require explicit user approval.
+
+@RTK.md
