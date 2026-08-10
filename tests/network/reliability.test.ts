@@ -202,7 +202,7 @@ describe("critical realtime reliability", () => {
 
     sender.sendCritical(
       "HOLLOW_CROSS",
-      { eventId: "cross-acknowledged", targetPlayerId: "player-b" },
+      { eventId: "cross-acknowledged", targetPlayerId: "player-b", crossVariant: "large" },
       120,
     );
     sendReturned = true;
@@ -352,7 +352,7 @@ describe("critical realtime reliability", () => {
 
     pair.a.sendCritical(
       "HOLLOW_CROSS",
-      { eventId: "cross-high-rtt", targetPlayerId: "player-b" },
+      { eventId: "cross-high-rtt", targetPlayerId: "player-b", crossVariant: "large" },
       120,
     );
     pair.advance(800);
@@ -368,7 +368,7 @@ describe("critical realtime reliability", () => {
     const pair = createDelayedPair(100);
     pair.a.sendCritical(
       "HOLLOW_CROSS",
-      { eventId: "cross-rtt-sample", targetPlayerId: "player-b" },
+      { eventId: "cross-rtt-sample", targetPlayerId: "player-b", crossVariant: "large" },
       120,
     );
     pair.advance(200);
@@ -416,7 +416,7 @@ describe("critical realtime reliability", () => {
     });
     sender.sendCritical(
       "HOLLOW_CROSS",
-      { eventId: "cross-observed", targetPlayerId: "player-b" },
+      { eventId: "cross-observed", targetPlayerId: "player-b", crossVariant: "large" },
       120,
     );
     clock.advance(100);
@@ -453,7 +453,7 @@ describe("critical realtime reliability", () => {
       seq: 2,
       matchTick: 121,
       sentAtMonotonicMs: 400,
-      payload: { eventId: "peer-cross-2", targetPlayerId: "player-a" },
+      payload: { eventId: "peer-cross-2", targetPlayerId: "player-a", crossVariant: "large" },
     });
     expect(gapRequests).toBe(1);
   });
@@ -462,7 +462,7 @@ describe("critical realtime reliability", () => {
     const pair = createDelayedPair(100);
     pair.a.sendCritical(
       "HOLLOW_CROSS",
-      { eventId: "cross-baseline-rtt", targetPlayerId: "player-b" },
+      { eventId: "cross-baseline-rtt", targetPlayerId: "player-b", crossVariant: "large" },
       120,
     );
     pair.advance(200);
@@ -521,7 +521,7 @@ describe("critical realtime reliability", () => {
     for (let index = 1; index <= 64; index += 1) {
       sender.sendCritical(
         "HOLLOW_CROSS",
-        { eventId: `cross-burst-${index}`, targetPlayerId: "player-b" },
+        { eventId: `cross-burst-${index}`, targetPlayerId: "player-b", crossVariant: "large" },
         120,
       );
     }
@@ -557,7 +557,7 @@ describe("critical realtime reliability", () => {
     for (let index = 1; index <= 64; index += 1) {
       sender.sendCritical(
         "HOLLOW_CROSS",
-        { eventId: `cross-reentrant-${index}`, targetPlayerId: "player-b" },
+        { eventId: `cross-reentrant-${index}`, targetPlayerId: "player-b", crossVariant: "large" },
         120,
       );
     }
@@ -586,7 +586,7 @@ describe("critical realtime reliability", () => {
     for (let index = 1; index <= 8; index += 1) {
       sender.sendCritical(
         "HOLLOW_CROSS",
-        { eventId: `recovery-budget-${index}`, targetPlayerId: "player-b" },
+        { eventId: `recovery-budget-${index}`, targetPlayerId: "player-b", crossVariant: "large" },
         120,
       );
     }
@@ -625,7 +625,7 @@ describe("critical realtime reliability", () => {
 
     sender.sendCritical(
       "HOLLOW_CROSS",
-      { eventId: "deferred-admission", targetPlayerId: "player-b" },
+      { eventId: "deferred-admission", targetPlayerId: "player-b", crossVariant: "large" },
       120,
     );
     expect(attempts).toBe(1);
@@ -666,7 +666,7 @@ describe("critical realtime reliability", () => {
     });
     sender.sendCritical(
       "HOLLOW_CROSS",
-      { eventId: "failure-atomic-timeout", targetPlayerId: "player-b" },
+      { eventId: "failure-atomic-timeout", targetPlayerId: "player-b", crossVariant: "large" },
       120,
     );
 
@@ -712,7 +712,7 @@ describe("critical realtime reliability", () => {
     });
     sender.sendCritical(
       "HOLLOW_CROSS",
-      { eventId: "failure-atomic-budget", targetPlayerId: "player-b" },
+      { eventId: "failure-atomic-budget", targetPlayerId: "player-b", crossVariant: "large" },
       120,
     );
 
@@ -754,7 +754,7 @@ describe("critical realtime reliability", () => {
     for (let index = 1; index <= 32; index += 1) {
       sender.sendCritical(
         "HOLLOW_CROSS",
-        { eventId: `cross-fair-${index}`, targetPlayerId: "player-b" },
+        { eventId: `cross-fair-${index}`, targetPlayerId: "player-b", crossVariant: "large" },
         120,
       );
     }
@@ -788,7 +788,7 @@ describe("critical realtime reliability", () => {
     });
     sender.sendCritical(
       "HOLLOW_CROSS",
-      { eventId: "cross-black-hole", targetPlayerId: "player-b" },
+      { eventId: "cross-black-hole", targetPlayerId: "player-b", crossVariant: "large" },
       120,
     );
 
@@ -827,7 +827,7 @@ describe("critical realtime reliability", () => {
     );
     a.sendCritical(
       "HOLLOW_CROSS",
-      { eventId: "cross-2", targetPlayerId: "player-b" },
+      { eventId: "cross-2", targetPlayerId: "player-b", crossVariant: "large" },
       121,
     );
 
@@ -868,7 +868,7 @@ describe("critical realtime reliability", () => {
       seq: 2,
       matchTick: 120,
       sentAtMonotonicMs: clock.now(),
-      payload: { eventId: "future-cross", targetPlayerId: streamB.senderId },
+      payload: { eventId: "future-cross", targetPlayerId: streamB.senderId, crossVariant: "large" },
     };
 
     receiver.receive(future);
@@ -904,7 +904,7 @@ describe("critical realtime reliability", () => {
       seq: 2,
       matchTick: 120,
       sentAtMonotonicMs: clock.now(),
-      payload: { eventId: "throwing-future-cross", targetPlayerId: streamB.senderId },
+      payload: { eventId: "throwing-future-cross", targetPlayerId: streamB.senderId, crossVariant: "large" },
     };
 
     expect(() => receiver.receive(future)).toThrow("injected gap request failure");
@@ -949,7 +949,7 @@ describe("critical realtime reliability", () => {
     for (let index = 1; index <= 8; index += 1) {
       a.sendCritical(
         "HOLLOW_CROSS",
-        { eventId: `event-${index}`, targetPlayerId: "player-b" },
+        { eventId: `event-${index}`, targetPlayerId: "player-b", crossVariant: "large" },
         120 + index,
       );
     }
@@ -988,7 +988,7 @@ describe("critical realtime reliability", () => {
     for (let index = 1; index <= 8; index += 1) {
       a.sendCritical(
         "HOLLOW_CROSS",
-        { eventId: `event-${index}`, targetPlayerId: "player-b" },
+        { eventId: `event-${index}`, targetPlayerId: "player-b", crossVariant: "large" },
         120 + index,
       );
     }
@@ -1034,7 +1034,7 @@ describe("critical realtime reliability", () => {
     for (let sequence = 1; sequence <= 16; sequence += 1) {
       sender.sendCritical(
         "HOLLOW_CROSS",
-        { eventId: `gap-failure-${sequence}`, targetPlayerId: "player-b" },
+        { eventId: `gap-failure-${sequence}`, targetPlayerId: "player-b", crossVariant: "large" },
         120,
       );
     }
@@ -1098,7 +1098,7 @@ describe("critical realtime reliability", () => {
     });
     sender.sendCritical(
       "HOLLOW_CROSS",
-      { eventId: "slow-reentrant-gap", targetPlayerId: "player-b" },
+      { eventId: "slow-reentrant-gap", targetPlayerId: "player-b", crossVariant: "large" },
       120,
     );
     deliveredSequences.length = 0;
@@ -1128,7 +1128,7 @@ describe("critical realtime reliability", () => {
     for (let index = 1; index <= 64; index += 1) {
       sender.sendCritical(
         "HOLLOW_CROSS",
-        { eventId: `gap-budget-${index}`, targetPlayerId: "player-b" },
+        { eventId: `gap-budget-${index}`, targetPlayerId: "player-b", crossVariant: "large" },
         120,
       );
     }
@@ -1193,7 +1193,7 @@ describe("critical realtime reliability", () => {
     };
     a.sendCritical(
       "HOLLOW_CROSS",
-      { eventId: "cross-1", targetPlayerId: "player-b" },
+      { eventId: "cross-1", targetPlayerId: "player-b", crossVariant: "large" },
       120,
     );
 
@@ -1230,7 +1230,7 @@ describe("critical realtime reliability", () => {
     );
     a.sendCritical(
       "HOLLOW_CROSS",
-      { eventId: "cross-2", targetPlayerId: "player-b" },
+      { eventId: "cross-2", targetPlayerId: "player-b", crossVariant: "large" },
       121,
     );
 
@@ -1266,7 +1266,7 @@ describe("critical realtime reliability", () => {
       if (frame.payload.eventId !== "attack-1") return;
       sender.sendCritical(
         "HOLLOW_CROSS",
-        { eventId: "cross-2", targetPlayerId: "player-b" },
+        { eventId: "cross-2", targetPlayerId: "player-b", crossVariant: "large" },
         121,
       );
     });
