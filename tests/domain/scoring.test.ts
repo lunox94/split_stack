@@ -16,7 +16,7 @@ describe("score, combo, back-to-back, attack, and charge", () => {
       charge: 8,
       comboIndex: 4,
       backToBack: true,
-      hollowCross: true,
+      hollowCross: "small",
     });
   });
 
@@ -66,6 +66,17 @@ describe("score, combo, back-to-back, attack, and charge", () => {
     ).toMatchObject({ score: 150, comboIndex: 1, backToBack: false });
   });
 
+  it("selects the Cross variant only from the placement clear count", () => {
+    expect(resolveClearProgress({
+      clearKind: "tetris", level: 1, previousComboIndex: -1, backToBack: false,
+      clearedLineCount: 5,
+    }).hollowCross).toBe("large");
+    expect(resolveClearProgress({
+      clearKind: "tetris", level: 1, previousComboIndex: -1, backToBack: false,
+      clearedLineCount: 3,
+    }).hollowCross).toBeNull();
+  });
+
   it("keeps combo and B2B untouched for a Collapse-created clear", () => {
     expect(
       resolveClearProgress({
@@ -82,7 +93,7 @@ describe("score, combo, back-to-back, attack, and charge", () => {
       comboIndex: 4,
       backToBack: true,
       difficult: false,
-      hollowCross: false,
+      hollowCross: null,
       lineCount: 2,
     });
   });

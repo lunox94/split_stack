@@ -5,6 +5,7 @@ export type StandardShape = "I" | "J" | "L" | "O" | "S" | "T" | "Z";
 export type OversizeShape = Exclude<StandardShape, "O">;
 export type CellKind = StandardShape | "cross" | "monomino" | "garbage";
 export type FallingShape = StandardShape | "cross" | "monomino" | "acid";
+export type HollowCrossVariant = "small" | "large";
 export type SpecialKind =
   | "column-bomb"
   | "garbage-core"
@@ -47,14 +48,26 @@ export interface GlitchPreviewCosmetics {
   finalShapeConcealed: true;
 }
 
-export interface PieceDescriptor {
-  source: PieceSource;
-  shape: FallingShape;
+interface PieceDescriptorBase {
   specialCellIndex?: number;
   specialKind?: SpecialKind;
   eventId?: string;
   previewCosmetics?: GlitchPreviewCosmetics;
 }
+
+export interface HollowCrossDescriptor extends PieceDescriptorBase {
+  source: "cross";
+  shape: "cross";
+  crossVariant: HollowCrossVariant;
+}
+
+export interface NonCrossPieceDescriptor extends PieceDescriptorBase {
+  source: Exclude<PieceSource, "cross">;
+  shape: Exclude<FallingShape, "cross">;
+  crossVariant?: never;
+}
+
+export type PieceDescriptor = HollowCrossDescriptor | NonCrossPieceDescriptor;
 
 export type SuccessfulAction =
   | "move"

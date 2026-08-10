@@ -83,17 +83,21 @@ describe("canonical piece geometry", () => {
       ]);
   });
 
-  it("uses the configured disconnected Hollow Cross geometry", () => {
-    expect(getPieceCells("cross", 0)).toEqual([
-      { x: 2, y: 0, index: 0 },
-      { x: 2, y: 1, index: 1 },
-      { x: 0, y: 2, index: 2 },
-      { x: 1, y: 2, index: 3 },
-      { x: 3, y: 2, index: 4 },
-      { x: 4, y: 2, index: 5 },
-      { x: 2, y: 3, index: 6 },
-      { x: 2, y: 4, index: 7 },
-    ]);
+  it("uses the configured Small and Large Hollow Cross geometries", () => {
+    expect(getDescriptorCells({ source: "cross", shape: "cross", crossVariant: "small" }, 3))
+      .toEqual([
+        { x: 1, y: 0, index: 0 },
+        { x: 0, y: 1, index: 1 },
+        { x: 2, y: 1, index: 2 },
+        { x: 1, y: 2, index: 3 },
+      ]);
+    expect(getDescriptorCells({ source: "cross", shape: "cross", crossVariant: "large" }, 1))
+      .toEqual([
+        { x: 2, y: 0, index: 0 }, { x: 2, y: 1, index: 1 },
+        { x: 0, y: 2, index: 2 }, { x: 1, y: 2, index: 3 },
+        { x: 3, y: 2, index: 4 }, { x: 4, y: 2, index: 5 },
+        { x: 2, y: 3, index: 6 }, { x: 2, y: 4, index: 7 },
+      ]);
   });
 
   it("models monomino and acid projectiles as one-cell shapes", () => {
@@ -131,7 +135,10 @@ describe("canonical piece geometry", () => {
 
   it("spawns each source at its deterministic lower-center alignment", () => {
     expect(getSpawnPosition({ source: "base", shape: "T" })).toEqual({ x: 3, y: 0 });
-    expect(getSpawnPosition({ source: "cross", shape: "cross" })).toEqual({ x: 2, y: 0 });
+    expect(getSpawnPosition({ source: "cross", shape: "cross", crossVariant: "small" }))
+      .toEqual({ x: 3, y: 0 });
+    expect(getSpawnPosition({ source: "cross", shape: "cross", crossVariant: "large" }))
+      .toEqual({ x: 2, y: 0 });
     expect(getSpawnPosition({ source: "monomino", shape: "monomino" })).toEqual({ x: 4, y: 0 });
     expect(getSpawnPosition({ source: "acid", shape: "acid" })).toEqual({ x: 4, y: 0 });
     expect(getSpawnPosition({ source: "oversize", shape: "I" })).toEqual({ x: 2, y: 0 });
@@ -146,7 +153,7 @@ describe("canonical piece geometry", () => {
       specialKind: "glitch-core",
     })).toBe(true);
     expect(isHoldable({ source: "glitch", shape: "T" })).toBe(false);
-    expect(isHoldable({ source: "cross", shape: "cross" })).toBe(false);
+    expect(isHoldable({ source: "cross", shape: "cross", crossVariant: "small" })).toBe(true);
     expect(isHoldable({ source: "monomino", shape: "monomino" })).toBe(false);
     expect(isHoldable({ source: "acid", shape: "acid" })).toBe(false);
     expect(isHoldable({ source: "oversize", shape: "T" })).toBe(true);
@@ -183,7 +190,7 @@ describe("piece collision", () => {
     centerOnly[2]![4] = { kind: "garbage" };
     const armBlocked = createBoard();
     armBlocked[2]![5] = { kind: "garbage" };
-    const cross = active({ source: "cross", shape: "cross" }, 2, 0);
+    const cross = active({ source: "cross", shape: "cross", crossVariant: "large" }, 2, 0);
 
     expect(collides(centerOnly, cross)).toBe(false);
     expect(collides(armBlocked, cross)).toBe(true);
@@ -272,7 +279,7 @@ describe("piece movement", () => {
       rotation: 0,
       lastSuccessfulAction: "rotate-ccw",
     });
-    expect(tryRotate(grid, active({ source: "cross", shape: "cross" }, 2, 4), "cw"))
+    expect(tryRotate(grid, active({ source: "cross", shape: "cross", crossVariant: "small" }, 2, 4), "cw"))
       .toBeNull();
   });
 

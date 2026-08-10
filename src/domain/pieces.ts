@@ -1,6 +1,7 @@
 import type {
   ActivePiece,
   Coordinate,
+  CellKind,
   FallingShape,
   OversizeShape,
   PieceDescriptor,
@@ -74,12 +75,9 @@ function rotateClockwise(cell: Coordinate, pivot: Coordinate): Coordinate {
 }
 
 export function getPieceCells(
-  shape: FallingShape,
+  shape: Exclude<FallingShape, "cross">,
   rotation: Rotation,
 ): readonly IndexedCoordinate[] {
-  if (shape === "cross") {
-    return RULES.hollowCross.cells.map(([x, y], index) => ({ x, y, index }));
-  }
   if (shape === "monomino" || shape === "acid") {
     return [{ x: 0, y: 0, index: 0 }];
   }
@@ -101,6 +99,13 @@ export function getDescriptorCells(
   descriptor: PieceDescriptor,
   rotation: Rotation,
 ): readonly IndexedCoordinate[] {
+  if (descriptor.source === "cross") {
+    return RULES.hollowCross.variants[descriptor.crossVariant].cells.map(([x, y], index) => ({
+      x,
+      y,
+      index,
+    }));
+  }
   if (descriptor.source !== "oversize") {
     return getPieceCells(descriptor.shape, rotation);
   }
@@ -128,17 +133,34 @@ export function isStandardShape(shape: FallingShape): shape is StandardShape {
   return STANDARD_SHAPE_SET.has(shape);
 }
 
+export function getPieceCellKind(
+  descriptor: PieceDescriptor,
+  index: number,
+): CellKind {
+  if (descriptor.source === "cross") {
+    if (descriptor.crossVariant === "small") return "cross";
+    const kind = RULES.hollowCross.variants.large.cellKinds[index];
+    if (kind === undefined) throw new RangeError("Large Cross cell index is outside its geometry");
+    return kind;
+  }
+  if (descriptor.shape === "acid") {
+    throw new TypeError("Acid projectiles do not persist on the board");
+  }
+  return descriptor.shape;
+}
+
 export function isHoldable(descriptor: PieceDescriptor): boolean {
   return (
-    (descriptor.source === "base" || descriptor.source === "oversize") &&
-    isStandardShape(descriptor.shape) &&
+    (descriptor.source === "base" || descriptor.source === "oversize" || descriptor.source === "cross") &&
+    (descriptor.source === "cross" || isStandardShape(descriptor.shape)) &&
     (descriptor.source !== "oversize" || descriptor.shape !== "O")
   );
 }
 
 export function getSpawnPosition(descriptor: PieceDescriptor): Coordinate {
-  if (descriptor.shape === "cross") {
-    return { x: RULES.hollowCross.spawnX, y: RULES.hollowCross.spawnY };
+  if (descriptor.source === "cross") {
+    const variant = RULES.hollowCross.variants[descriptor.crossVariant];
+    return { x: variant.spawnX, y: variant.spawnY };
   }
   if (descriptor.shape === "monomino" || descriptor.shape === "acid") {
     return { x: Math.floor((RULES.board.width - 1) / 2), y: 0 };

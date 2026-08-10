@@ -1,7 +1,7 @@
 import { RULES } from "../config/rules";
 import { collides } from "./collision";
-import { getAbsoluteCells, isStandardShape } from "./pieces";
-import type { ActivePiece, CellKind, Grid } from "./types";
+import { getAbsoluteCells, getPieceCellKind } from "./pieces";
+import type { ActivePiece, Grid } from "./types";
 
 export function createBoard(): Grid {
   return Array.from(
@@ -61,10 +61,8 @@ export function mergePiece(grid: Grid, piece: ActivePiece): Grid {
   }
 
   const merged = cloneBoard(grid);
-  const kind: CellKind = isStandardShape(piece.descriptor.shape)
-    ? piece.descriptor.shape
-    : piece.descriptor.shape;
   for (const cell of getAbsoluteCells(piece)) {
+    const kind = getPieceCellKind(piece.descriptor, cell.index);
     const isMarked =
       piece.descriptor.source === "base" &&
       cell.index === piece.descriptor.specialCellIndex;

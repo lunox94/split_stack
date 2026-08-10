@@ -84,8 +84,17 @@ rules version 2 and must change together with the peer rules hash.
   but preserve combo/B2B and create no attack, charge, achievement, or special
   trigger.
 - Normal line clears made by a Cross or Glitch use the normal scoring/attack/
-  meter rules; a four-line clear therefore creates a Cross regardless of the
-  controlled piece source.
+  meter rules. At placement resolution only, exactly four completed rows emit a
+  Small Hollow Cross and five or more emit a Large Hollow Cross, regardless of
+  the controlled piece source; collapse and other power-only clears emit none.
+  Both Cross descriptors are nonrotating and Holdable. Small uses cells
+  `(1,0), (0,1), (2,1), (1,2)` at `(3,0)` and persists `cross` cells. Large
+  retains the existing eight-cell geometry at `(2,0)` and persists the
+  configured ordered cell kinds `I,T,J,S,Z,L,O,cross`. The one-item Cross
+  forced-queue cap counts only queued Cross descriptors across both variants;
+  active and held Crosses do not count, and overflow remains two warned garbage
+  rows. Cross variant is authoritative descriptor/checkpoint/hash state and is
+  carried by Hollow Cross effects and receive/enqueue operations.
 - Every resolution emits at most one garbage packet after cancellation,
   including all surviving Garbage Core contributions. Its hole is seeded from
   the lock's combined attack event so every row in the packet shares one hole.

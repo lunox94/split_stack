@@ -95,6 +95,23 @@ describe("board operations", () => {
     expect(grid.every((row) => row.every((cell) => cell === null))).toBe(true);
   });
 
+  it("persists configured Large Cross cell kinds in configured cell order", () => {
+    const piece: ActivePiece = {
+      descriptor: { source: "cross", shape: "cross", crossVariant: "large" },
+      x: 2,
+      y: 17,
+      rotation: 0,
+      lockTicksRemaining: 0,
+      lockResetCount: 0,
+    };
+
+    expect(mergePiece(createBoard(), piece).flat().filter((cell) => cell !== null))
+      .toEqual([
+        { kind: "I" }, { kind: "T" }, { kind: "J" }, { kind: "S" },
+        { kind: "Z" }, { kind: "L" }, { kind: "O" }, { kind: "cross" },
+      ]);
+  });
+
   it("never embeds a marker carried by a non-base Oversize descriptor", () => {
     const piece: ActivePiece = {
       descriptor: {

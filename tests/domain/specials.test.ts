@@ -13,19 +13,21 @@ const SEED = "00112233445566778899aabbccddeeff";
 
 describe("Hollow Cross and embedded special cells", () => {
   it("caps pending Crosses at one and converts overflow into two garbage rows", () => {
-    const first = enqueueHollowCross([], "cross:1");
-    const overflow = enqueueHollowCross(first.queue, "cross:2");
+    const first = enqueueHollowCross([], "small", "cross:1");
+    const overflow = enqueueHollowCross(first.queue, "large", "cross:2");
 
     expect(first.overflowGarbageRows).toBe(0);
     expect(first.queue).toEqual([
-      { source: "cross", shape: "cross", eventId: "cross:1" },
+      { source: "cross", shape: "cross", crossVariant: "small", eventId: "cross:1" },
     ]);
     expect(overflow.queue).toEqual(first.queue);
     expect(overflow.overflowGarbageRows).toBe(2);
   });
 
   it("inserts at most two event-seeded Glitch pieces before other forced pieces", () => {
-    const cross = { source: "cross", shape: "cross", eventId: "cross" } as const;
+    const cross = {
+      source: "cross", shape: "cross", crossVariant: "large", eventId: "cross",
+    } as const;
     const first = enqueueGlitch([cross], SEED, "glitch:1");
     const second = enqueueGlitch(first.queue, SEED, "glitch:2");
     const overflow = enqueueGlitch(second.queue, SEED, "glitch:3");
@@ -42,7 +44,9 @@ describe("Hollow Cross and embedded special cells", () => {
   });
 
   it("appends one pending Oversize descriptor FIFO and converts overflow to two rows", () => {
-    const cross = { source: "cross", shape: "cross", eventId: "cross" } as const;
+    const cross = {
+      source: "cross", shape: "cross", crossVariant: "large", eventId: "cross",
+    } as const;
     const first = enqueueOversize([cross], "J", "oversize:1");
     const overflow = enqueueOversize(first.queue, "T", "oversize:2");
 

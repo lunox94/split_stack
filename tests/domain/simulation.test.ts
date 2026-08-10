@@ -288,6 +288,22 @@ describe("simulation facade", () => {
     );
   });
 
+  it("checkpoints and hashes queued Cross variants distinctly", () => {
+    const small = createSimulation({ seed: SEED, playerId: "a", practice: true });
+    small.receiveHollowCross("cross:1", "small");
+    const checkpoint = small.checkpoint();
+    const restored = createSimulation({ seed: SEED, playerId: "a", practice: true });
+    restored.restore(checkpoint);
+    const large = createSimulation({ seed: SEED, playerId: "a", practice: true });
+    large.receiveHollowCross("cross:1", "large");
+
+    expect(restored.readSnapshot()).toEqual(small.readSnapshot());
+    expect(small.readSnapshot().player.forcedQueue).toEqual([
+      { source: "cross", shape: "cross", crossVariant: "small", eventId: "cross:1" },
+    ]);
+    expect(large.readSnapshot().stateHash).not.toBe(small.readSnapshot().stateHash);
+  });
+
   it("spends one meter threshold per resolution and retains overflow charge", () => {
     const player = createPlayerState("a", SEED);
     player.grid = createBoard();
@@ -1146,6 +1162,31 @@ describe("simulation facade", () => {
     );
   });
 
+  it("emits a Small Cross only for exactly four placement rows", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    for (let row = 18; row < 22; row += 1) {
+      for (let column = 0; column < 10; column += 1) {
+        if (column !== 4) player.grid[row]![column] = { kind: "J" };
+      }
+    }
+    player.active = spawnPiece(player.grid, { source: "base", shape: "I" });
+    player.active!.x = 2;
+    player.active!.y = 18;
+    player.active!.rotation = 1;
+    const simulation = createSimulation({
+      seed: SEED, playerId: "a", practice: false, initialPlayer: player,
+    });
+
+    simulation.dispatch("hard-drop");
+    const effects = simulation.tick(9);
+
+    expect(effects).toContainEqual(expect.objectContaining({
+      kind: "hollow-cross", crossVariant: "small",
+    }));
+    expect(simulation.readSnapshot().player.stats.tetrises).toBe(1);
+  });
+
   it("removes and counts five rows while reusing Tetris rewards", () => {
     const player = createPlayerState("a", SEED);
     player.grid = createBoard();
@@ -1180,6 +1221,8 @@ describe("simulation facade", () => {
     expect(effects).toContainEqual(
       expect.objectContaining({ kind: "garbage-attack", rows: 3 }),
     );
-    expect(effects).toContainEqual(expect.objectContaining({ kind: "hollow-cross" }));
+    expect(effects).toContainEqual(
+      expect.objectContaining({ kind: "hollow-cross", crossVariant: "large" }),
+    );
   });
 });

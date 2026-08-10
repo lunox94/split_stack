@@ -1,5 +1,5 @@
 import { RULES } from "../config/rules";
-import type { ClearKind } from "./types";
+import type { ClearKind, HollowCrossVariant } from "./types";
 
 export interface ClearProgressInput {
   clearKind: ClearKind;
@@ -18,7 +18,7 @@ export interface ClearProgress {
   comboIndex: number;
   backToBack: boolean;
   difficult: boolean;
-  hollowCross: boolean;
+  hollowCross: HollowCrossVariant | null;
   lineCount: number;
 }
 
@@ -122,7 +122,7 @@ export function resolveClearProgress(input: ClearProgressInput): ClearProgress {
       comboIndex: input.previousComboIndex,
       backToBack: input.backToBack,
       difficult: false,
-      hollowCross: false,
+      hollowCross: null,
       lineCount,
     };
   }
@@ -158,7 +158,8 @@ export function resolveClearProgress(input: ClearProgressInput): ClearProgress {
     comboIndex,
     backToBack: nextBackToBack,
     difficult: values.difficult,
-    hollowCross: input.clearKind === "tetris",
+    hollowCross:
+      lineCount === 4 ? "small" : lineCount >= 5 ? "large" : null,
     lineCount,
   };
 }

@@ -44,6 +44,7 @@ import type {
   BarrierStatus,
   ClearKind,
   Coordinate,
+  HollowCrossVariant,
   LogicalAction,
   PieceDescriptor,
   PlayerGameState,
@@ -112,6 +113,7 @@ export interface SimulationEffect {
   row?: number;
   order?: number;
   special?: SpecialKind;
+  crossVariant?: HollowCrossVariant;
 }
 
 export interface LineClearResolution {
@@ -250,7 +252,7 @@ export interface Simulation {
     senderId?: string,
     sourceTick?: number,
   ): void;
-  receiveHollowCross(eventId: string): void;
+  receiveHollowCross(eventId: string, crossVariant?: HollowCrossVariant): void;
   receiveGlitch(eventId: string): void;
   receiveOversize(
     eventId: string,
@@ -800,8 +802,12 @@ class LocalSimulation implements Simulation {
         value: progress.score,
       });
     }
-    if (progress.hollowCross) {
-      effects.push({ kind: "hollow-cross", eventId: `${lockEventId}:cross` });
+    if (progress.hollowCross !== null) {
+      effects.push({
+        kind: "hollow-cross",
+        eventId: `${lockEventId}:cross`,
+        crossVariant: progress.hollowCross,
+      });
     }
 
     this.#lastTrace.push("resolve-specials");
@@ -1151,8 +1157,11 @@ class LocalSimulation implements Simulation {
     this.#player.incomingGarbage.push(packet);
   }
 
-  receiveHollowCross(eventId: string): void {
-    const queued = enqueueHollowCross(this.#player.forcedQueue, eventId);
+  receiveHollowCross(
+    eventId: string,
+    crossVariant: HollowCrossVariant = "large",
+  ): void {
+    const queued = enqueueHollowCross(this.#player.forcedQueue, crossVariant, eventId);
     this.#player.forcedQueue = queued.queue;
     if (queued.overflowGarbageRows > 0) {
       this.receiveGarbage(queued.overflowGarbageRows, `${eventId}:overflow`);

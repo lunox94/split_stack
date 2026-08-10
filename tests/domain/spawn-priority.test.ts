@@ -13,7 +13,7 @@ describe("spawn priority", () => {
     const factory = createPieceFactory(SEED);
     let player = createPlayerState("player-a", SEED);
     player.forcedQueue = [
-      { source: "cross", shape: "cross", eventId: "cross:1" },
+      { source: "cross", shape: "cross", crossVariant: "small", eventId: "cross:1" },
       { source: "glitch", shape: "T", eventId: "glitch:1" },
     ];
     player.pendingReplacementModes = ["acid-rain"];
@@ -40,7 +40,9 @@ describe("spawn priority", () => {
 
     let selected = selectSpawnDescriptor(player, factory);
     player = completeReplacementPiece(selected.state);
-    player.forcedQueue.push({ source: "cross", shape: "cross", eventId: "late" });
+    player.forcedQueue.push({
+      source: "cross", shape: "cross", crossVariant: "large", eventId: "late",
+    });
     selected = selectSpawnDescriptor(player, factory);
 
     expect(selected.descriptor.source).toBe("acid");

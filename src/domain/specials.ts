@@ -3,6 +3,7 @@ import { deriveEventUint32 } from "./rng";
 import type {
   Coordinate,
   Grid,
+  HollowCrossVariant,
   OversizeShape,
   PieceDescriptor,
   SpecialKind,
@@ -15,6 +16,7 @@ export interface ForcedQueueResult {
 
 export function enqueueHollowCross(
   forcedQueue: readonly PieceDescriptor[],
+  crossVariant: HollowCrossVariant,
   eventId: string,
 ): ForcedQueueResult {
   const pending = forcedQueue.filter((piece) => piece.source === "cross").length;
@@ -25,7 +27,7 @@ export function enqueueHollowCross(
     };
   }
   return {
-    queue: [...forcedQueue, { source: "cross", shape: "cross", eventId }],
+    queue: [...forcedQueue, { source: "cross", shape: "cross", crossVariant, eventId }],
     overflowGarbageRows: 0,
   };
 }

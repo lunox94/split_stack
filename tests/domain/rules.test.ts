@@ -43,6 +43,22 @@ describe("approved balance configuration", () => {
     });
   });
 
+  it("hashes both canonical Hollow Cross variants and shared queue cap", () => {
+    expect(RULES.hollowCross).toEqual({
+      variants: {
+        small: { cells: [[1, 0], [0, 1], [2, 1], [1, 2]], spawnX: 3, spawnY: 0 },
+        large: {
+          cells: [[2, 0], [2, 1], [0, 2], [1, 2], [3, 2], [4, 2], [2, 3], [2, 4]],
+          cellKinds: ["I", "T", "J", "S", "Z", "L", "O", "cross"],
+          spawnX: 2,
+          spawnY: 0,
+        },
+      },
+      queueCap: 1,
+      overflowGarbageRows: 2,
+    });
+  });
+
   it("matches the shared gravity table including level-nine alternation", () => {
     expect(RULES.gravity).toEqual({
       levelOneThroughEightTicks: [48, 39, 30, 23, 17, 12, 8, 6],
