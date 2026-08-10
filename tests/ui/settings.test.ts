@@ -35,12 +35,24 @@ describe("local preferences", () => {
     });
   });
 
-  it("defaults tips off and respects first-run reduced-motion", () => {
+  it("defaults graphics to Auto without letting first-run media preferences change it", () => {
     expect(loadPreferences(new MemoryStorage(), true)).toMatchObject({
       gameplayTips: false,
       reducedMotion: true,
-      reducedEffects: true,
+      graphics: "auto",
     });
+  });
+
+  it("migrates legacy reducedEffects only when graphics is absent or invalid", () => {
+    const storage = new MemoryStorage();
+    storage.setItem("split-stack/preferences/v1", JSON.stringify({ reducedEffects: true }));
+    expect(loadPreferences(storage, false).graphics).toBe("very-low");
+    storage.setItem("split-stack/preferences/v1", JSON.stringify({
+      graphics: "low", reducedEffects: true, screenShake: false,
+    }));
+    expect(loadPreferences(storage, false)).toMatchObject({ graphics: "low", screenShake: false });
+    storage.setItem("split-stack/preferences/v1", JSON.stringify({ graphics: "unknown" }));
+    expect(loadPreferences(storage, false).graphics).toBe("auto");
   });
 
   it("round-trips bounded settings and ignores malformed cache data", () => {
@@ -56,6 +68,7 @@ describe("local preferences", () => {
       effectsVolume: 0.35,
       touchControls: "buttons",
       colorPalette: "colorblind",
+      graphics: "auto",
     });
     storage.setItem("split-stack/preferences/v1", "not json");
     expect(loadPreferences(storage, false)).toEqual(DEFAULT_PREFERENCES);

@@ -2,7 +2,7 @@
   "schemaVersion": 4,
   "scaffoldVersion": 3,
   "enabled": true,
-  "routingMode": "solo",
+  "routingMode": "team",
   "workerAccess": {
     "allowPathsOutsideProject": true
   },

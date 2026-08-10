@@ -157,8 +157,8 @@ export interface MarkedCellPresentation {
 
 /**
  * Public, deterministic marked-cell visual state. The glyph itself stays
- * static; only its surrounding light breathes. Reduced effects intentionally
- * ignores time and uses an equally legible bright static treatment.
+ * static; only its surrounding light breathes. The explicit accessibility
+ * static treatment ignores time and remains equally legible.
  */
 export function markedCellPresentationAt(
   special: SpecialKind,
@@ -642,10 +642,6 @@ export class ThreeRenderer {
     }
   }
 
-  setReducedEffects(reduced: boolean): void {
-    this.setQuality(reduced ? "reduced" : "full");
-  }
-
   noteSuspension(): void {
     this.#quality.noteSuspension();
   }
@@ -666,18 +662,8 @@ export class ThreeRenderer {
     }
   }
 
-  render(
-    frame: GameRenderFrame,
-    timestampMs = performance.now(),
-    observedTargetFps: 60 | 30 = this.#quality.profile.targetFps,
-  ): void {
+  render(frame: GameRenderFrame, timestampMs = performance.now()): void {
     if (this.#disposed || this.#contextLost) return;
-    const previousQuality = this.#quality.profile.effects;
-    this.#quality.observeFrame(timestampMs, observedTargetFps);
-    if (this.#quality.profile.effects !== previousQuality) {
-      this.#pixelRatio = 0;
-      this.#options.onQualityChanged?.(this.#quality.profile);
-    }
     if (!this.#quality.shouldRender(timestampMs)) return;
 
     this.#frameTimestampMs = timestampMs;
@@ -1469,7 +1455,10 @@ export class ThreeRenderer {
   }
 
   #markedCellQuality(): EffectQuality {
-    return this.#staticMarkedCells ? "reduced" : this.#quality.profile.effects;
+    if (this.#staticMarkedCells) return "reduced";
+    return this.#quality.profile.effects === "reduced"
+      ? "limited"
+      : this.#quality.profile.effects;
   }
 
   #patternTexture(kind: RenderCellKind): Texture | null {

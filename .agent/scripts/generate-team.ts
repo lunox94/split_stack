@@ -22,6 +22,7 @@ interface SourceRole {
 
 interface TeamSource {
   model_slots: Record<string, string>;
+  runtime: { routing_mode: string };
   roles: SourceRole[];
 }
 
@@ -71,8 +72,11 @@ function unresolvedFiles(): string[] {
 
 function loadSource(): TeamSource {
   const source = Bun.YAML.parse(readFileSync(teamSourcePath, "utf8")) as TeamSource;
-  if (!source || !source.model_slots || !Array.isArray(source.roles)) {
-    throw new Error(".agent/teams.yaml must define model_slots and roles");
+  if (!source || !source.model_slots || !source.runtime || !Array.isArray(source.roles)) {
+    throw new Error(".agent/teams.yaml must define model_slots, runtime, and roles");
+  }
+  if (source.runtime.routing_mode !== "solo" && source.runtime.routing_mode !== "team") {
+    throw new Error(".agent/teams.yaml runtime.routing_mode must be solo or team");
   }
   const ids = new Set<string>();
   for (const role of source.roles) {
@@ -142,7 +146,7 @@ function buildArtifacts() {
       schemaVersion: 4,
       scaffoldVersion: 3,
       enabled: true,
-      routingMode: "solo",
+      routingMode: source.runtime.routing_mode,
       workerAccess: { allowPathsOutsideProject: true },
       display: { cost: true },
       roles,

@@ -3,6 +3,21 @@ import { describe, expect, it } from "vitest";
 import { PresentationTimeline } from "../../src/render/presentation-timeline";
 
 describe("presentation timeline", () => {
+  it("reconfigures particles without changing scheduled cue timing or identity", () => {
+    const timeline = new PresentationTimeline();
+    timeline.schedule({ id: "nuke", kind: "nuke", board: "left", center: { column: 4, row: 10 } }, 0);
+    const before = timeline.frameAt(325).effects[0];
+
+    timeline.configure({ particleScale: 0.45, screenShake: false });
+    const configuredFrame = timeline.frameAt(325);
+    const after = configuredFrame.effects[0];
+
+    expect(after).toMatchObject({ id: "nuke", stage: before?.stage, particleCount: 22 });
+    expect(configuredFrame.shake).toBeNull();
+    timeline.configure({ reducedMotion: true });
+    expect(timeline.frameAt(325).effects[0]).toMatchObject({ id: "nuke", particleCount: 0, visualStyle: "fade" });
+  });
+
   it("gives every normal line clear the same 150 ms blocking rhythm", () => {
     const single = new PresentationTimeline();
     const fourLine = new PresentationTimeline();

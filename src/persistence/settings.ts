@@ -1,3 +1,5 @@
+import type { GraphicsSetting } from "../app/graphics-policy";
+
 export interface StoragePort {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
@@ -13,7 +15,7 @@ export interface Preferences {
   colorPalette: "standard" | "colorblind";
   reducedMotion: boolean;
   reducedFlashes: boolean;
-  reducedEffects: boolean;
+  graphics: GraphicsSetting;
   screenShake: boolean;
   gameplayTips: boolean;
 }
@@ -30,7 +32,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   colorPalette: "standard",
   reducedMotion: false,
   reducedFlashes: false,
-  reducedEffects: false,
+  graphics: "auto",
   screenShake: true,
   gameplayTips: false,
 };
@@ -44,6 +46,13 @@ function volume(value: unknown, fallback: number): number {
   return Math.max(0, Math.min(1, raw));
 }
 
+function graphics(value: unknown, legacyReducedEffects: unknown): GraphicsSetting {
+  if (value === "auto" || value === "normal" || value === "low" || value === "very-low") {
+    return value;
+  }
+  return legacyReducedEffects === true ? "very-low" : "auto";
+}
+
 function parsePreferences(value: unknown, firstRunReducedMotion: boolean): Preferences {
   const record = typeof value === "object" && value !== null
     ? (value as Record<string, unknown>)
@@ -55,30 +64,21 @@ function parsePreferences(value: unknown, firstRunReducedMotion: boolean): Prefe
     : undefined;
   return {
     effectsEnabled: boolean(record.effectsEnabled, legacyEnabled),
-    effectsVolume: volume(
-      record.effectsVolume,
-      legacyVolume ?? DEFAULT_PREFERENCES.effectsVolume,
-    ),
+    effectsVolume: volume(record.effectsVolume, legacyVolume ?? DEFAULT_PREFERENCES.effectsVolume),
     musicEnabled: boolean(record.musicEnabled, legacyEnabled),
-    musicVolume: volume(
-      record.musicVolume,
-      legacyVolume ?? DEFAULT_PREFERENCES.musicVolume,
-    ),
+    musicVolume: volume(record.musicVolume, legacyVolume ?? DEFAULT_PREFERENCES.musicVolume),
     vibration: boolean(record.vibration, DEFAULT_PREFERENCES.vibration),
     touchControls: record.touchControls === "buttons" ? "buttons" : "gestures",
     colorPalette: record.colorPalette === "colorblind" ? "colorblind" : "standard",
     reducedMotion,
     reducedFlashes: boolean(record.reducedFlashes, reducedMotion),
-    reducedEffects: boolean(record.reducedEffects, reducedMotion),
+    graphics: graphics(record.graphics, record.reducedEffects),
     screenShake: boolean(record.screenShake, !reducedMotion),
     gameplayTips: boolean(record.gameplayTips, false),
   };
 }
 
-export function loadPreferences(
-  storage: StoragePort,
-  firstRunReducedMotion: boolean,
-): Preferences {
+export function loadPreferences(storage: StoragePort, firstRunReducedMotion: boolean): Preferences {
   try {
     const stored = storage.getItem(STORAGE_KEY);
     if (stored === null) return parsePreferences({}, firstRunReducedMotion);

@@ -5,6 +5,33 @@ implementers to surface ambiguity. This file records the narrow interpretations
 needed to make the simulation deterministic. The additions below are part of
 rules version 2 and must change together with the peer rules hash.
 
+## Graphics presentation policy
+
+- Graphics is a local presentation policy, outside the rules hash and all
+  authoritative simulation, network, audio, recovery-countdown, and cue-order
+  decisions. Normal, Low, and Very Low explicitly select full, limited, and
+  reduced render profiles; only Auto changes tier at runtime.
+- Auto observes visible uncapped animation-frame timestamps before the separate
+  competitive/spectator 30 FPS presentation cadence. It calibrates 24 deltas in
+  the 4–50 ms range using their median, then clamps the baseline to
+  16.667–20 ms (60–50 Hz). The clamp accepts stable 50 Hz, avoids
+  high-refresh over-sensitivity, and prevents sustained 24 ms startup cadence
+  from becoming its own Normal baseline; that cadence exceeds the later 1.20
+  slowdown ratio. Auto downgrades on a two-second mean ratio of at least 1.20
+  (or a 250 ms frame) with a two-second downgrade interval, and upgrades after
+  a ten-second cooldown plus eight healthy seconds at ratio at most 1.08.
+  Suspension retains the selected tier but clears samples and starts recovery
+  cooldown on resume.
+- Reduced motion and reduced flashes are independent monotonic accessibility
+  overrides. They staticize the corresponding CSS/DOM and timeline cues,
+  including marked-cell legibility, rather than selecting Very Low. Very Low
+  removes decorative Scramble and Blackout motion but retains cheap functional
+  and semantic cues such as marked previews, garbage warning, power activation,
+  Glitch state, barrier sequence, and progress/status readability.
+- Preferences remain at `split-stack/preferences/v1`. Valid `graphics` wins;
+  legacy `reducedEffects: true` migrates to Very Low and false/absent values to
+  Auto. The obsolete control and saved output are removed.
+
 ## Simulation ordering
 
 - Recognized input actions apply in their observed ordinal against the current

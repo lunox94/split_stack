@@ -44,9 +44,8 @@ export function shouldGameplayMusicRun(
 export function shouldUseStaticMarkedCells(
   reducedMotion: boolean,
   reducedFlashes: boolean,
-  reducedEffects: boolean,
 ): boolean {
-  return reducedMotion || reducedFlashes || reducedEffects;
+  return reducedMotion || reducedFlashes;
 }
 
 /** A runtime-scoped, non-identifying 128-bit token. */

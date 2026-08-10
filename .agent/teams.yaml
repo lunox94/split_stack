@@ -6,6 +6,7 @@ model_slots:
   coding_model: openai-codex/gpt-5.6-terra
   fast_model: openai-codex/gpt-5.6-luna
 runtime:
+  routing_mode: team
   topology: flat
   max_parallel_workers: 3
   retry_limit: 1

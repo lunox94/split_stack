@@ -114,10 +114,9 @@ describe("runtime helpers", () => {
   });
 
   it("keeps marked-cell motion static for every reduced visual preference", () => {
-    expect(shouldUseStaticMarkedCells(false, false, false)).toBe(false);
-    expect(shouldUseStaticMarkedCells(true, false, false)).toBe(true);
-    expect(shouldUseStaticMarkedCells(false, true, false)).toBe(true);
-    expect(shouldUseStaticMarkedCells(false, false, true)).toBe(true);
+    expect(shouldUseStaticMarkedCells(false, false)).toBe(false);
+    expect(shouldUseStaticMarkedCells(true, false)).toBe(true);
+    expect(shouldUseStaticMarkedCells(false, true)).toBe(true);
   });
 
   it("deduplicates and bounds untrusted durable event buffers", () => {

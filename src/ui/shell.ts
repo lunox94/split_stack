@@ -410,7 +410,7 @@ export interface SettingsInputs {
   colorPalette: HTMLSelectElement;
   reducedMotion: HTMLInputElement;
   reducedFlashes: HTMLInputElement;
-  reducedEffects: HTMLInputElement;
+  graphics: HTMLSelectElement;
   screenShake: HTMLInputElement;
   gameplayTips: HTMLInputElement;
 }
@@ -533,6 +533,7 @@ export interface AppShell {
   helpBack: HTMLButtonElement;
   settings: HTMLElement;
   settingsInputs: SettingsInputs;
+  graphicsStatus: HTMLElement;
   diagnosticsCopyButton: HTMLButtonElement;
   diagnosticsClearButton: HTMLButtonElement;
   diagnosticsStatus: HTMLElement;
@@ -604,6 +605,7 @@ export interface AppShell {
   ): void;
   setPairingExitMode(mode: "leave" | "withdraw"): void;
   setPreferences(preferences: Preferences): void;
+  setGraphicsStatus(setting: Preferences["graphics"], tier: "normal" | "low" | "very-low"): void;
   setReadiness(
     localReady: boolean,
     opponentReady: boolean,
@@ -991,11 +993,24 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     settingsList,
     STRINGS["settings.reducedFlashes"],
   );
-  const reducedEffects = checkboxSetting(
-    document,
-    settingsList,
-    STRINGS["settings.reducedEffects"],
-  );
+  const graphicsLabel = element(document, "label", "setting-row");
+  graphicsLabel.append(element(document, "span", undefined, STRINGS["settings.graphics"]));
+  const graphics = element(document, "select");
+  for (const [value, label] of [
+    ["auto", STRINGS["settings.graphicsAuto"]],
+    ["normal", STRINGS["settings.graphicsNormal"]],
+    ["low", STRINGS["settings.graphicsLow"]],
+    ["very-low", STRINGS["settings.graphicsVeryLow"]],
+  ] as const) {
+    const option = element(document, "option", undefined, label);
+    option.value = value;
+    graphics.append(option);
+  }
+  graphicsLabel.append(graphics);
+  const graphicsStatus = element(document, "p", "muted graphics-status");
+  graphicsStatus.setAttribute("aria-live", "polite");
+  graphicsStatus.hidden = true;
+  settingsList.append(graphicsLabel, graphicsStatus);
   const screenShake = checkboxSetting(
     document,
     settingsList,
@@ -1471,6 +1486,7 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     helpBody,
     helpBack,
     settings: settingsParts.screen,
+    graphicsStatus,
     settingsInputs: {
       effectsEnabled,
       effectsVolume,
@@ -1481,7 +1497,7 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
       colorPalette,
       reducedMotion,
       reducedFlashes,
-      reducedEffects,
+      graphics,
       screenShake,
       gameplayTips,
     },
@@ -1826,9 +1842,29 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
       colorPalette.value = preferences.colorPalette;
       reducedMotion.checked = preferences.reducedMotion;
       reducedFlashes.checked = preferences.reducedFlashes;
-      reducedEffects.checked = preferences.reducedEffects;
+      graphics.value = preferences.graphics;
+      if (preferences.graphics === "auto" && graphicsStatus.textContent === "") {
+        graphicsStatus.textContent = formatString("settings.graphicsAutoStatus", {
+          tier: STRINGS["settings.graphicsNormal"],
+        });
+        graphicsStatus.hidden = false;
+      }
       screenShake.checked = preferences.screenShake;
       gameplayTips.checked = preferences.gameplayTips;
+    },
+    setGraphicsStatus(setting, tier): void {
+      if (setting !== "auto") {
+        graphicsStatus.hidden = true;
+        return;
+      }
+      const label = tier === "normal"
+        ? STRINGS["settings.graphicsNormal"]
+        : tier === "low"
+          ? STRINGS["settings.graphicsLow"]
+          : STRINGS["settings.graphicsVeryLow"];
+      const text = formatString("settings.graphicsAutoStatus", { tier: label });
+      if (graphicsStatus.textContent !== text) graphicsStatus.textContent = text;
+      graphicsStatus.hidden = false;
     },
     setReadiness(localReady, opponentReady, players): void {
       const localLabel = players === undefined
@@ -2129,10 +2165,8 @@ export function showHelp(shell: AppShell, kind: "how" | "controls"): void {
       colorPalette: shell.container.dataset.palette === "colorblind"
         ? "colorblind"
         : "standard",
-      reducedMotion: shell.container.dataset.reducedMotion === "true" ||
-        shell.container.dataset.reducedEffects === "true",
-      reducedFlashes: shell.container.dataset.reducedFlashes === "true" ||
-        shell.container.dataset.reducedEffects === "true",
+      reducedMotion: shell.container.dataset.reducedMotion === "true",
+      reducedFlashes: shell.container.dataset.reducedFlashes === "true",
       elapsedMs: 0,
     };
     const animatedSamples: Array<{

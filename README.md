@@ -30,8 +30,38 @@ Gestures work across the gameplay canvas (apart from explicit UI controls), so
 phone players do not have to keep every swipe inside the local board.
 Scramble effects remap logical movement controls consistently for their full
 duration. Accessibility options include a colorblind palette, surface patterns,
-reduced motion, reduced flashes, a 30 FPS reduced-effects mode, optional screen
-shake and vibration, and independent music and effects controls.
+reduced motion, reduced flashes, optional screen shake and vibration, and
+independent music and effects controls.
+
+### Graphics
+
+Graphics is presentation-only and never changes simulation, networking, audio,
+or deterministic cue timing. New installs use Auto; fixed modes are explicit and
+never adapt:
+
+| Setting | Render profile | Target FPS | Particles |
+| --- | --- | --- | --- |
+| Auto | Normal, Low, or Very Low | profile-based | profile-based |
+| Normal | full | 60 | 100% |
+| Low | limited | 60 | 45% |
+| Very Low | reduced | 30 | 0% |
+
+Auto calibrates from 24 visible uncapped animation-frame deltas (median
+baseline), clamped to 16.667–20 ms (60–50 Hz). This accepts stable 50 Hz,
+avoids high-refresh over-sensitivity, and prevents a sustained 24 ms overloaded
+startup cadence from normalizing itself; 24 ms therefore exceeds the 1.20
+slowdown ratio in later windows. In two-second windows a mean ratio of 1.20 or
+above steps down one tier, no more often than every two seconds; a 250 ms frame
+also steps down.
+After a ten-second cooldown, eight seconds at ratio 1.08 or below steps up one
+tier. Suspension retains the tier and restarts recovery on resume. Competitive
+and spectator presentation retain their independent 30 FPS projection cap.
+
+Reduced motion and reduced flashes are separate monotonic accessibility
+overrides at every tier. They staticize motion/flash cues and force the relevant
+legibility treatment; they do not select a graphics tier. Old saved
+`reducedEffects: true` migrates to Very Low, while false or absent legacy values
+migrate to Auto.
 
 Each match deterministically selects one of four bundled 4-channel ProTracker
 modules and rotates the choice on rematches. A small local replay engine streams
@@ -249,7 +279,7 @@ reports archive and uncompressed sizes for release notes.
 For a release candidate, load the `.xdc` in a current Delta Chat desktop,
 Android, and iOS client where devices are available. Exercise two active
 players plus a spectator, reconnect recovery, rematch, practice, portrait and
-landscape layouts, reduced effects, and WebGL context recovery.
+landscape layouts, Graphics and accessibility overrides, and WebGL context recovery.
 
 ## Offline and privacy model
 

@@ -298,16 +298,22 @@ const clampProgress = (value: number): number => Math.max(0, Math.min(1, value))
 
 export class PresentationTimeline {
   readonly #scheduled: ScheduledCue[] = [];
-  readonly #reducedMotion: boolean;
-  readonly #reducedFlashes: boolean;
-  readonly #screenShake: boolean;
-  readonly #particleScale: number;
+  #reducedMotion = false;
+  #reducedFlashes = false;
+  #screenShake = true;
+  #particleScale = 1;
 
   constructor(options: PresentationOptions = {}) {
-    this.#reducedMotion = options.reducedMotion ?? false;
-    this.#reducedFlashes = options.reducedFlashes ?? false;
-    this.#screenShake = options.screenShake ?? true;
-    this.#particleScale = Math.max(0, Math.min(1, options.particleScale ?? 1));
+    this.configure(options);
+  }
+
+  configure(options: PresentationOptions): void {
+    if (options.reducedMotion !== undefined) this.#reducedMotion = options.reducedMotion;
+    if (options.reducedFlashes !== undefined) this.#reducedFlashes = options.reducedFlashes;
+    if (options.screenShake !== undefined) this.#screenShake = options.screenShake;
+    if (options.particleScale !== undefined) {
+      this.#particleScale = Math.max(0, Math.min(1, options.particleScale));
+    }
   }
 
   schedule(cue: PresentationCue, startedAtMs: number): PresentationTiming {

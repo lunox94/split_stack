@@ -2025,6 +2025,12 @@ test("Home keeps help opt-in and exposes the complete settings surface", async (
   await expect(page.getByLabel("Music", { exact: true })).toBeChecked();
   await expect(page.getByLabel("Music volume")).toHaveAttribute("type", "range");
   await expect(page.getByLabel("Touch controls")).toHaveValue("gestures");
+  await expect(page.getByLabel("Graphics")).toHaveValue("auto");
+  await expect(page.getByText(/^Auto currently uses (Normal|Low|Very Low)\.$/)).toBeVisible();
+  await expect(page.locator(".split-stack-app")).toHaveAttribute(
+    "data-graphics-tier",
+    /^(normal|low|very-low)$/,
+  );
   await expect(page.getByLabel("Gameplay tips")).not.toBeChecked();
   await page.getByRole("button", { name: "Clear diagnostics" }).click();
   await expect(page.getByText("Diagnostics cleared.")).toBeVisible();
@@ -2052,6 +2058,81 @@ test("gameplay marked cells match the guide badge and soft halo", DEVICE_MATRIX,
   // satisfy this assertion when the canonical glyph is missing.
   expect(accentGlyphCoverage).toBeGreaterThanOrEqual(0.03);
   expect(minimumFalloffStep).toBeGreaterThan(1);
+});
+
+test("Auto Very Low keeps marked-cell breathing while explicit accessibility policy is static", async ({ page }) => {
+  await openApp(page);
+
+  const result = await page.evaluate(async () => {
+    const rendererUrl = "/src/render/renderer.ts";
+    const graphicsPolicyUrl = "/src/app/graphics-policy.ts";
+    const [{ ThreeRenderer }, { GraphicsAutoController }] = await Promise.all([
+      import(rendererUrl),
+      import(graphicsPolicyUrl),
+    ]);
+    const canvas = document.createElement("canvas");
+    canvas.style.cssText = "position:fixed;inset:0;width:400px;height:800px;z-index:9999";
+    document.body.append(canvas);
+    const frame = {
+      mode: "practice" as const,
+      left: {
+        playerId: "adaptive-marked",
+        cells: [{
+          column: 4,
+          row: 12,
+          kind: "J" as const,
+          role: "settled" as const,
+          special: "blackout" as const,
+        }],
+        focused: true,
+        concealed: false,
+      },
+      right: null,
+    };
+    const sampleHalo = (renderer: InstanceType<typeof ThreeRenderer>): number => {
+      const gl = canvas.getContext("webgl2");
+      if (gl === null) throw new Error("WebGL2 unavailable in browser test");
+      gl.finish();
+      const viewport = renderer.layout.left;
+      const x = Math.round(
+        (viewport.boardX + (4 + 0.5 + 0.68) * viewport.cellSize) *
+          gl.drawingBufferWidth / canvas.clientWidth,
+      );
+      const y = Math.round(
+        (canvas.clientHeight - (viewport.boardY + (12 - 2 + 0.5) * viewport.cellSize)) *
+          gl.drawingBufferHeight / canvas.clientHeight,
+      );
+      const pixel = new Uint8Array(4);
+      gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+      return pixel[0]! * 0.2126 + pixel[1]! * 0.7152 + pixel[2]! * 0.0722;
+    };
+    const auto = new GraphicsAutoController();
+    for (let timestamp = 0; timestamp <= 384; timestamp += 16) auto.observeFrame(timestamp);
+    auto.observeFrame(700);
+    auto.observeFrame(3_000);
+    const adaptive = new ThreeRenderer(canvas, { initialQuality: "full" });
+    adaptive.setQuality(auto.tier === "very-low" ? "reduced" : "full");
+    const adaptiveQuality = adaptive.quality.effects;
+    adaptive.render(frame, 3_050);
+    const adaptiveFirst = sampleHalo(adaptive);
+    adaptive.render(frame, 3_575);
+    const adaptiveSecond = sampleHalo(adaptive);
+    adaptive.dispose();
+
+    const explicitStatic = new ThreeRenderer(canvas, { initialQuality: "reduced" });
+    explicitStatic.setStaticMarkedCells(true);
+    explicitStatic.render(frame, 3_050);
+    const staticFirst = sampleHalo(explicitStatic);
+    explicitStatic.render(frame, 3_575);
+    const staticSecond = sampleHalo(explicitStatic);
+    explicitStatic.dispose();
+    canvas.remove();
+    return { adaptiveQuality, adaptiveDelta: Math.abs(adaptiveFirst - adaptiveSecond), staticDelta: Math.abs(staticFirst - staticSecond) };
+  });
+
+  expect(result.adaptiveQuality).toBe("reduced");
+  expect(result.adaptiveDelta).toBeGreaterThan(2);
+  expect(result.staticDelta).toBeLessThan(0.001);
 });
 
 test("simultaneous marked-cell pulses are independent of render order", async ({ page }) => {
@@ -4012,25 +4093,77 @@ test("the v2 clean reset ignores legacy competitive and rematch state", async ({
   await expect(page.getByRole("button", { name: "Create challenge" })).toBeVisible();
 });
 
-test("reduced-effects preference is applied immediately and persists", async ({ page }) => {
+test("legacy graphics preferences migrate without restoring Reduced Effects UI", async ({ page }) => {
+  await openApp(page);
+  for (const [legacy, expected] of [
+    [true, "very-low"],
+    [false, "auto"],
+    [undefined, "auto"],
+  ] as const) {
+    await page.evaluate(([legacyValue]) => {
+      localStorage.setItem(
+        "split-stack/preferences/v1",
+        JSON.stringify(legacyValue === undefined ? {} : { reducedEffects: legacyValue }),
+      );
+    }, [legacy]);
+    await page.reload();
+    await page.getByRole("button", { name: "Settings" }).click();
+    await expect(page.getByLabel("Graphics")).toHaveValue(expected);
+    await expect(page.getByLabel("Reduced effects and 30 FPS")).toHaveCount(0);
+  }
+});
+
+test("Graphics persists fixed tiers and Very Low removes heavy CSS while preserving functional cues", async ({ page }) => {
   await openApp(page);
   await page.getByRole("button", { name: "Settings" }).click();
+  await expect(page.getByLabel("Reduced effects and 30 FPS")).toHaveCount(0);
 
-  const reducedEffects = page.getByLabel("Reduced effects and 30 FPS");
-  await reducedEffects.check();
-  await expect(page.locator(".split-stack-app")).toHaveAttribute(
-    "data-reduced-effects",
-    "true",
-  );
+  await page.getByLabel("Graphics").selectOption("very-low");
+  await expect(page.locator(".split-stack-app")).toHaveAttribute("data-graphics-tier", "very-low");
+  await page.waitForTimeout(500);
+  await expect(page.locator(".split-stack-app")).toHaveAttribute("data-graphics-tier", "very-low");
+  await expect(page.getByText(/^Auto currently uses/)).toBeHidden();
+
+  const styles = await page.evaluate(() => {
+    const root = document.querySelector<HTMLElement>(".split-stack-app")!;
+    const pane = document.createElement("div");
+    pane.className = "player-pane";
+    pane.dataset.scrambled = "true";
+    pane.innerHTML = '<div class="board-hit-target"></div><div class="blackout-cover"><span class="blackout-icon"></span></div><div class="piece-preview-cell is-marked"></div><div class="incoming-garbage" data-state="ready"></div><div class="power-meter is-activating"></div>';
+    root.append(pane);
+    const target = pane.querySelector(".board-hit-target")!;
+    const blackout = pane.querySelector(".blackout-cover")!;
+    const marked = pane.querySelector(".piece-preview-cell")!;
+    const incoming = pane.querySelector(".incoming-garbage")!;
+    const power = pane.querySelector(".power-meter")!;
+    const result = {
+      ants: getComputedStyle(target, "::before").animationName,
+      blackout: getComputedStyle(blackout).animationName,
+      scan: getComputedStyle(blackout, "::before").animationName,
+      marked: getComputedStyle(marked, "::after").animationName,
+      incoming: getComputedStyle(incoming).animationName,
+      power: getComputedStyle(power).animationName,
+    };
+    root.dataset.reducedMotion = "true";
+    root.dataset.reducedFlashes = "true";
+    result.ants = `${result.ants}/${getComputedStyle(target, "::before").animationName}`;
+    result.marked = `${result.marked}/${getComputedStyle(marked, "::after").animationName}`;
+    pane.remove();
+    return result;
+  });
+
+  expect(styles).toMatchObject({
+    ants: /none\/none$/,
+    blackout: "none",
+    scan: "none",
+    marked: /^preview-marked-breathe\/none$/,
+    incoming: "incoming-garbage-ready",
+    power: "power-meter-activate",
+  });
 
   await page.reload();
-  await expect(page.getByRole("heading", { name: "Split Stack" })).toBeVisible();
   await page.getByRole("button", { name: "Settings" }).click();
-  await expect(page.getByLabel("Reduced effects and 30 FPS")).toBeChecked();
-  await expect(page.locator(".split-stack-app")).toHaveAttribute(
-    "data-reduced-effects",
-    "true",
-  );
+  await expect(page.getByLabel("Graphics")).toHaveValue("very-low");
 });
 
 test("load and Practice make no external HTTP requests", async ({ page }) => {

@@ -41,7 +41,6 @@ import { createPowerTipTracker } from "../persistence/power-tips";
 import {
   loadPreferences,
   savePreferences,
-  type Preferences,
   type StoragePort,
 } from "../persistence/settings";
 import {
@@ -80,6 +79,7 @@ import {
 } from "../ui/barrier-capacity";
 import type { PiecePreviewOptions } from "../ui/piece-preview";
 import { boardModelFromRemoteSnapshot, boardModelFromSimulation } from "./view-model";
+import { GraphicsAutoController, resolveGraphicsPlan } from "./graphics-policy";
 import {
   cueForAcceptedInput,
   cueForIncomingAttack,
@@ -91,7 +91,6 @@ import {
   createRuntimeId,
   formatDuration,
   shouldGameplayMusicRun,
-  shouldUseStaticMarkedCells,
   type AppRuntimeMode,
 } from "./runtime-helpers";
 import {
@@ -107,10 +106,7 @@ import {
   PresentationTimeline,
   type PresentationBoard,
 } from "../render/presentation-timeline";
-import {
-  NETWORKED_PRESENTATION_FPS,
-  RuntimePresentationCadence,
-} from "./presentation-cadence";
+import { RuntimePresentationCadence } from "./presentation-cadence";
 import { recoveryPresentationFor } from "./recovery-presentation";
 import {
   createCompetitionEventLifecycle,
@@ -393,6 +389,7 @@ export async function bootstrap(): Promise<void> {
   const networkDiagnostics = new NetworkDiagnostics({ storage });
   const mediaPrefersReduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
   let preferences = loadPreferences(storage, mediaPrefersReduced);
+  const autoGraphics = new GraphicsAutoController();
   shell.setPreferences(preferences);
   const audio = new AudioEngine();
   let latestLeftBoard: BoardRenderModel | null = null;
@@ -551,14 +548,22 @@ export async function bootstrap(): Promise<void> {
     elapsedMs,
   });
 
+  const graphicsPlan = () => resolveGraphicsPlan({
+    setting: preferences.graphics,
+    autoTier: autoGraphics.tier,
+    reducedMotion: preferences.reducedMotion,
+    reducedFlashes: preferences.reducedFlashes,
+    screenShake: preferences.screenShake,
+  });
+
   const resetPresentation = (): void => {
     resetHudBarrierCapacityPresentation(shell.left);
     resetHudBarrierCapacityPresentation(shell.right);
     presentationTimeline = new PresentationTimeline({
-      reducedMotion: preferences.reducedMotion,
-      reducedFlashes: preferences.reducedFlashes,
-      screenShake: preferences.screenShake,
-      particleScale: preferences.reducedEffects ? 0 : 1,
+      reducedMotion: graphicsPlan().reducedMotion,
+      reducedFlashes: graphicsPlan().reducedFlashes,
+      screenShake: graphicsPlan().allowScreenShake,
+      particleScale: graphicsPlan().particleScale,
     });
     presentationRouter = new PresentationRouter(
       presentationTimeline,
@@ -704,12 +709,25 @@ export async function bootstrap(): Promise<void> {
     }
   };
 
+  const applyGraphicsPlan = (): void => {
+    const plan = graphicsPlan();
+    shell.container.dataset.graphicsTier = plan.tier;
+    presentationTimeline.configure({
+      reducedMotion: plan.reducedMotion,
+      reducedFlashes: plan.reducedFlashes,
+      screenShake: plan.allowScreenShake,
+      particleScale: plan.particleScale,
+    });
+    renderer?.setQuality(plan.renderQuality);
+    renderer?.setStaticMarkedCells(plan.staticLegibilityCues);
+    shell.setGraphicsStatus(preferences.graphics, plan.tier);
+  };
+
   const applyPreferences = (): void => {
-    resetPresentation();
     shell.setPreferences(preferences);
     shell.container.dataset.reducedMotion = String(preferences.reducedMotion);
     shell.container.dataset.reducedFlashes = String(preferences.reducedFlashes);
-    shell.container.dataset.reducedEffects = String(preferences.reducedEffects);
+    applyGraphicsPlan();
     shell.container.dataset.palette = preferences.colorPalette;
     shell.container.dataset.screenShake = String(preferences.screenShake);
     const touchButtonsVisible =
@@ -720,12 +738,6 @@ export async function bootstrap(): Promise<void> {
     audio.setEffectsVolume(preferences.effectsVolume);
     audio.setMusicMuted(!preferences.musicEnabled);
     audio.setMusicVolume(preferences.musicVolume);
-    renderer?.setReducedEffects(preferences.reducedEffects);
-    renderer?.setStaticMarkedCells(shouldUseStaticMarkedCells(
-      preferences.reducedMotion,
-      preferences.reducedFlashes,
-      preferences.reducedEffects,
-    ));
     renderer?.setColorPalette(preferences.colorPalette);
     if (!preferences.gameplayTips) hidePowerTip();
   };
@@ -1117,9 +1129,7 @@ export async function bootstrap(): Promise<void> {
       presentHudBarrierResolution(board === "left" ? shell.left : shell.right, {
         activated: barrierActivated,
         blockedRows: barrierBlockedRows,
-        animate: !preferences.reducedMotion &&
-          !preferences.reducedFlashes &&
-          !preferences.reducedEffects,
+        animate: !graphicsPlan().staticLegibilityCues,
       });
     }
     presentationRouter.consumeSimulationEffects(effects, board);
@@ -2201,6 +2211,7 @@ export async function bootstrap(): Promise<void> {
     shell.diagnosticsStatus.textContent = STRINGS["settings.diagnosticsCleared"];
   });
   shell.settingsBack.addEventListener("click", () => {
+    const previousGraphics = preferences.graphics;
     preferences = {
       effectsEnabled: shell.settingsInputs.effectsEnabled.checked,
       effectsVolume: Number(shell.settingsInputs.effectsVolume.value),
@@ -2211,10 +2222,15 @@ export async function bootstrap(): Promise<void> {
       colorPalette: shell.settingsInputs.colorPalette.value === "colorblind" ? "colorblind" : "standard",
       reducedMotion: shell.settingsInputs.reducedMotion.checked,
       reducedFlashes: shell.settingsInputs.reducedFlashes.checked,
-      reducedEffects: shell.settingsInputs.reducedEffects.checked,
+      graphics: shell.settingsInputs.graphics.value === "normal" ||
+        shell.settingsInputs.graphics.value === "low" ||
+        shell.settingsInputs.graphics.value === "very-low"
+        ? shell.settingsInputs.graphics.value
+        : "auto",
       screenShake: shell.settingsInputs.screenShake.checked,
       gameplayTips: shell.settingsInputs.gameplayTips.checked,
     };
+    if (preferences.graphics === "auto" && previousGraphics !== "auto") autoGraphics.reset();
     savePreferences(storage, preferences);
     applyPreferences();
     shell.show("home");
@@ -2691,6 +2707,7 @@ export async function bootstrap(): Promise<void> {
     const hidden = document.visibilityState === "hidden";
     if (hidden) {
       audio.pauseMusic();
+      autoGraphics.noteSuspension();
       renderer?.noteSuspension();
       if (passiveLiveRecovery !== null) {
         if (passiveLiveRecovery.tickTimer !== null) {
@@ -2757,6 +2774,11 @@ export async function bootstrap(): Promise<void> {
   window.addEventListener("keydown", () => void audio.unlock());
 
   const renderFrame = (now: number): void => {
+    if (document.visibilityState !== "hidden" && preferences.graphics === "auto") {
+      const tier = autoGraphics.tier;
+      autoGraphics.observeFrame(now);
+      if (autoGraphics.tier !== tier) applyGraphicsPlan();
+    }
     const elapsed = Math.min(250, Math.max(0, now - lastFrameMs));
     lastFrameMs = now;
     if (!presentationCadence.shouldPresent(mode, now)) {
@@ -2955,9 +2977,6 @@ export async function bootstrap(): Promise<void> {
         presentation: presentationTimeline.frameAt(now),
       },
       now,
-      mode === "competitive" || mode === "spectator"
-        ? NETWORKED_PRESENTATION_FPS
-        : 60,
     );
     window.requestAnimationFrame(renderFrame);
   };

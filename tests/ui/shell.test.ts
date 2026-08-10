@@ -22,6 +22,19 @@ import {
 } from "../../src/ui/shell";
 
 describe("application shell", () => {
+  it("offers graphics presets and announces Auto tier changes", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+
+    expect([...shell.settingsInputs.graphics.options].map((option) => option.textContent))
+      .toEqual(["Auto", "Normal", "Low", "Very Low"]);
+    expect(shell.graphicsStatus.getAttribute("aria-live")).toBe("polite");
+    shell.setPreferences({ ...DEFAULT_PREFERENCES, graphics: "auto" });
+    shell.setGraphicsStatus("auto", "low");
+    expect(shell.graphicsStatus.textContent).toBe("Auto currently uses Low.");
+    shell.setGraphicsStatus("normal", "low");
+    expect(shell.graphicsStatus.hidden).toBe(true);
+  });
+
   it("separates the fast Home actions from the sectioned Lobby", () => {
     const shell = createAppShell(document, document.createElement("div"));
 
@@ -1054,7 +1067,7 @@ describe("application shell", () => {
     }
   });
 
-  it.each(["reducedMotion", "reducedFlashes", "reducedEffects"] as const)(
+  it.each(["reducedMotion", "reducedFlashes"] as const)(
     "keeps the How to Play Glitch Piece static with %s enabled",
     (preference) => {
       vi.useFakeTimers();

@@ -8,8 +8,8 @@
     ]
   },
   "orchestrator": {
-    "bytes": 7693,
-    "estimatedTokens": 1924,
+    "bytes": 7714,
+    "estimatedTokens": 1929,
     "files": [
       ".agent/README.md",
       ".agent/skill-policy.yaml",
