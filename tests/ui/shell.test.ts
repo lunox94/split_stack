@@ -1053,7 +1053,10 @@ describe("application shell", () => {
     expect(pieces?.querySelector("h3")?.textContent).toBe("Special pieces");
     expect(pieces?.textContent).toContain("Hollow Cross");
     expect(pieces?.textContent).toContain("small 3×3 cardinal crimson Cross");
-    expect(pieces?.textContent).toContain("exactly four lines");
+    expect(pieces?.textContent).toContain(
+      "Any normal placement that completes exactly four rows sends a Hollow Cross",
+    );
+    expect(pieces?.textContent).not.toContain("with it sends it");
     const hollowCross = pieces?.querySelector<HTMLElement>(".special-piece-sample");
     expect(hollowCross?.getAttribute("aria-label")).toBe("Hollow Cross");
     expect(hollowCross?.querySelectorAll(".piece-preview-cell")).toHaveLength(4);

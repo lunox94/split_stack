@@ -321,7 +321,7 @@ export const STRINGS = {
   "help.specialPiecesHeading": "Special pieces",
   "help.hollowCross": "Hollow Cross",
   "help.hollowCrossDescription":
-    "A small 3×3 cardinal crimson Cross. Clearing exactly four lines with it sends it through the forced-piece queue. It does not rotate and can be held.",
+    "A small 3×3 cardinal crimson Cross. Any normal placement that completes exactly four rows sends a Hollow Cross through the forced-piece queue. It does not rotate and can be held.",
   "help.glitchPiece": "Glitch Piece",
   "help.glitchPieceDescription":
     "Its preview rapidly cycles through every tetromino, hiding its real shape until it spawns. Once revealed, it plays like a normal piece but cannot be held.",
