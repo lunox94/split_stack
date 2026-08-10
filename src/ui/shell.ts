@@ -2137,7 +2137,7 @@ export function showHelp(shell: AppShell, kind: "how" | "controls"): void {
       readonly description: StringKey;
     }> = [
       {
-        descriptor: { source: "cross", shape: "cross" },
+        descriptor: { source: "cross", shape: "cross", crossVariant: "small" },
         name: "help.hollowCross",
         description: "help.hollowCrossDescription",
       },

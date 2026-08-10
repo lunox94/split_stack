@@ -15,6 +15,7 @@ export type AudioCue =
   | "garbage-warning"
   | "garbage-rise"
   | "special-trigger"
+  | "hollow-cross"
   | "power-warning"
   | "power-blackout"
   | "power-scramble"
@@ -125,6 +126,11 @@ export const CUE_DEFINITIONS: Readonly<Record<AudioCue, CueDefinition>> = {
   "garbage-warning": [tone(150, 130, 0.07, "square", 110), tone(150, 130, 0.065, "square", 110, 180)],
   "garbage-rise": garbageRiseCueForRows(1),
   "special-trigger": [tone(700, 80, 0.065, "triangle", 1_100), tone(1_400, 120, 0.045, "sine", 900, 55)],
+  "hollow-cross": [
+    tone(310, 130, 0.05, "triangle", 265),
+    tone(1_860, 95, 0.025, "sine", 1_420, 24),
+    tone(465, 110, 0.035, "sine", 620, 62),
+  ],
   "power-warning": [tone(760, 65, 0.05, "sine", 920), tone(920, 80, 0.045, "sine", 760, 90)],
   "power-blackout": [tone(190, 400, 0.075, "sawtooth", 45)],
   "power-scramble": [tone(360, 85, 0.065, "square", 720), tone(720, 85, 0.06, "square", 240, 90)],

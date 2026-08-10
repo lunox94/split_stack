@@ -17,6 +17,7 @@ export function cueForAcceptedInput(
 export function cueForIncomingAttack(
   kind: CompetitiveIncomingAttackKind,
 ): AudioCue | null {
+  if (kind === "hollow-cross") return "hollow-cross";
   if (kind === "oversize") return "power-oversize";
   if (kind === "ghost-jam") return "power-ghost-jam";
   return null;

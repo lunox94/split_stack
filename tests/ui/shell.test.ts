@@ -794,7 +794,7 @@ describe("application shell", () => {
       marked,
       [
         glitch,
-        { source: "cross", shape: "cross" },
+        { source: "cross", shape: "cross", crossVariant: "large" },
         { source: "oversize", shape: "T" },
         { source: "base", shape: "O" },
         { source: "base", shape: "S" },
@@ -827,9 +827,37 @@ describe("application shell", () => {
     expect(slots[0]?.dataset.displayShape).toBe("J");
     expect(slots[0]?.dataset.glitch).toBe("cycling");
     expect(slots[1]?.querySelectorAll(".piece-preview-cell")).toHaveLength(8);
+    expect([...slots[1]!.querySelectorAll<HTMLElement>(".piece-preview-cell")]
+      .map((cell) => cell.dataset.shape))
+      .toEqual(["I", "T", "J", "S", "Z", "L", "O", "cross"]);
     expect(slots[2]?.dataset.source).toBe("oversize");
     expect(slots[2]?.querySelectorAll(".piece-preview-cell")).toHaveLength(7);
     expect(shell.left.preview.querySelector(".piece-preview-badge")).toBeNull();
+  });
+
+  it("renders descriptor-aware Cross visuals in Hold and preview slots", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+    shell.left.setPiecePreviews(
+      { source: "cross", shape: "cross", crossVariant: "large" },
+      [{ source: "cross", shape: "cross", crossVariant: "small" }],
+      {
+        colorPalette: "standard",
+        reducedMotion: false,
+        reducedFlashes: false,
+        elapsedMs: 0,
+      },
+    );
+
+    const holdKinds = [...shell.left.hold.querySelectorAll<HTMLElement>(".piece-preview-cell")]
+      .map((cell) => cell.dataset.shape);
+    const preview = shell.left.preview.querySelector<HTMLElement>(".piece-preview-slot");
+    const previewKinds = [...preview!.querySelectorAll<HTMLElement>(".piece-preview-cell")]
+      .map((cell) => cell.dataset.shape);
+    expect(holdKinds).toEqual(["I", "T", "J", "S", "Z", "L", "O", "cross"]);
+    expect(previewKinds).toEqual(["small-cross", "small-cross", "small-cross", "small-cross"]);
+    expect(shell.left.hold.querySelector<HTMLElement>(".piece-preview-slot")?.getAttribute("aria-label"))
+      .toBe("Hollow Cross");
+    expect(preview?.getAttribute("aria-label")).toBe("Hollow Cross");
   });
 
   it("keeps a Glitch preview concealed without cycling for accessibility modes", () => {
@@ -1024,6 +1052,16 @@ describe("application shell", () => {
     expect(marked?.querySelectorAll(".marked-cell-sample")).toHaveLength(5);
     expect(pieces?.querySelector("h3")?.textContent).toBe("Special pieces");
     expect(pieces?.textContent).toContain("Hollow Cross");
+    expect(pieces?.textContent).toContain("small 3×3 cardinal crimson Cross");
+    expect(pieces?.textContent).toContain("exactly four lines");
+    const hollowCross = pieces?.querySelector<HTMLElement>(".special-piece-sample");
+    expect(hollowCross?.getAttribute("aria-label")).toBe("Hollow Cross");
+    expect(hollowCross?.querySelectorAll(".piece-preview-cell")).toHaveLength(4);
+    expect([...hollowCross!.querySelectorAll<HTMLElement>(".piece-preview-cell")]
+      .every((cell) => cell.dataset.shape === "small-cross" &&
+        cell.dataset.pattern === "cross" &&
+        cell.style.getPropertyValue("--piece-color") === "#dc143c"))
+      .toBe(true);
     expect(pieces?.textContent).toContain("Glitch Piece");
     expect(pieces?.textContent).toContain("Oversize shapes");
     expect(pieces?.querySelectorAll(".special-piece-sample")).toHaveLength(3);

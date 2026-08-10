@@ -38,6 +38,28 @@ describe("board view projection", () => {
     expect(nextSpawn).not.toBe(spawned);
   });
 
+  it("maps each large Cross cell kind for active and ghost projections", () => {
+    const snapshot = createSimulation({
+      seed: "00112233445566778899aabbccddeeff",
+      playerId: "a",
+      practice: true,
+    }).readSnapshot();
+    if (snapshot.player.active === null) throw new Error("Expected an active piece");
+    snapshot.player.active.descriptor = {
+      source: "cross",
+      shape: "cross",
+      crossVariant: "large",
+    };
+
+    const cells = boardModelFromSimulation(snapshot, true, false).cells;
+    const kindsFor = (role: "active" | "ghost") => cells
+      .filter((cell) => cell.role === role)
+      .map((cell) => cell.kind);
+
+    expect(kindsFor("active")).toEqual(["I", "T", "J", "S", "Z", "L", "O", "cross"]);
+    expect(kindsFor("ghost")).toEqual(["I", "T", "J", "S", "Z", "L", "O", "cross"]);
+  });
+
   it("projects no board cells when Blackout conceals a remote owner", () => {
     const snapshot = createSimulation({
       seed: "00112233445566778899aabbccddeeff",

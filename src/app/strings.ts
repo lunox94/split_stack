@@ -199,7 +199,7 @@ export const STRINGS = {
   "results.leave": "Leave match",
   "results.duration": "Duration",
   "results.garbageSent": "Garbage sent",
-  "results.tetrises": "Four-line clears",
+  "results.tetrises": "Four+ line clears",
   "results.tSpins": "T-Spins",
   "results.powersActivated": "Powers activated",
   "results.score": "Score",
@@ -321,7 +321,7 @@ export const STRINGS = {
   "help.specialPiecesHeading": "Special pieces",
   "help.hollowCross": "Hollow Cross",
   "help.hollowCrossDescription":
-    "A complete eight-cell hollow cross sent through the forced-piece queue.",
+    "A small 3×3 cardinal crimson Cross. Clearing exactly four lines with it sends it through the forced-piece queue. It does not rotate and can be held.",
   "help.glitchPiece": "Glitch Piece",
   "help.glitchPieceDescription":
     "Its preview rapidly cycles through every tetromino, hiding its real shape until it spawns. Once revealed, it plays like a normal piece but cannot be held.",

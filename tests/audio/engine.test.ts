@@ -216,12 +216,16 @@ describe("audio engine lifecycle", () => {
     ).toBeGreaterThan(1_000);
   });
 
-  it("gives Oversize, Ghost Jam, and Glitch their own readable sound identities", () => {
+  it("gives Hollow Cross, Oversize, Ghost Jam, and Glitch distinct readable sound identities", () => {
+    const hollowCross = CUE_DEFINITIONS["hollow-cross"];
     const oversize = CUE_DEFINITIONS["power-oversize"];
     const ghostJam = CUE_DEFINITIONS["power-ghost-jam"];
     const glitchLow = CUE_DEFINITIONS["glitch-preview-low"][0]!;
     const glitchHigh = CUE_DEFINITIONS["glitch-preview-high"][0]!;
 
+    expect(hollowCross).toHaveLength(3);
+    expect(hollowCross.some((cue) => cue.frequency > 1_000)).toBe(true);
+    expect(hollowCross.some((cue) => cue.frequency < 500)).toBe(true);
     expect(oversize.some((cue) => cue.frequency < 100)).toBe(true);
     expect(oversize.some((cue) =>
       cue.endFrequency !== undefined && cue.endFrequency > cue.frequency

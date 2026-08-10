@@ -12,6 +12,7 @@ describe("piece visual tokens", () => {
       I: "#2bd9fe",
       T: "#b65cff",
       cross: "#f5ff72",
+      "small-cross": "#dc143c",
       garbage: "#768094",
       acid: "#8dff5a",
     });
@@ -19,6 +20,7 @@ describe("piece visual tokens", () => {
       I: "#56b4e9",
       T: "#cc79a7",
       cross: "#ffffff",
+      "small-cross": "#ffffff",
       garbage: "#777777",
       acid: "#8cff00",
     });
@@ -26,6 +28,7 @@ describe("piece visual tokens", () => {
       I: "diagonal",
       T: "crosses",
       cross: "cross",
+      "small-cross": "cross",
       garbage: "grid",
       acid: "bubbles",
     });

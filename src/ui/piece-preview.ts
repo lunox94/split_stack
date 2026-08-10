@@ -1,4 +1,4 @@
-import { getDescriptorCells } from "../domain/pieces";
+import { getDescriptorCells, getPieceCellKind } from "../domain/pieces";
 import type {
   FallingShape,
   PieceDescriptor,
@@ -14,6 +14,7 @@ import {
   COLORBLIND_PIECE_COLORS,
   PIECE_PATTERNS,
   STANDARD_PIECE_COLORS,
+  type PieceVisualKind,
 } from "../render/piece-visual-tokens";
 
 export interface PiecePreviewOptions {
@@ -81,7 +82,7 @@ function appendCell(
   document: Document,
   grid: HTMLElement,
   cell: { readonly x: number; readonly y: number; readonly index: number },
-  shape: FallingShape,
+  shape: PieceVisualKind,
   descriptor: PieceDescriptor,
   minX: number,
   minY: number,
@@ -138,6 +139,7 @@ export function renderPiecePreviewSlot(
         descriptor.shape,
         descriptor.specialCellIndex ?? "",
         descriptor.specialKind ?? "",
+        descriptor.crossVariant ?? "",
         descriptor.previewCosmetics?.kind ?? "stable",
         staticGlitch ? "static" : glitchShape ?? descriptor.shape,
         options.colorPalette,
@@ -174,10 +176,9 @@ export function renderPiecePreviewSlot(
     }
   } else {
     const displayShape = glitchShape ?? descriptor.shape;
-    const displayedDescriptor: PieceDescriptor = {
-      ...descriptor,
-      shape: displayShape,
-    };
+    const displayedDescriptor: PieceDescriptor = descriptor.source === "glitch"
+      ? { ...descriptor, shape: displayShape as StandardShape }
+      : descriptor;
     const cells = getDescriptorCells(displayedDescriptor, 0);
     const minX = Math.min(...cells.map((cell) => cell.x));
     const maxX = Math.max(...cells.map((cell) => cell.x));
@@ -192,7 +193,9 @@ export function renderPiecePreviewSlot(
         document,
         grid,
         cell,
-        displayShape,
+        displayedDescriptor.shape === "acid"
+          ? "acid"
+          : getPieceCellKind(displayedDescriptor, cell.index),
         descriptor,
         minX,
         minY,

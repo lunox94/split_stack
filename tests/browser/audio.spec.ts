@@ -117,6 +117,7 @@ test("gameplay effects stay audible with music disabled and retain safe headroom
       hardDrop: await render((engine) => engine.play("hard-drop")),
       single: await render((engine) => engine.play("single")),
       fourLine: await render((engine) => engine.play("four-line")),
+      hollowCross: await render((engine) => engine.play("hollow-cross")),
       garbage: await render((engine) => engine.playGarbageRise(4)),
       stackedImpactFull: await render((engine) => {
         for (let index = 0; index < 6; index += 1) engine.play("four-line");
@@ -134,6 +135,7 @@ test("gameplay effects stay audible with music disabled and retain safe headroom
     levels.hardDrop,
     levels.single,
     levels.fourLine,
+    levels.hollowCross,
     levels.garbage,
   ]) {
     expect(impact.peak).toBeGreaterThanOrEqual(0.1);

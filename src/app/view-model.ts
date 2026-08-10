@@ -1,4 +1,4 @@
-import { getAbsoluteCells } from "../domain/pieces";
+import { getAbsoluteCells, getPieceCellKind } from "../domain/pieces";
 import type {
   ActivePiece,
   GarbagePacket,
@@ -16,8 +16,8 @@ import type {
 } from "../render/renderer";
 import type { SimulationSnapshot } from "../domain/simulation";
 
-function descriptorKind(descriptor: PieceDescriptor): RenderCellKind {
-  return descriptor.shape;
+function descriptorKind(descriptor: PieceDescriptor, index: number): RenderCellKind {
+  return getPieceCellKind(descriptor, index);
 }
 
 function activePieceKey(
@@ -35,6 +35,7 @@ function activePieceKey(
     descriptor.eventId ?? "base",
     descriptor.source,
     descriptor.shape,
+    descriptor.crossVariant ?? "",
     descriptor.specialKind ?? "ordinary",
     descriptor.specialCellIndex ?? -1,
   ].join(":");
@@ -72,7 +73,7 @@ function fallingCells(
     const model: RenderCellModel = {
       column: cell.x,
       row: cell.y,
-      kind: descriptorKind(active.descriptor),
+      kind: descriptorKind(active.descriptor, cell.index),
       role,
     };
     return cell.index === active.descriptor.specialCellIndex &&

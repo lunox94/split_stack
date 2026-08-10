@@ -1148,7 +1148,8 @@ export async function bootstrap(): Promise<void> {
       } else if (effect.kind === "garbage-rise") {
         audio.playGarbageRise(effect.rows ?? 1, { pan });
       }
-      else if (effect.kind === "hollow-cross" || effect.kind === "glitch-piece") audio.play("special-trigger", { pan });
+      else if (effect.kind === "hollow-cross") audio.play("hollow-cross", { pan });
+      else if (effect.kind === "glitch-piece") audio.play("special-trigger", { pan });
       else if (effect.kind === "blackout-start") {
         audio.play("power-blackout", { pan });
         audio.duckMusic();

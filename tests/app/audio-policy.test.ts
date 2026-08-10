@@ -16,6 +16,7 @@ describe("app audio policy", () => {
   });
 
   it("gives affected players the new incoming power cues without duplicating legacy callbacks", () => {
+    expect(cueForIncomingAttack("hollow-cross")).toBe("hollow-cross");
     expect(cueForIncomingAttack("oversize")).toBe("power-oversize");
     expect(cueForIncomingAttack("ghost-jam")).toBe("power-ghost-jam");
     expect(cueForIncomingAttack("garbage")).toBeNull();
