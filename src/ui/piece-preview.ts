@@ -92,6 +92,7 @@ function appendCell(
   node.className = "piece-preview-cell";
   node.dataset.shape = shape;
   node.dataset.pattern = PIECE_PATTERNS[shape];
+  node.dataset.palette = palette;
   node.style.gridColumn = String(cell.x - minX + 1);
   node.style.gridRow = String(cell.y - minY + 1);
   node.style.setProperty(
@@ -110,13 +111,19 @@ function appendCell(
       "--special-accent",
       SPECIAL_ACCENT_COLORS[descriptor.specialKind],
     );
-    node.append(
-      createSpecialIcon(
-        document,
-        descriptor.specialKind,
-        SPECIAL_LABELS[descriptor.specialKind],
-      ),
+    const icon = createSpecialIcon(
+      document,
+      descriptor.specialKind,
+      SPECIAL_LABELS[descriptor.specialKind],
     );
+    const glyphStroke = icon.querySelector<SVGPathElement>("path");
+    if (glyphStroke !== null) {
+      const glyphUnderstroke = glyphStroke.cloneNode(true) as SVGPathElement;
+      glyphUnderstroke.classList.add("glyph-understroke");
+      glyphStroke.classList.add("glyph-stroke");
+      icon.insertBefore(glyphUnderstroke, glyphStroke);
+    }
+    node.append(icon);
   }
   grid.append(node);
 }

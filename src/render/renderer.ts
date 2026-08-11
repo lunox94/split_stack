@@ -16,7 +16,6 @@ import {
   MeshBasicMaterial,
   MeshStandardMaterial,
   OrthographicCamera,
-  RepeatWrapping,
   Scene,
   Shape,
   ShapeGeometry,
@@ -40,6 +39,7 @@ import {
 } from "./special-icons";
 import {
   COLORBLIND_PIECE_COLORS,
+  PIECE_CELL_ART,
   PIECE_PATTERNS,
   STANDARD_PIECE_COLORS,
   type PieceVisualKind,
@@ -49,7 +49,19 @@ import {
   type EffectQuality,
   type RenderQualityProfile,
 } from "./quality";
+import {
+  markedCellPresentationAt,
+  resolveMarkedNeighborFields,
+  type MarkedCellPresentation,
+} from "./marked-cell-field";
 import { MarkedCellPulseTracker } from "./marked-cell-pulses";
+
+export {
+  MARKED_CELL_FIELD_DURATION_MS,
+  markedCellFieldEnvelopeAt,
+  markedCellPresentationAt,
+  resolveMarkedNeighborFields,
+} from "./marked-cell-field";
 
 export type RenderCellKind = CellKind | "acid";
 export type RenderCellRole = "settled" | "active" | "ghost";
@@ -62,6 +74,8 @@ export interface RenderCellModel {
   readonly special?: SpecialKind;
   /** Optional 0..1 spawn/lock emphasis supplied by the presentation layer. */
   readonly specialEmphasis?: number;
+  /** Distinguishes the stronger spawn ignition from the quieter lock settle. */
+  readonly specialEmphasisKind?: "spawn" | "lock";
 }
 
 export interface BoardRenderModel {
@@ -146,60 +160,24 @@ export interface PresentationMotionTransform {
   readonly ghostJamOpacity: number;
 }
 
-export interface MarkedCellPresentation {
-  readonly accent: number;
-  readonly emissiveIntensity: number;
-  readonly rimOpacity: number;
-  readonly rimScale: number;
-  readonly haloOpacity: number;
-  readonly haloScale: number;
+const MARKED_ACTIVATION_HALO_SPAN = 1.72;
+
+function markedCellClipMask(cell: Pick<RenderCellModel, "column" | "row">): string {
+  return `${cell.column === 0 ? "l" : ""}${
+    cell.column === RULES.board.width - 1 ? "r" : ""
+  }${cell.row === RULES.board.hiddenRows ? "t" : ""}${
+    cell.row === RULES.board.height - 1 ? "b" : ""
+  }`;
 }
 
-/**
- * Public, deterministic marked-cell visual state. The glyph itself stays
- * static; only its surrounding light breathes. The explicit accessibility
- * static treatment ignores time and remains equally legible.
- */
-export function markedCellPresentationAt(
-  special: SpecialKind,
-  role: RenderCellRole,
-  quality: EffectQuality,
-  timestampMs: number,
-  emphasis = 0,
-): MarkedCellPresentation {
-  const pulse = Math.max(0, Math.min(1, emphasis));
-  if (role === "ghost") {
-    const breath = quality === "reduced"
-      ? 0.5
-      : (Math.sin(timestampMs / 1_100 * Math.PI * 2) + 1) / 2;
-    return {
-      accent: SPECIAL_ACCENT_HEX[special],
-      emissiveIntensity: 0.14 + breath * 0.08,
-      rimOpacity: 0.12 + breath * 0.14,
-      rimScale: 0.75 + breath * 0.05,
-      haloOpacity: 0.035 + breath * 0.065,
-      haloScale: 0.84 + breath * 0.07,
-    };
-  }
-  if (quality === "reduced") {
-    return {
-      accent: SPECIAL_ACCENT_HEX[special],
-      emissiveIntensity: 0.95,
-      rimOpacity: 0.86,
-      rimScale: 0.94,
-      haloOpacity: 0.34,
-      haloScale: 1.14,
-    };
-  }
-  const breath = (Math.sin(timestampMs / 1_100 * Math.PI * 2) + 1) / 2;
-  return {
-    accent: SPECIAL_ACCENT_HEX[special],
-    emissiveIntensity: 0.72 + breath * 0.35,
-    rimOpacity: Math.min(1, 0.68 + breath * 0.27 + pulse * 0.08),
-    rimScale: 0.92 + breath * 0.05 + pulse * 0.04,
-    haloOpacity: Math.min(0.68, 0.18 + breath * 0.22 + pulse * 0.18),
-    haloScale: 1.06 + breath * 0.16 + pulse * 0.12,
-  };
+function effectRenderOrderFor(key: string): number {
+  if (key.startsWith("special-activation-")) return 30;
+  if (key.startsWith("marked-neighbor-surface-")) return 5;
+  if (key.startsWith("marked-neighbor-rim-")) return 6;
+  if (key.startsWith("marked-source-face-")) return 7;
+  if (key.startsWith("marked-source-rim-")) return 8;
+  if (key.startsWith("marked-source-glyph-")) return 9;
+  return 20;
 }
 
 export function presentationMotionTransform(
@@ -356,6 +334,9 @@ const VERSUS_CENTER_CORRIDOR_PX =
 interface CellPool {
   readonly mesh: InstancedMesh;
   readonly material: MeshStandardMaterial;
+  readonly kind: RenderCellKind;
+  readonly role: RenderCellRole;
+  readonly special: SpecialKind | undefined;
 }
 
 interface EffectPool {
@@ -557,7 +538,44 @@ export class ThreeRenderer {
   readonly #scene = new Scene();
   readonly #camera = new OrthographicCamera(0, 1, 1, 0, -100, 100);
   readonly #renderer: WebGLRenderer;
-  readonly #cellGeometry = new RoundedBoxGeometry(1, 1, 0.18, 2, 0.06);
+  readonly #cellGeometry = new RoundedBoxGeometry(
+    1,
+    1,
+    PIECE_CELL_ART.cornerRadius * 2,
+    3,
+    PIECE_CELL_ART.cornerRadius,
+  );
+  readonly #limitedCellGeometry = new RoundedBoxGeometry(
+    1,
+    1,
+    PIECE_CELL_ART.cornerRadius * 2,
+    2,
+    PIECE_CELL_ART.cornerRadius,
+  );
+  readonly #reducedCellGeometry = new RoundedBoxGeometry(
+    1,
+    1,
+    PIECE_CELL_ART.cornerRadius * 2,
+    1,
+    PIECE_CELL_ART.cornerRadius,
+  );
+  readonly #garbageGeometry = new RoundedBoxGeometry(
+    1,
+    1,
+    PIECE_CELL_ART.garbageCornerRadius * 2,
+    2,
+    PIECE_CELL_ART.garbageCornerRadius,
+  );
+  readonly #reducedGarbageGeometry = new RoundedBoxGeometry(
+    1,
+    1,
+    PIECE_CELL_ART.garbageCornerRadius * 2,
+    1,
+    PIECE_CELL_ART.garbageCornerRadius,
+  );
+  readonly #monominoGeometry = new RoundedBoxGeometry(1, 1, 0.92, 3, 0.46);
+  readonly #limitedMonominoGeometry = new RoundedBoxGeometry(1, 1, 0.92, 2, 0.46);
+  readonly #reducedMonominoGeometry = new RoundedBoxGeometry(1, 1, 0.92, 1, 0.46);
   readonly #acidGeometry = createAcidDropGeometry();
   readonly #effectGeometry = createUnitPanelGeometry();
   readonly #pools = new Map<string, CellPool>();
@@ -577,6 +595,7 @@ export class ThreeRenderer {
   #pixelRatio = 0;
   #palette: "standard" | "colorblind" = "standard";
   #effectInstanceCount = 0;
+  #defaultEffectZ = 3;
   #frameTimestampMs = 0;
   #staticMarkedCells = false;
 
@@ -637,6 +656,10 @@ export class ThreeRenderer {
     const previous = this.#quality.profile.effects;
     this.#quality.set(quality);
     if (this.#quality.profile.effects !== previous) {
+      for (const pool of this.#pools.values()) {
+        pool.mesh.geometry = this.#cellGeometryFor(pool.kind, pool.role);
+        this.#refreshCellPoolMaterial(pool);
+      }
       this.#pixelRatio = 0;
       this.#options.onQualityChanged?.(this.#quality.profile);
     }
@@ -653,13 +676,7 @@ export class ThreeRenderer {
   setColorPalette(palette: "standard" | "colorblind"): void {
     if (this.#palette === palette) return;
     this.#palette = palette;
-    for (const [key, pool] of this.#pools) {
-      const [kind] = key.split(":") as [RenderCellKind];
-      const color = new Color(this.#colors()[kind]);
-      pool.material.color.copy(color);
-      pool.material.emissive.setHex(0x000000);
-      pool.material.needsUpdate = true;
-    }
+    for (const pool of this.#pools.values()) this.#refreshCellPoolMaterial(pool);
   }
 
   render(frame: GameRenderFrame, timestampMs = performance.now()): void {
@@ -678,6 +695,7 @@ export class ThreeRenderer {
       pool.mesh.visible = false;
     }
     this.#effectInstanceCount = 0;
+    this.#defaultEffectZ = 3;
     this.#scene.position.set(0, 0, 0);
     this.#drawBoard(
       decoratedFrame.left,
@@ -725,6 +743,13 @@ export class ThreeRenderer {
     this.#textures.clear();
     this.#markedCellPulses.clear();
     this.#cellGeometry.dispose();
+    this.#limitedCellGeometry.dispose();
+    this.#reducedCellGeometry.dispose();
+    this.#garbageGeometry.dispose();
+    this.#reducedGarbageGeometry.dispose();
+    this.#monominoGeometry.dispose();
+    this.#limitedMonominoGeometry.dispose();
+    this.#reducedMonominoGeometry.dispose();
     this.#acidGeometry.dispose();
     this.#effectGeometry.dispose();
     for (const panel of this.#panels) {
@@ -793,108 +818,211 @@ export class ThreeRenderer {
     panel.border.material.opacity = board.focused ? 1 : 0.65;
 
     if (board.concealed) return;
-    for (const cell of board.cells) this.#drawCell(cell, viewport, movementEffect);
+    for (const cell of board.cells) {
+      this.#drawCellBase(cell, viewport, movementEffect);
+    }
+    this.#drawMarkedNeighborFields(board, viewport, movementEffect);
+    for (const cell of board.cells) {
+      this.#drawMarkedSource(cell, viewport, movementEffect);
+    }
     this.#drawBoardStatus(board, viewport);
   }
 
-  #drawCell(
+  #markedPresentation(cell: RenderCellModel): MarkedCellPresentation | null {
+    if (cell.special === undefined) return null;
+    return markedCellPresentationAt(
+      cell.special,
+      cell.role,
+      this.#markedCellQuality(),
+      this.#frameTimestampMs,
+      cell.specialEmphasis,
+      cell.specialEmphasisKind,
+      this.#staticMarkedCells,
+    );
+  }
+
+  #cellVisualPoint(
     cell: RenderCellModel,
     viewport: BoardViewport,
     movementEffect?: PresentationEffect,
-  ): void {
-    if (
-      cell.column < 0 ||
-      cell.column >= RULES.board.width ||
-      cell.row < RULES.board.hiddenRows ||
-      cell.row >= RULES.board.height
-    ) {
-      return;
-    }
-    const pool = this.#poolFor(cell);
-    if (pool.mesh.count >= MAX_INSTANCES_PER_POOL) return;
-    pool.mesh.visible = true;
-
+  ): { readonly x: number; readonly y: number } {
     const visualRow = movementEffect?.kind === "collapse"
       ? collapseCellVisualRow(movementEffect, cell.column, cell.row)
       : movementEffect?.kind === "garbage-rise"
         ? garbageCellVisualRow(movementEffect, cell.row)
         : cell.row;
-    const visibleRow = visualRow - RULES.board.hiddenRows;
-    const x = viewport.boardX + (cell.column + 0.5) * viewport.cellSize;
-    const top = viewport.boardY + (visibleRow + 0.5) * viewport.cellSize;
-    const y = this.#layout.height - top;
-    const inset = cell.role === "ghost" ? 0.7 : 0.88;
+    return this.#cellPoint(viewport, cell.column, visualRow);
+  }
+
+  #cellIsVisible(cell: Pick<RenderCellModel, "column" | "row">): boolean {
+    return cell.column >= 0 &&
+      cell.column < RULES.board.width &&
+      cell.row >= RULES.board.hiddenRows &&
+      cell.row < RULES.board.height;
+  }
+
+  #drawCellBase(
+    cell: RenderCellModel,
+    viewport: BoardViewport,
+    movementEffect?: PresentationEffect,
+  ): void {
+    if (!this.#cellIsVisible(cell)) return;
+    const presentation = this.#markedPresentation(cell);
+    const pool = this.#poolFor(cell);
+    if (pool.mesh.count >= MAX_INSTANCES_PER_POOL) return;
+    pool.mesh.visible = true;
+    if (presentation !== null) {
+      pool.material.emissive.setHex(presentation.accent);
+      pool.material.emissiveIntensity = presentation.emissiveIntensity;
+    }
+
+    const { x, y } = this.#cellVisualPoint(cell, viewport, movementEffect);
+    const inset = cell.role === "ghost"
+      ? PIECE_CELL_ART.ghostInset
+      : PIECE_CELL_ART.inset;
+    const depthScale = cell.kind === "monomino"
+      ? 0.3
+      : cell.kind === "garbage" || cell.kind === "acid"
+        ? 1
+        : 0.75;
     this.#position.set(x, y, cell.role === "active" ? 0.7 : 0);
     this.#scale.set(
       viewport.cellSize * inset,
       viewport.cellSize * inset,
-      viewport.cellSize,
+      viewport.cellSize * depthScale,
     );
     this.#matrix.compose(this.#position, this.#camera.quaternion, this.#scale);
     pool.mesh.setMatrixAt(pool.mesh.count, this.#matrix);
     pool.mesh.count += 1;
-    if (cell.special !== undefined) {
+  }
+
+  #drawMarkedNeighborFields(
+    board: BoardRenderModel,
+    viewport: BoardViewport,
+    movementEffect?: PresentationEffect,
+  ): void {
+    const targets = new Map<string, RenderCellModel>();
+    const visibleCells = board.cells.filter((cell) => this.#cellIsVisible(cell));
+    for (const cell of visibleCells) {
+      if (cell.role === "ghost") continue;
+      const key = `${cell.column}:${cell.row}`;
+      if (!targets.has(key)) targets.set(key, cell);
+    }
+    const overlayBaseZ = viewport.cellSize * 0.15 + 0.85;
+    for (const field of resolveMarkedNeighborFields(visibleCells)) {
+      const target = targets.get(`${field.targetColumn}:${field.targetRow}`);
+      if (target === undefined) continue;
       const presentation = markedCellPresentationAt(
-        cell.special,
-        cell.role,
+        field.sourceSpecial,
+        field.sourceRole,
         this.#markedCellQuality(),
         this.#frameTimestampMs,
-        cell.specialEmphasis,
+        field.sourceEmphasis,
+        field.sourceEmphasisKind,
+        this.#staticMarkedCells,
       );
-      const haloZ = cell.role === "active" ? 0.45 : -0.2;
-      this.#drawEffectTexture(
-        `special-halo-${cell.role}-${cell.special}`,
-        this.#specialHaloTexture(cell.special),
-        x,
-        y,
-        viewport.cellSize * presentation.haloScale * 1.6,
-        viewport.cellSize * presentation.haloScale * 1.6,
-        1,
-        {
-          z: haloZ,
-          additive: true,
-          instanceIntensity: presentation.haloOpacity,
-        },
-      );
-      const span = viewport.cellSize * presentation.rimScale;
-      const edge = viewport.cellSize * (cell.role === "ghost" ? 0.035 : 0.07);
-      for (const [rimX, rimY, width, height] of [
-        [x, y - span / 2, span, edge],
-        [x, y + span / 2, span, edge],
-        [x - span / 2, y, edge, span],
-        [x + span / 2, y, edge, span],
-      ] as const) {
-        this.#drawEffectRect(
-          `special-rim-${cell.role}-${cell.special}`,
-          presentation.accent,
-          rimX,
-          rimY,
-          width,
-          height,
+      const { x, y } = this.#cellVisualPoint(target, viewport, movementEffect);
+      const directionKey = `${field.directionX}:${field.directionY}`;
+      const span = viewport.cellSize * 0.91;
+      if (presentation.neighborSurfaceOpacity > 0) {
+        this.#drawEffectTexture(
+          `marked-neighbor-surface-${field.sourceSpecial}-${directionKey}`,
+          this.#markedNeighborFieldTexture(
+            field.sourceSpecial,
+            field.directionX,
+            field.directionY,
+            "surface",
+          ),
+          x,
+          y,
+          span,
+          span,
           1,
           {
-            z: cell.role === "active" ? 1.2 : 0.65,
-            countsTowardPresentationLimit: false,
-            instanceIntensity: presentation.rimOpacity,
+            z: overlayBaseZ,
+            additive: true,
+            instanceIntensity:
+              presentation.neighborSurfaceOpacity * field.attenuation,
           },
         );
       }
-      if (cell.role !== "ghost") {
+      if (presentation.neighborRimOpacity > 0) {
         this.#drawEffectTexture(
-          `special-badge-${cell.special}`,
-          this.#specialBadgeTexture(cell.special),
+          `marked-neighbor-rim-${field.sourceSpecial}-${directionKey}`,
+          this.#markedNeighborFieldTexture(
+            field.sourceSpecial,
+            field.directionX,
+            field.directionY,
+            "rim",
+          ),
           x,
           y,
-          viewport.cellSize,
-          viewport.cellSize,
+          span,
+          span,
           1,
           {
-            z: viewport.cellSize * 0.1 +
-              (cell.role === "active" ? 0.7 : 0),
+            z: overlayBaseZ + 0.04,
+            additive: true,
+            instanceIntensity: presentation.neighborRimOpacity * field.attenuation,
           },
         );
       }
     }
+  }
+
+  #drawMarkedSource(
+    cell: RenderCellModel,
+    viewport: BoardViewport,
+    movementEffect?: PresentationEffect,
+  ): void {
+    const presentation = this.#markedPresentation(cell);
+    if (cell.special === undefined || presentation === null) return;
+    if (!this.#cellIsVisible(cell)) return;
+    const { x, y } = this.#cellVisualPoint(cell, viewport, movementEffect);
+    const overlayBaseZ = viewport.cellSize * 0.15 + 0.85;
+    const span = viewport.cellSize * (cell.role === "ghost" ? 0.72 : 0.91);
+    if (presentation.sourceFaceOpacity > 0) {
+      this.#drawEffectTexture(
+        `marked-source-face-${cell.role}-${cell.special}`,
+        this.#markedSourceFaceTexture(cell.special),
+        x,
+        y,
+        span,
+        span,
+        1,
+        {
+          z: overlayBaseZ + 0.08,
+          additive: true,
+          instanceIntensity: presentation.sourceFaceOpacity,
+        },
+      );
+    }
+    if (presentation.sourceRimOpacity > 0) {
+      this.#drawEffectTexture(
+        `marked-source-rim-${cell.role}-${cell.special}`,
+        this.#markedSourceRimTexture(cell.special),
+        x,
+        y,
+        span,
+        span,
+        1,
+        {
+          z: overlayBaseZ + 0.12,
+          additive: true,
+          instanceIntensity: presentation.sourceRimOpacity,
+        },
+      );
+    }
+    this.#drawEffectTexture(
+      `marked-source-glyph-${cell.role}-${cell.special}`,
+      this.#markedSourceGlyphTexture(cell.special),
+      x,
+      y,
+      viewport.cellSize,
+      viewport.cellSize,
+      presentation.glyphOpacity,
+      { z: overlayBaseZ + 0.16 },
+    );
   }
 
   #drawBoardStatus(board: BoardRenderModel, viewport: BoardViewport): void {
@@ -950,6 +1078,7 @@ export class ThreeRenderer {
     effect: PresentationEffect,
     viewport: BoardViewport,
   ): void {
+    this.#defaultEffectZ = viewport.cellSize * 0.17 + 1.3;
     const visualEffect = this.#quality.profile.effects === "reduced"
       ? { ...effect, visualStyle: "fade" as const }
       : effect;
@@ -1219,14 +1348,41 @@ export class ThreeRenderer {
       for (const special of effect.resolvedSpecials ?? []) {
         const point = this.#cellPoint(viewport, special.column, special.row);
         const color = SPECIAL_ACCENT_HEX[special.special];
-        this.#drawEffectRect(
-          `special-${special.special}`,
-          color,
+        const dynamicSurge = visualEffect.visualStyle === "motion" && effect.flash;
+        const surge = dynamicSurge ? Math.sin(effect.stageProgress * Math.PI) : 0;
+        const clipMask = markedCellClipMask(special);
+        const activationZ = viewport.cellSize * 0.18 + 1.6;
+        this.#drawEffectTexture(
+          `special-activation-halo-${special.special}-${clipMask}`,
+          this.#specialHaloTexture(
+            special.special,
+            clipMask,
+            MARKED_ACTIVATION_HALO_SPAN,
+          ),
           point.x,
           point.y,
-          viewport.cellSize * 1.3,
-          viewport.cellSize * 1.3,
-          0.5,
+          viewport.cellSize * MARKED_ACTIVATION_HALO_SPAN,
+          viewport.cellSize * MARKED_ACTIVATION_HALO_SPAN,
+          1,
+          {
+            z: activationZ,
+            additive: true,
+            instanceIntensity: 0.24 + surge * 0.34,
+          },
+        );
+        this.#drawEffectTexture(
+          `special-activation-core-${special.special}`,
+          this.#specialCoreTexture(special.special),
+          point.x,
+          point.y,
+          viewport.cellSize * (0.8 + surge * 0.08),
+          viewport.cellSize * (0.8 + surge * 0.08),
+          1,
+          {
+            z: activationZ + 0.04,
+            additive: true,
+            instanceIntensity: 0.4 + surge * 0.34,
+          },
         );
         this.#drawParticleBurst(
           { ...effect, id: `${effect.id}:${special.row}:${special.column}` },
@@ -1314,7 +1470,7 @@ export class ThreeRenderer {
     pool.material.opacity = intensity === undefined
       ? Math.max(0, Math.min(1, opacity))
       : 1;
-    this.#position.set(x, y, options.z ?? 3);
+    this.#position.set(x, y, options.z ?? this.#defaultEffectZ);
     this.#scale.set(Math.max(0.01, width), Math.max(0.01, height), 1);
     this.#matrix.compose(this.#position, this.#camera.quaternion, this.#scale);
     pool.mesh.setMatrixAt(pool.mesh.count, this.#matrix);
@@ -1353,7 +1509,7 @@ export class ThreeRenderer {
     pool.material.opacity = intensity === undefined
       ? Math.max(0, Math.min(1, opacity))
       : 1;
-    this.#position.set(x, y, options.z ?? 3);
+    this.#position.set(x, y, options.z ?? this.#defaultEffectZ);
     this.#scale.set(Math.max(0.01, width), Math.max(0.01, height), 1);
     this.#matrix.compose(this.#position, this.#camera.quaternion, this.#scale);
     pool.mesh.setMatrixAt(pool.mesh.count, this.#matrix);
@@ -1394,6 +1550,7 @@ export class ThreeRenderer {
     );
     mesh.count = 0;
     mesh.frustumCulled = false;
+    mesh.renderOrder = effectRenderOrderFor(key);
     mesh.instanceMatrix.setUsage(DynamicDrawUsage);
     this.#scene.add(mesh);
     const created = { mesh, material };
@@ -1401,27 +1558,78 @@ export class ThreeRenderer {
     return created;
   }
 
+  #cellGeometryFor(
+    kind: RenderCellKind,
+    role: RenderCellRole,
+  ): BufferGeometry {
+    const quality = role === "ghost"
+      ? "reduced"
+      : this.#quality.profile.effects;
+    if (kind === "acid") return this.#acidGeometry;
+    if (kind === "monomino") {
+      return quality === "full"
+        ? this.#monominoGeometry
+        : quality === "limited"
+          ? this.#limitedMonominoGeometry
+          : this.#reducedMonominoGeometry;
+    }
+    if (kind === "garbage") {
+      return quality === "full" ? this.#garbageGeometry : this.#reducedGarbageGeometry;
+    }
+    return quality === "full"
+      ? this.#cellGeometry
+      : quality === "limited"
+        ? this.#limitedCellGeometry
+        : this.#reducedCellGeometry;
+  }
+
+  #refreshCellPoolMaterial(pool: CellPool): void {
+    const quality = this.#quality.profile.effects;
+    const reduced = quality === "reduced";
+    const limited = quality === "limited";
+    const ghost = pool.role === "ghost";
+    const baseColor = this.#cellBaseColor(pool.kind, pool.special);
+    const material = pool.material;
+
+    material.color.copy(baseColor);
+    material.map = ghost ? null : this.#patternTexture(pool.kind);
+    material.transparent = ghost;
+    material.opacity = ghost ? reduced ? 0.27 : 0.22 : 1;
+    material.depthWrite = !ghost;
+    material.wireframe = ghost;
+
+    if (pool.kind === "garbage") {
+      material.metalness = reduced ? 0.08 : limited ? 0.24 : 0.38;
+      material.roughness = reduced ? 0.8 : limited ? 0.7 : 0.64;
+    } else if (pool.kind === "monomino") {
+      material.metalness = reduced ? 0.02 : limited ? 0.08 : 0.12;
+      material.roughness = reduced ? 0.55 : limited ? 0.34 : 0.24;
+    } else if (pool.kind === "acid") {
+      material.metalness = reduced ? 0 : limited ? 0.04 : 0.08;
+      material.roughness = reduced ? 0.62 : limited ? 0.4 : 0.28;
+    } else {
+      material.metalness = reduced ? 0.02 : limited ? 0.08 : 0.12;
+      material.roughness = reduced ? 0.62 : limited ? 0.46 : 0.36;
+    }
+
+    if (pool.role === "active" && pool.special === undefined) {
+      material.emissive.copy(baseColor);
+      material.emissiveIntensity = reduced ? 0.006 : limited ? 0.012 : 0.018;
+    } else {
+      material.emissive.setHex(0x000000);
+      material.emissiveIntensity = 0;
+    }
+    material.needsUpdate = true;
+  }
+
   #poolFor(cell: RenderCellModel): CellPool {
     const key = `${cell.kind}:${cell.role}:${cell.special ?? "ordinary"}`;
     const existing = this.#pools.get(key);
     if (existing !== undefined) return existing;
 
-    const baseColor = new Color(this.#colors()[cell.kind]);
-    const isGhost = cell.role === "ghost";
-    const texture = isGhost ? null : this.#patternTexture(cell.kind);
-    const material = new MeshStandardMaterial({
-      color: baseColor,
-      map: texture,
-      emissive: 0x000000,
-      metalness: cell.kind === "garbage" ? 0.58 : 0.22,
-      roughness: cell.kind === "garbage" ? 0.78 : 0.42,
-      transparent: isGhost,
-      opacity: isGhost ? 0.2 : 1,
-      depthWrite: !isGhost,
-      wireframe: isGhost,
-    });
+    const material = new MeshStandardMaterial();
     const mesh = new InstancedMesh(
-      cell.kind === "acid" ? this.#acidGeometry : this.#cellGeometry,
+      this.#cellGeometryFor(cell.kind, cell.role),
       material,
       MAX_INSTANCES_PER_POOL,
     );
@@ -1429,7 +1637,14 @@ export class ThreeRenderer {
     mesh.frustumCulled = false;
     mesh.instanceMatrix.setUsage(DynamicDrawUsage);
     this.#scene.add(mesh);
-    const created = { mesh, material };
+    const created: CellPool = {
+      mesh,
+      material,
+      kind: cell.kind,
+      role: cell.role,
+      special: cell.special,
+    };
+    this.#refreshCellPoolMaterial(created);
     this.#pools.set(key, created);
     return created;
   }
@@ -1440,111 +1655,153 @@ export class ThreeRenderer {
       : STANDARD_PIECE_COLORS;
   }
 
+  #cellBaseColor(kind: RenderCellKind, special?: SpecialKind): Color {
+    const color = new Color(this.#colors()[kind]);
+    if (special !== undefined) {
+      // P4 treats the marked cell as the power's light source. Keep a trace of
+      // the piece hue, while letting the power accent lead at the dim phase so
+      // complementary piece colors cannot mix into a pale or muddy source.
+      color.lerp(new Color(SPECIAL_ACCENT_HEX[special]), 0.96);
+    }
+    return color;
+  }
+
   #markedCellQuality(): EffectQuality {
-    if (this.#staticMarkedCells) return "reduced";
-    return this.#quality.profile.effects === "reduced"
-      ? "limited"
-      : this.#quality.profile.effects;
+    return this.#quality.profile.effects;
   }
 
   #patternTexture(kind: RenderCellKind): Texture | null {
-    const textureKey = `pattern:${kind}`;
+    const textureKey = `cell-surface:${this.#palette}:${kind}`;
     const existing = this.#textures.get(textureKey);
     if (existing !== undefined) return existing;
     const canvas = this.#canvas.ownerDocument.createElement("canvas");
-    canvas.width = 64;
-    canvas.height = 64;
+    canvas.width = PIECE_CELL_ART.textureSize;
+    canvas.height = PIECE_CELL_ART.textureSize;
     const context = canvas.getContext("2d");
     if (context === null) return null;
-    context.fillStyle = "#ffffff";
-    context.fillRect(0, 0, 64, 64);
-    context.strokeStyle = "rgba(18, 24, 38, 0.28)";
-    context.fillStyle = "rgba(18, 24, 38, 0.25)";
-    context.lineWidth = 5;
+
+    const size = PIECE_CELL_ART.textureSize;
+    const surface = kind === "monomino"
+      ? context.createRadialGradient(47, 35, 0, 64, 64, 92)
+      : kind === "acid"
+        ? context.createRadialGradient(45, 34, 0, 64, 64, 102)
+        : context.createLinearGradient(8, 4, 120, 126);
+    if (kind === "monomino") {
+      surface.addColorStop(0, "#ffffff");
+      surface.addColorStop(0.28, "#f8fbff");
+      surface.addColorStop(0.7, "#e3eaf2");
+      surface.addColorStop(1, "#c7d1dd");
+    } else if (kind === "acid") {
+      surface.addColorStop(0, "#ffffff");
+      surface.addColorStop(0.24, "#f6fff0");
+      surface.addColorStop(0.68, "#dfecd8");
+      surface.addColorStop(1, "#bbcbb4");
+    } else {
+      surface.addColorStop(0, "#ffffff");
+      surface.addColorStop(0.32, "#f8faff");
+      surface.addColorStop(0.72, "#e5eaf2");
+      surface.addColorStop(1, kind === "garbage" ? "#c3cad4" : "#ced7e4");
+    }
+    context.fillStyle = surface;
+    context.fillRect(0, 0, size, size);
+
+    const patternAlpha = PIECE_CELL_ART.patternAlpha[this.#palette];
+    const patternColor = `rgba(6, 14, 27, ${patternAlpha})`;
+    context.strokeStyle = patternColor;
+    context.fillStyle = patternColor;
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    context.lineWidth = 9;
+
+    const drawChevron = (mirrored: boolean): void => {
+      context.save();
+      if (mirrored) {
+        context.translate(size, 0);
+        context.scale(-1, 1);
+      }
+      for (const x of [-20, 42, 104]) {
+        context.beginPath();
+        context.moveTo(x, 22);
+        context.lineTo(x + 30, 64);
+        context.lineTo(x, 106);
+        context.stroke();
+      }
+      context.restore();
+    };
 
     switch (PIECE_PATTERNS[kind]) {
       case "diagonal":
-        for (let offset = -64; offset <= 64; offset += 16) {
+        context.lineWidth = 12;
+        for (let offset = -96; offset <= 144; offset += 54) {
           context.beginPath();
-          context.moveTo(offset, 64);
-          context.lineTo(offset + 64, 0);
+          context.moveTo(offset, size);
+          context.lineTo(offset + size, 0);
           context.stroke();
         }
         break;
       case "vertical":
-        for (let x = 8; x < 64; x += 16) context.fillRect(x, 0, 5, 64);
+        for (const x of [24, 64, 104]) context.fillRect(x - 6, 0, 12, size);
         break;
       case "horizontal":
-        for (let y = 8; y < 64; y += 16) context.fillRect(0, y, 64, 5);
+        for (const y of [24, 64, 104]) context.fillRect(0, y - 6, size, 12);
         break;
       case "dots":
-        for (let y = 12; y < 64; y += 20) {
-          for (let x = 12; x < 64; x += 20) {
+        for (const y of [24, 64, 104]) {
+          for (const x of [24, 64, 104]) {
             context.beginPath();
-            context.arc(x, y, 4, 0, Math.PI * 2);
+            context.arc(x, y, 8, 0, Math.PI * 2);
             context.fill();
           }
         }
         break;
       case "chevron-left":
-        for (let x = -16; x < 64; x += 24) {
-          context.beginPath();
-          context.moveTo(x, 16);
-          context.lineTo(x + 12, 28);
-          context.lineTo(x, 40);
-          context.stroke();
-        }
+        drawChevron(false);
         break;
       case "crosses":
-        for (let y = 16; y < 64; y += 32) {
-          for (let x = 16; x < 64; x += 32) {
-            context.fillRect(x - 3, y - 10, 6, 20);
-            context.fillRect(x - 10, y - 3, 20, 6);
+        for (const y of [32, 96]) {
+          for (const x of [32, 96]) {
+            context.fillRect(x - 5, y - 16, 10, 32);
+            context.fillRect(x - 16, y - 5, 32, 10);
           }
         }
         break;
       case "chevron-right":
-        for (let offset = -32; offset <= 64; offset += 24) {
-          context.beginPath();
-          context.moveTo(offset, 0);
-          context.lineTo(offset + 28, 28);
-          context.lineTo(offset, 56);
-          context.stroke();
-        }
+        drawChevron(true);
         break;
       case "grid":
-        context.lineWidth = 3;
-        for (let index = 0; index <= 64; index += 16) {
+        context.lineWidth = 5;
+        for (let index = 0; index <= size; index += 32) {
           context.beginPath();
           context.moveTo(index, 0);
-          context.lineTo(index, 64);
+          context.lineTo(index, size);
           context.moveTo(0, index);
-          context.lineTo(64, index);
+          context.lineTo(size, index);
           context.stroke();
         }
         break;
       case "cross":
-        context.lineWidth = 7;
+        context.lineWidth = 13;
         context.beginPath();
-        context.moveTo(32, 5);
-        context.lineTo(32, 59);
-        context.moveTo(5, 32);
-        context.lineTo(59, 32);
+        context.moveTo(64, 13);
+        context.lineTo(64, 115);
+        context.moveTo(13, 64);
+        context.lineTo(115, 64);
         context.stroke();
         break;
       case "circle":
-        context.lineWidth = 6;
+        context.lineWidth = 11;
         context.beginPath();
-        context.arc(32, 32, 17, 0, Math.PI * 2);
+        context.arc(64, 64, 33, 0, Math.PI * 2);
         context.stroke();
         break;
       case "bubbles":
         for (const [x, y, radius] of [
-          [16, 18, 6],
-          [43, 14, 4],
-          [38, 43, 8],
-          [13, 48, 3],
+          [32, 36, 12],
+          [86, 28, 8],
+          [76, 86, 16],
+          [26, 96, 6],
         ] as const) {
+          context.lineWidth = 7;
           context.beginPath();
           context.arc(x, y, radius, 0, Math.PI * 2);
           context.stroke();
@@ -1552,39 +1809,62 @@ export class ThreeRenderer {
         break;
     }
 
+    const sheen = context.createLinearGradient(10, 4, 94, 94);
+    sheen.addColorStop(0, "rgba(255, 255, 255, 0.24)");
+    sheen.addColorStop(0.38, "rgba(255, 255, 255, 0.08)");
+    sheen.addColorStop(0.68, "rgba(255, 255, 255, 0)");
+    context.fillStyle = sheen;
+    context.fillRect(0, 0, size, size);
+
+    const edgeRadius = kind === "garbage" ? 14 : 23;
+    context.lineWidth = 5;
+    context.strokeStyle = "rgba(255, 255, 255, 0.32)";
+    context.beginPath();
+    context.moveTo(12, 5);
+    context.lineTo(size - 18, 5);
+    context.moveTo(5, 12);
+    context.lineTo(5, size - 18);
+    context.stroke();
+    context.strokeStyle = kind === "garbage"
+      ? "rgba(4, 9, 18, 0.26)"
+      : "rgba(4, 9, 18, 0.2)";
+    context.beginPath();
+    context.roundRect(4.5, 4.5, size - 9, size - 9, edgeRadius);
+    context.stroke();
+    context.lineWidth = 6;
+    context.beginPath();
+    context.moveTo(13, size - 5);
+    context.lineTo(size - 18, size - 5);
+    context.moveTo(size - 5, 13);
+    context.lineTo(size - 5, size - 18);
+    context.stroke();
+
     const texture = new CanvasTexture(canvas);
     texture.colorSpace = SRGBColorSpace;
-    texture.wrapS = RepeatWrapping;
-    texture.wrapT = RepeatWrapping;
-    texture.repeat.set(1.25, 1.25);
     this.#textures.set(textureKey, texture);
     return texture;
   }
 
-  #specialBadgeTexture(special: SpecialKind): Texture {
-    const textureKey = `special-badge:${special}`;
+  #markedSourceGlyphTexture(special: SpecialKind): Texture {
+    const textureKey = `marked-source-glyph:${special}`;
     const existing = this.#textures.get(textureKey);
     if (existing !== undefined) return existing;
     const canvas = this.#canvas.ownerDocument.createElement("canvas");
-    canvas.width = 64;
-    canvas.height = 64;
+    canvas.width = 128;
+    canvas.height = 128;
     const context = canvas.getContext("2d");
-    if (context === null) throw new Error("Canvas 2D unavailable for special badge");
+    if (context === null) throw new Error("Canvas 2D unavailable for marked glyph");
 
-    context.fillStyle = "rgba(5, 8, 16, 0.98)";
-    context.strokeStyle = SPECIAL_ACCENT_COLORS[special];
-    context.lineWidth = 3;
-    context.beginPath();
-    context.arc(32, 32, 26, 0, Math.PI * 2);
-    context.fill();
-    context.stroke();
-    context.strokeStyle = SPECIAL_ACCENT_COLORS[special];
     context.lineCap = "round";
     context.lineJoin = "round";
-    context.lineWidth = 5;
     context.save();
-    context.translate(5.76, 5.76);
-    context.scale(0.82, 0.82);
+    context.translate(12.8, 12.8);
+    context.scale(1.6, 1.6);
+    context.strokeStyle = "rgba(4, 8, 14, 0.98)";
+    context.lineWidth = 7.8;
+    context.stroke(new Path2D(SPECIAL_ICON_PATHS[special]));
+    context.strokeStyle = "#fffdf4";
+    context.lineWidth = 5;
     context.stroke(new Path2D(SPECIAL_ICON_PATHS[special]));
     context.restore();
 
@@ -1594,8 +1874,195 @@ export class ThreeRenderer {
     return texture;
   }
 
-  #specialHaloTexture(special: SpecialKind): Texture {
-    const textureKey = `special-halo:${special}`;
+  #markedSourceFaceTexture(special: SpecialKind): Texture {
+    const textureKey = `marked-source-face:${special}`;
+    const existing = this.#textures.get(textureKey);
+    if (existing !== undefined) return existing;
+    const canvas = this.#canvas.ownerDocument.createElement("canvas");
+    canvas.width = 128;
+    canvas.height = 128;
+    const context = canvas.getContext("2d");
+    if (context === null) throw new Error("Canvas 2D unavailable for marked source face");
+    const accent = SPECIAL_ACCENT_HEX[special];
+    const red = accent >> 16 & 0xff;
+    const green = accent >> 8 & 0xff;
+    const blue = accent & 0xff;
+    const rgba = (alpha: number): string =>
+      `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+
+    context.save();
+    context.beginPath();
+    context.roundRect(7, 7, 114, 114, 25);
+    context.clip();
+    const wash = context.createLinearGradient(8, 5, 120, 123);
+    wash.addColorStop(0, rgba(0.42));
+    wash.addColorStop(0.46, rgba(0.86));
+    wash.addColorStop(1, rgba(0.48));
+    context.fillStyle = wash;
+    context.fillRect(0, 0, 128, 128);
+    context.restore();
+
+    const texture = new CanvasTexture(canvas);
+    texture.colorSpace = SRGBColorSpace;
+    this.#textures.set(textureKey, texture);
+    return texture;
+  }
+
+  #markedSourceRimTexture(special: SpecialKind): Texture {
+    const textureKey = `marked-source-rim:${special}`;
+    const existing = this.#textures.get(textureKey);
+    if (existing !== undefined) return existing;
+    const canvas = this.#canvas.ownerDocument.createElement("canvas");
+    canvas.width = 128;
+    canvas.height = 128;
+    const context = canvas.getContext("2d");
+    if (context === null) throw new Error("Canvas 2D unavailable for marked source rim");
+    const accent = SPECIAL_ACCENT_COLORS[special];
+
+    context.strokeStyle = accent;
+    context.lineWidth = 7;
+    context.shadowColor = accent;
+    context.shadowBlur = 11;
+    context.beginPath();
+    context.roundRect(8.5, 8.5, 111, 111, 24);
+    context.stroke();
+    context.shadowBlur = 0;
+    context.globalAlpha = 0.92;
+    context.lineWidth = 2.5;
+    context.stroke();
+
+    const texture = new CanvasTexture(canvas);
+    texture.colorSpace = SRGBColorSpace;
+    this.#textures.set(textureKey, texture);
+    return texture;
+  }
+
+  #markedNeighborFieldTexture(
+    special: SpecialKind,
+    directionX: -1 | 0 | 1,
+    directionY: -1 | 0 | 1,
+    layer: "surface" | "rim",
+  ): Texture {
+    const textureKey =
+      `marked-neighbor-${layer}:${special}:${directionX}:${directionY}`;
+    const existing = this.#textures.get(textureKey);
+    if (existing !== undefined) return existing;
+    const canvas = this.#canvas.ownerDocument.createElement("canvas");
+    canvas.width = 128;
+    canvas.height = 128;
+    const context = canvas.getContext("2d");
+    if (context === null) throw new Error("Canvas 2D unavailable for marked neighbor field");
+    const accent = SPECIAL_ACCENT_HEX[special];
+    const red = accent >> 16 & 0xff;
+    const green = accent >> 8 & 0xff;
+    const blue = accent & 0xff;
+    const rgba = (alpha: number): string =>
+      `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+    const anchorX = directionX < 0 ? -3 : directionX > 0 ? 131 : 64;
+    const anchorY = directionY < 0 ? -3 : directionY > 0 ? 131 : 64;
+
+    if (layer === "surface") {
+      context.save();
+      context.beginPath();
+      context.roundRect(7, 7, 114, 114, 25);
+      context.clip();
+      const radius = directionX !== 0 && directionY !== 0 ? 106 : 92;
+      const wash = context.createRadialGradient(
+        anchorX,
+        anchorY,
+        0,
+        anchorX,
+        anchorY,
+        radius,
+      );
+      wash.addColorStop(0, rgba(0.78));
+      wash.addColorStop(0.24, rgba(0.55));
+      wash.addColorStop(0.58, rgba(0.18));
+      wash.addColorStop(1, rgba(0));
+      context.fillStyle = wash;
+      context.fillRect(0, 0, 128, 128);
+      context.restore();
+    } else {
+      context.strokeStyle = SPECIAL_ACCENT_COLORS[special];
+      context.lineWidth = 7;
+      context.shadowColor = SPECIAL_ACCENT_COLORS[special];
+      context.shadowBlur = 10;
+      context.beginPath();
+      context.roundRect(8.5, 8.5, 111, 111, 24);
+      context.stroke();
+      context.shadowBlur = 0;
+      context.globalAlpha = 0.96;
+      context.lineWidth = 2.5;
+      context.stroke();
+      context.globalAlpha = 0.94;
+      context.strokeStyle = "#fff8df";
+      context.shadowColor = "rgba(255, 248, 223, 0.88)";
+      context.shadowBlur = 5;
+      context.lineWidth = 1.35;
+      context.stroke();
+      context.shadowBlur = 0;
+
+      const maskRadius = directionX !== 0 && directionY !== 0 ? 88 : 76;
+      const mask = context.createRadialGradient(
+        anchorX,
+        anchorY,
+        0,
+        anchorX,
+        anchorY,
+        maskRadius,
+      );
+      mask.addColorStop(0, "rgba(255, 255, 255, 1)");
+      mask.addColorStop(0.55, "rgba(255, 255, 255, 0.82)");
+      mask.addColorStop(1, "rgba(255, 255, 255, 0)");
+      context.globalCompositeOperation = "destination-in";
+      context.globalAlpha = 1;
+      context.fillStyle = mask;
+      context.fillRect(0, 0, 128, 128);
+    }
+
+    const texture = new CanvasTexture(canvas);
+    texture.colorSpace = SRGBColorSpace;
+    this.#textures.set(textureKey, texture);
+    return texture;
+  }
+
+  #specialCoreTexture(special: SpecialKind): Texture {
+    const textureKey = `special-core:${special}`;
+    const existing = this.#textures.get(textureKey);
+    if (existing !== undefined) return existing;
+    const canvas = this.#canvas.ownerDocument.createElement("canvas");
+    canvas.width = 128;
+    canvas.height = 128;
+    const context = canvas.getContext("2d");
+    if (context === null) throw new Error("Canvas 2D unavailable for special core");
+
+    const accent = SPECIAL_ACCENT_HEX[special];
+    const red = accent >> 16 & 0xff;
+    const green = accent >> 8 & 0xff;
+    const blue = accent & 0xff;
+    const rgba = (alpha: number): string =>
+      `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+    const gradient = context.createRadialGradient(64, 58, 0, 64, 64, 62);
+    gradient.addColorStop(0, rgba(0.96));
+    gradient.addColorStop(0.18, rgba(0.7));
+    gradient.addColorStop(0.46, rgba(0.3));
+    gradient.addColorStop(0.76, rgba(0.09));
+    gradient.addColorStop(1, rgba(0));
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, 128, 128);
+
+    const texture = new CanvasTexture(canvas);
+    texture.colorSpace = SRGBColorSpace;
+    this.#textures.set(textureKey, texture);
+    return texture;
+  }
+
+  #specialHaloTexture(
+    special: SpecialKind,
+    clipMask: string,
+    clipSpan: number,
+  ): Texture {
+    const textureKey = `special-halo:${special}:${clipMask}:${clipSpan}`;
     const existing = this.#textures.get(textureKey);
     if (existing !== undefined) return existing;
     const canvas = this.#canvas.ownerDocument.createElement("canvas");
@@ -1610,14 +2077,37 @@ export class ThreeRenderer {
     const blue = accent & 0xff;
     const rgba = (alpha: number): string =>
       `rgba(${red}, ${green}, ${blue}, ${alpha})`;
-    const gradient = context.createRadialGradient(64, 64, 26, 64, 64, 64);
-    gradient.addColorStop(0, rgba(0.78));
-    gradient.addColorStop(0.28, rgba(0.52));
-    gradient.addColorStop(0.58, rgba(0.22));
-    gradient.addColorStop(0.82, rgba(0.08));
+
+    context.save();
+    context.globalCompositeOperation = "lighter";
+    context.fillStyle = rgba(0.055);
+    context.shadowColor = rgba(0.2);
+    context.shadowBlur = 22;
+    context.beginPath();
+    context.roundRect(23, 23, 82, 82, 25);
+    context.fill();
+    context.restore();
+
+    const gradient = context.createRadialGradient(64, 64, 10, 64, 64, 64);
+    gradient.addColorStop(0, rgba(0.66));
+    gradient.addColorStop(0.22, rgba(0.48));
+    gradient.addColorStop(0.48, rgba(0.23));
+    gradient.addColorStop(0.72, rgba(0.09));
+    gradient.addColorStop(0.9, rgba(0.025));
     gradient.addColorStop(1, rgba(0));
     context.fillStyle = gradient;
     context.fillRect(0, 0, 128, 128);
+
+    if (clipMask.length > 0) {
+      const halfCell = 64 / Math.max(1, clipSpan);
+      const left = clipMask.includes("l") ? 64 - halfCell : 0;
+      const right = clipMask.includes("r") ? 64 + halfCell : 128;
+      const top = clipMask.includes("t") ? 64 - halfCell : 0;
+      const bottom = clipMask.includes("b") ? 64 + halfCell : 128;
+      context.globalCompositeOperation = "destination-in";
+      context.fillStyle = "#fff";
+      context.fillRect(left, top, right - left, bottom - top);
+    }
 
     const texture = new CanvasTexture(canvas);
     texture.colorSpace = SRGBColorSpace;

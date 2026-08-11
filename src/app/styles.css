@@ -744,49 +744,105 @@ button.destructive:focus-visible {
 }
 
 .piece-preview-cell {
+  --piece-border-color: color-mix(in srgb, var(--piece-color) 72%, white);
+  --piece-surface-top: color-mix(in srgb, var(--piece-color) 86%, white);
+  --piece-surface-bottom: color-mix(in srgb, var(--piece-color) 88%, #09101d);
+  --piece-pattern-color: color-mix(in srgb, var(--piece-color) 27%, #08101d);
+  isolation: isolate;
   position: relative;
   display: grid;
   min-width: 0;
   min-height: 0;
   overflow: visible;
-  border: 1px solid color-mix(in srgb, var(--piece-color) 78%, white);
-  border-radius: 18%;
-  background: var(--piece-color);
+  border: 1px solid var(--piece-border-color);
+  border-radius: 20%;
+  background:
+    linear-gradient(150deg, rgba(255, 255, 255, 0.34), transparent 39%),
+    linear-gradient(
+      180deg,
+      var(--piece-surface-top) 0,
+      var(--piece-color) 54%,
+      var(--piece-surface-bottom) 100%
+    );
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.5),
-    inset 0 -1px 0 rgba(2, 5, 12, 0.3);
+    inset 0 1px 0 rgba(255, 255, 255, 0.52),
+    inset 0 -1px 2px rgba(2, 5, 12, 0.24),
+    0 1px 2px rgba(2, 5, 12, 0.42);
 }
 
 .piece-preview-cell::before {
   position: absolute;
+  z-index: 0;
   inset: 0;
   border-radius: inherit;
   content: "";
-  opacity: 0.42;
+  opacity: 0.46;
+  pointer-events: none;
+}
+
+.piece-preview-cell::after {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  border-radius: inherit;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.2), transparent 36%),
+    linear-gradient(315deg, rgba(3, 7, 15, 0.12), transparent 42%);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+  content: "";
   pointer-events: none;
 }
 
 .piece-preview-cell[data-pattern="diagonal"]::before {
-  background: repeating-linear-gradient(135deg, transparent 0 22%, #121826 23% 31%);
+  background: repeating-linear-gradient(
+    135deg,
+    transparent 0 23%,
+    var(--piece-pattern-color) 24% 33%,
+    transparent 34% 56%
+  );
 }
 
 .piece-preview-cell[data-pattern="vertical"]::before {
-  background: repeating-linear-gradient(90deg, transparent 0 33%, #121826 34% 47%);
+  background: repeating-linear-gradient(
+    90deg,
+    transparent 0 31%,
+    var(--piece-pattern-color) 32% 45%,
+    transparent 46% 66%
+  );
 }
 
 .piece-preview-cell[data-pattern="horizontal"]::before {
-  background: repeating-linear-gradient(0deg, transparent 0 33%, #121826 34% 47%);
+  background: repeating-linear-gradient(
+    0deg,
+    transparent 0 31%,
+    var(--piece-pattern-color) 32% 45%,
+    transparent 46% 66%
+  );
 }
 
 .piece-preview-cell[data-pattern="dots"]::before {
-  background: radial-gradient(circle, #121826 0 18%, transparent 20%) 0 0 / 45% 45%;
+  background: radial-gradient(
+    circle,
+    var(--piece-pattern-color) 0 15%,
+    transparent 17%
+  ) 0 0 / 46% 46%;
 }
 
 .piece-preview-cell[data-pattern="chevron-left"]::before,
 .piece-preview-cell[data-pattern="chevron-right"]::before {
   background:
-    linear-gradient(45deg, transparent 42%, #121826 44% 55%, transparent 57%),
-    linear-gradient(135deg, transparent 42%, #121826 44% 55%, transparent 57%);
+    linear-gradient(
+      45deg,
+      transparent 42%,
+      var(--piece-pattern-color) 44% 55%,
+      transparent 57%
+    ),
+    linear-gradient(
+      135deg,
+      transparent 42%,
+      var(--piece-pattern-color) 44% 55%,
+      transparent 57%
+    );
 }
 
 .piece-preview-cell[data-pattern="chevron-right"]::before {
@@ -796,46 +852,199 @@ button.destructive:focus-visible {
 .piece-preview-cell[data-pattern="crosses"]::before,
 .piece-preview-cell[data-pattern="cross"]::before {
   background:
-    linear-gradient(90deg, transparent 42%, #121826 44% 56%, transparent 58%),
-    linear-gradient(0deg, transparent 42%, #121826 44% 56%, transparent 58%);
+    linear-gradient(
+      90deg,
+      transparent 42%,
+      var(--piece-pattern-color) 44% 56%,
+      transparent 58%
+    ),
+    linear-gradient(
+      0deg,
+      transparent 42%,
+      var(--piece-pattern-color) 44% 56%,
+      transparent 58%
+    );
 }
 
 .piece-preview-cell[data-pattern="circle"]::before {
   inset: 20%;
-  border: 2px solid #121826;
+  border: 2px solid var(--piece-pattern-color);
   border-radius: 50%;
 }
 
 .piece-preview-cell[data-pattern="bubbles"]::before {
   background:
-    radial-gradient(circle at 30% 30%, transparent 0 12%, #121826 14% 20%, transparent 22%),
-    radial-gradient(circle at 68% 65%, transparent 0 18%, #121826 20% 27%, transparent 29%);
+    radial-gradient(
+      circle at 30% 30%,
+      transparent 0 12%,
+      var(--piece-pattern-color) 14% 20%,
+      transparent 22%
+    ),
+    radial-gradient(
+      circle at 68% 65%,
+      transparent 0 18%,
+      var(--piece-pattern-color) 20% 27%,
+      transparent 29%
+    );
+}
+
+.piece-preview-cell[data-pattern="grid"]::before {
+  background:
+    linear-gradient(
+      90deg,
+      transparent 43%,
+      var(--piece-pattern-color) 44% 56%,
+      transparent 57%
+    ),
+    linear-gradient(
+      0deg,
+      transparent 43%,
+      var(--piece-pattern-color) 44% 56%,
+      transparent 57%
+    );
+  background-size: 50% 50%;
+}
+
+.piece-preview-cell[data-shape="garbage"] {
+  --piece-border-color: color-mix(in srgb, var(--piece-color) 62%, white);
+  --piece-surface-top: color-mix(in srgb, var(--piece-color) 84%, white);
+  --piece-surface-bottom: color-mix(in srgb, var(--piece-color) 72%, #242b38);
+  --piece-pattern-color: color-mix(in srgb, var(--piece-color) 32%, #1b2230);
+  border-radius: 12%;
+  background:
+    linear-gradient(125deg, rgba(255, 255, 255, 0.24), transparent 35%),
+    linear-gradient(
+      160deg,
+      var(--piece-surface-top),
+      var(--piece-color) 48%,
+      var(--piece-surface-bottom)
+    );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.34),
+    inset 0 -1px 2px rgba(2, 5, 12, 0.34),
+    0 1px 1px rgba(2, 5, 12, 0.38);
+}
+
+.piece-preview-cell[data-shape="monomino"] {
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 38% 30%,
+    white 0,
+    var(--piece-surface-top) 24%,
+    var(--piece-color) 60%,
+    var(--piece-surface-bottom) 100%
+  );
+}
+
+.piece-preview-cell[data-shape="acid"] {
+  border-radius: 52% 48% 58% 42%;
+  background: radial-gradient(
+    circle at 38% 28%,
+    color-mix(in srgb, var(--piece-color) 58%, white),
+    var(--piece-color) 48%,
+    var(--piece-surface-bottom) 100%
+  );
+}
+
+.piece-preview-cell[data-palette="colorblind"] {
+  --piece-pattern-color: color-mix(in srgb, var(--piece-color) 18%, #050914);
+  border-color: color-mix(in srgb, var(--piece-color) 58%, white);
+}
+
+.piece-preview-cell[data-palette="colorblind"]::before {
+  opacity: 0.62;
+}
+
+.piece-preview-slot.is-queued .piece-preview-grid {
+  gap: 0.5px;
+  width: 92%;
+}
+
+.piece-preview-slot.is-queued .piece-preview-cell {
+  border-width: 0.5px;
+  box-shadow:
+    inset 0 0.5px 0 rgba(255, 255, 255, 0.48),
+    inset 0 -0.5px 1px rgba(2, 5, 12, 0.22),
+    0 0.5px 1px rgba(2, 5, 12, 0.34);
+}
+
+.piece-preview-slot.is-queued .piece-preview-cell::after {
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.1);
+  opacity: 0.72;
+}
+
+[data-graphics-tier="low"] .piece-preview-cell:not(.is-marked) {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.42),
+    inset 0 -1px 1px rgba(2, 5, 12, 0.2);
+}
+
+[data-graphics-tier="low"] .piece-preview-cell:not(.is-marked)::after {
+  opacity: 0.56;
+}
+
+[data-graphics-tier="very-low"] .piece-preview-cell:not(.is-marked) {
+  background: var(--piece-color);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--piece-color) 68%, white);
+}
+
+[data-graphics-tier="very-low"] .piece-preview-cell:not(.is-marked)::after {
+  display: none;
 }
 
 .piece-preview-cell.is-marked {
+  isolation: isolate;
   z-index: 1;
-  border-color: color-mix(in srgb, var(--special-accent) 82%, white);
+  border-color: transparent;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.18), transparent 44%),
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--special-accent) 64%, var(--piece-color)),
+      color-mix(in srgb, var(--special-accent) 50%, var(--piece-color))
+    );
   box-shadow:
-    inset 0 0 0.35rem color-mix(in srgb, var(--special-accent) 60%, transparent),
-    0 0 0.28rem var(--special-accent),
-    0 0 0.85rem color-mix(in srgb, var(--special-accent) 78%, transparent);
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    inset 0 -1px 0 color-mix(in srgb, var(--special-accent) 22%, transparent);
 }
 
 .piece-preview-cell.is-marked::after {
   position: absolute;
-  z-index: -1;
-  inset: -12%;
-  border: 1px solid color-mix(in srgb, var(--special-accent) 88%, white);
-  border-radius: 24%;
-  box-shadow: 0 0 0.7rem color-mix(in srgb, var(--special-accent) 82%, transparent);
+  z-index: 0;
+  inset: 0;
+  border: 0;
+  border-radius: inherit;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.42), transparent 48%),
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--special-accent) 72%, transparent),
+      color-mix(in srgb, var(--special-accent) 38%, transparent)
+    );
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--special-accent) 72%, white),
+    inset 0 0 0.32rem color-mix(in srgb, var(--special-accent) 44%, transparent);
   content: "";
-  opacity: 0.62;
+  opacity: 0.08;
   pointer-events: none;
-  animation: preview-marked-breathe 1.6s ease-in-out infinite;
+  mix-blend-mode: screen;
+  animation: preview-marked-source-pulse 2.8s ease-in-out infinite;
+}
+
+[data-graphics-tier="low"] .piece-preview-cell.is-marked::after,
+[data-graphics-tier="very-low"] .piece-preview-cell.is-marked::after {
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.28), transparent 48%),
+    color-mix(in srgb, var(--special-accent) 52%, transparent);
 }
 
 .piece-preview-cell.is-marked::before {
-  opacity: 0.18;
+  z-index: 1;
+  opacity: 0.34;
+}
+
+.piece-preview-cell.is-marked[data-palette="colorblind"]::before {
+  opacity: 0.56;
 }
 
 .piece-preview-cell.is-marked svg {
@@ -844,11 +1053,34 @@ button.destructive:focus-visible {
   inset: 9%;
   width: 82%;
   height: 82%;
-  border: 1px solid currentColor;
-  border-radius: 50%;
-  color: var(--special-accent) !important;
-  background: rgba(5, 8, 16, 0.9);
-  filter: drop-shadow(0 0 0.2rem var(--special-accent));
+  overflow: visible;
+  color: #fffdf4 !important;
+  background: transparent;
+  opacity: 1;
+}
+
+.piece-preview-cell.is-marked svg path {
+  opacity: 1;
+}
+
+.piece-preview-cell.is-marked svg .glyph-understroke {
+  stroke: #030711;
+  stroke-width: 8;
+}
+
+.piece-preview-cell.is-marked svg .glyph-stroke {
+  stroke: #fffdf4;
+  stroke-width: 5;
+}
+
+.piece-preview-slot.is-queued .piece-preview-cell.is-marked::after {
+  animation: none;
+  opacity: 0.62;
+}
+
+.marked-cell-sample .piece-preview-cell.is-marked::after {
+  animation: none;
+  opacity: 0.76;
 }
 
 .piece-preview-slot[data-glitch="cycling"] {
@@ -2123,15 +2355,13 @@ kbd {
   }
 }
 
-@keyframes preview-marked-breathe {
+@keyframes preview-marked-source-pulse {
   0%,
   100% {
-    opacity: 0.56;
-    transform: scale(0.96);
+    opacity: 0.08;
   }
   50% {
     opacity: 1;
-    transform: scale(1.12);
   }
 }
 
@@ -2288,18 +2518,15 @@ kbd {
 
 [data-reduced-motion="true"] .piece-preview-cell.is-marked,
 [data-reduced-flashes="true"] .piece-preview-cell.is-marked {
-  filter: brightness(1.18);
   box-shadow:
-    inset 0 0 0.45rem color-mix(in srgb, var(--special-accent) 72%, transparent),
-    0 0 0.35rem var(--special-accent),
-    0 0 0.95rem color-mix(in srgb, var(--special-accent) 85%, transparent);
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    inset 0 -1px 0 color-mix(in srgb, var(--special-accent) 22%, transparent);
 }
 
 [data-reduced-motion="true"] .piece-preview-cell.is-marked::after,
 [data-reduced-flashes="true"] .piece-preview-cell.is-marked::after {
   animation: none;
-  opacity: 0.88;
-  transform: scale(1.04);
+  opacity: 0.58;
 }
 
 [data-reduced-flashes="true"] {

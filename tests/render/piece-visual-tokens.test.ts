@@ -9,20 +9,20 @@ import {
 describe("piece visual tokens", () => {
   it("provides one shared palette and pattern identity for every rendered cell kind", () => {
     expect(STANDARD_PIECE_COLORS).toMatchObject({
-      I: "#2bd9fe",
-      T: "#b65cff",
-      cross: "#f5ff72",
-      "small-cross": "#dc143c",
-      garbage: "#768094",
-      acid: "#8dff5a",
+      I: "#20c8ee",
+      T: "#b95eeb",
+      cross: "#effb76",
+      "small-cross": "#df5065",
+      garbage: "#737d90",
+      acid: "#82ed50",
     });
     expect(COLORBLIND_PIECE_COLORS).toMatchObject({
-      I: "#56b4e9",
-      T: "#cc79a7",
+      I: "#4caddd",
+      T: "#c873a4",
       cross: "#ffffff",
-      "small-cross": "#ffffff",
-      garbage: "#777777",
-      acid: "#8cff00",
+      "small-cross": "#f8f8ff",
+      garbage: "#787878",
+      acid: "#7fe51f",
     });
     expect(PIECE_PATTERNS).toMatchObject({
       I: "diagonal",

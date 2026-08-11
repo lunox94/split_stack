@@ -60,6 +60,7 @@ describe("marked-cell pulse tracker", () => {
     );
 
     expect(emphasizedCell(spawned)?.specialEmphasis).toBe(1);
+    expect(emphasizedCell(spawned)?.specialEmphasisKind).toBe("spawn");
     expect(emphasizedCell(moved)?.specialEmphasis).toBeGreaterThan(0);
     expect(emphasizedCell(moved)?.specialEmphasis).toBeLessThan(1);
     expect(emphasizedCell(expired)).toBeUndefined();
@@ -92,6 +93,7 @@ describe("marked-cell pulse tracker", () => {
       column: 4,
       row: 18,
       specialEmphasis: 1,
+      specialEmphasisKind: "lock",
     });
     expect(emphasizedCell(settling)?.specialEmphasis).toBeGreaterThan(0);
     expect(emphasizedCell(settling)?.specialEmphasis).toBeLessThan(1);

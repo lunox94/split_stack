@@ -101,13 +101,41 @@ async function waitForEffectiveMatchStarted(
 }
 
 interface MarkedCellRenderMetrics {
-  readonly darkBadgeCoverage: number;
-  readonly accentGlyphCoverage: number;
-  readonly haloLuminance: {
-    readonly near: number;
-    readonly middle: number;
-    readonly far: number;
-    readonly background: number;
+  readonly neighborRimTroughLift: readonly number[];
+  readonly neighborRimPeakLift: readonly number[];
+  readonly neighborSurfaceTroughLift: readonly number[];
+  readonly neighborSurfacePeakLift: readonly number[];
+  readonly sourceTroughLift: number;
+  readonly sourcePeakLift: number;
+  readonly ivoryGlyphCoverage: number;
+  readonly minimumNeighborPatternContrastRatioAtTrough: number;
+  readonly minimumNeighborPatternContrastRatioAtPeak: number;
+  readonly minimumLightChannelDelta: number;
+  readonly outsideBoardLightDelta: {
+    readonly left: number;
+    readonly right: number;
+    readonly top: number;
+    readonly bottom: number;
+  };
+  readonly overlapTargetDelta: number;
+  readonly gameplayCueLift: number;
+  readonly activationOutsideBoardLightDelta: number;
+  readonly activationBoundaryDelta: number;
+}
+
+interface DenseCellArtMetrics {
+  readonly portrait: boolean;
+  readonly cellSize: number;
+  readonly cells: readonly {
+    readonly kind: string;
+    readonly contrast: number;
+    readonly color: readonly [number, number, number];
+  }[];
+  readonly ghost: {
+    readonly backgroundLuminance: number;
+    readonly centerLuminance: number;
+    readonly edgeLuminance: number;
+    readonly solidCenterLuminance: number;
   };
 }
 
@@ -221,6 +249,161 @@ async function readCellPoolUploadMetrics(
   });
 }
 
+async function readDenseCellArtMetrics(
+  page: Page,
+  palette: "standard" | "colorblind",
+  quality: "full" | "limited" | "reduced",
+): Promise<DenseCellArtMetrics> {
+  return page.evaluate(async ({ palette, quality }) => {
+    const rendererUrl = "/src/render/renderer.ts";
+    const { ThreeRenderer } = await import(rendererUrl);
+    const portrait = window.innerHeight > window.innerWidth;
+    const cssWidth = Math.min(900, Math.max(320, window.innerWidth - 24));
+    const cssHeight = Math.min(780, Math.max(520, window.innerHeight - 24));
+    const canvas = document.createElement("canvas");
+    canvas.style.cssText =
+      `position:fixed;left:0;top:0;width:${cssWidth}px;height:${cssHeight}px;z-index:9999`;
+    document.body.append(canvas);
+
+    const renderer = new ThreeRenderer(canvas, { initialQuality: quality });
+    const kinds = [
+      "I",
+      "J",
+      "L",
+      "O",
+      "S",
+      "T",
+      "Z",
+      "cross",
+      "small-cross",
+      "monomino",
+      "garbage",
+      "acid",
+    ] as const;
+    type CellKind = typeof kinds[number];
+    const cells: {
+      column: number;
+      row: number;
+      kind: CellKind;
+      role: "settled" | "ghost";
+    }[] = kinds.flatMap((kind, rowIndex) =>
+      Array.from({ length: 10 }, (_, column) => ({
+        column,
+        row: 2 + rowIndex,
+        kind,
+        role: "settled" as const,
+      }))
+    );
+    cells.push(
+      { column: 2, row: 15, kind: "T", role: "ghost" },
+      { column: 7, row: 15, kind: "T", role: "settled" },
+    );
+    const frame = {
+      mode: "practice" as const,
+      left: {
+        playerId: `dense-cell-art-${palette}-${quality}`,
+        cells,
+        focused: true,
+        concealed: false,
+      },
+      right: null,
+    };
+
+    // Prime the standard materials so the colorblind read proves that a live
+    // palette switch updates every existing pool, including ghost and garbage.
+    if (palette === "colorblind") {
+      renderer.render(frame, 100);
+      renderer.setColorPalette("colorblind");
+    }
+    renderer.render(frame, 200);
+
+    const gl = canvas.getContext("webgl2");
+    if (gl === null) throw new Error("WebGL2 unavailable in browser test");
+    gl.finish();
+    const width = gl.drawingBufferWidth;
+    const height = gl.drawingBufferHeight;
+    const pixels = new Uint8Array(width * height * 4);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    const viewport = renderer.layout.left;
+    const scaleX = width / canvas.clientWidth;
+    const scaleY = height / canvas.clientHeight;
+    const pixelColor = (x: number, y: number): readonly [number, number, number] => {
+      const offset = (y * width + x) * 4;
+      return [pixels[offset]!, pixels[offset + 1]!, pixels[offset + 2]!];
+    };
+    const sampleColor = (
+      column: number,
+      row: number,
+      offsetX = 0,
+      offsetY = 0,
+    ): readonly [number, number, number] => {
+      const cssX = viewport.boardX + (column + 0.5 + offsetX) * viewport.cellSize;
+      const cssY = canvas.clientHeight -
+        (viewport.boardY + (row - 2 + 0.5 + offsetY) * viewport.cellSize);
+      const x = Math.round(cssX * scaleX);
+      const y = Math.round(cssY * scaleY);
+      const radius = Math.max(1, Math.round(Math.min(scaleX, scaleY)));
+      const total: [number, number, number] = [0, 0, 0];
+      let count = 0;
+      for (let sampleY = y - radius; sampleY <= y + radius; sampleY += 1) {
+        for (let sampleX = x - radius; sampleX <= x + radius; sampleX += 1) {
+          const color = pixelColor(sampleX, sampleY);
+          total[0] += color[0];
+          total[1] += color[1];
+          total[2] += color[2];
+          count += 1;
+        }
+      }
+      return [total[0] / count, total[1] / count, total[2] / count];
+    };
+    const luminance = (color: readonly [number, number, number]): number =>
+      color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+    const offsets = [-0.3, -0.15, 0, 0.15, 0.3];
+    const metrics = kinds.map((kind, rowIndex) => {
+      const colors = offsets.flatMap((offsetY) =>
+        offsets.map((offsetX) => sampleColor(4, 2 + rowIndex, offsetX, offsetY))
+      );
+      const luminances = colors.map(luminance);
+      const meanLuminance = luminances.reduce((total, value) => total + value, 0) /
+        luminances.length;
+      const color = colors.reduce<[number, number, number]>(
+        (total, value) => [
+          total[0] + value[0],
+          total[1] + value[1],
+          total[2] + value[2],
+        ],
+        [0, 0, 0],
+      ).map((channel) => channel / colors.length) as [number, number, number];
+      const contrast = Math.sqrt(
+        luminances.reduce(
+          (total, value) => total + (value - meanLuminance) ** 2,
+          0,
+        ) / luminances.length,
+      );
+      return { kind, contrast, color };
+    });
+    const backgroundLuminance = luminance(sampleColor(4, 15));
+    const centerLuminance = luminance(sampleColor(2, 15));
+    const edgeLuminance = luminance(sampleColor(2, 15, 0.35));
+    const solidCenterLuminance = luminance(sampleColor(7, 15));
+
+    const result = {
+      portrait,
+      cellSize: viewport.cellSize,
+      cells: metrics,
+      ghost: {
+        backgroundLuminance,
+        centerLuminance,
+        edgeLuminance,
+        solidCenterLuminance,
+      },
+    };
+    renderer.dispose();
+    canvas.remove();
+    return result;
+  }, { palette, quality });
+}
+
 async function readMarkedCellRenderMetrics(
   page: Page,
 ): Promise<MarkedCellRenderMetrics> {
@@ -233,30 +416,151 @@ async function readMarkedCellRenderMetrics(
     document.body.append(canvas);
 
     const renderer = new ThreeRenderer(canvas, { initialQuality: "full" });
-    renderer.render({
-      mode: "practice",
+    const source = {
+      column: 4,
+      row: 12,
+      kind: "J" as const,
+      role: "settled" as const,
+    };
+    const markedSource = { ...source, special: "blackout" as const };
+    const neighbors = [
+      { column: 3, row: 11, kind: "Z" as const, role: "settled" as const },
+      { column: 4, row: 11, kind: "S" as const, role: "settled" as const },
+      { column: 5, row: 11, kind: "O" as const, role: "settled" as const },
+      { column: 3, row: 12, kind: "T" as const, role: "settled" as const },
+      { column: 5, row: 12, kind: "L" as const, role: "settled" as const },
+      { column: 3, row: 13, kind: "I" as const, role: "settled" as const },
+      { column: 4, row: 13, kind: "J" as const, role: "settled" as const },
+      { column: 5, row: 13, kind: "S" as const, role: "settled" as const },
+    ];
+    const frame = (
+      cells: readonly Record<string, unknown>[],
+      presentation?: Record<string, unknown>,
+    ) => ({
+      mode: "practice" as const,
       left: {
         playerId: "visual-test",
-        cells: [{
-          column: 4,
-          row: 12,
-          kind: "J",
-          role: "settled",
-          special: "blackout",
-        }],
+        cells,
         focused: true,
         concealed: false,
       },
       right: null,
-    }, 275);
+      ...(presentation === undefined ? {} : { presentation }),
+    });
 
     const gl = canvas.getContext("webgl2");
     if (gl === null) throw new Error("WebGL2 unavailable in browser test");
-    gl.finish();
+    const capture = (): Uint8Array => {
+      gl.finish();
+      const captured = new Uint8Array(gl.drawingBufferWidth * gl.drawingBufferHeight * 4);
+      gl.readPixels(
+        0,
+        0,
+        gl.drawingBufferWidth,
+        gl.drawingBufferHeight,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        captured,
+      );
+      return captured;
+    };
+
+    // The settled source does not receive transient spawn emphasis. P4 is at
+    // its trough on 2.8 s multiples and at its peak 1.4 s later.
+    renderer.render(frame([source, ...neighbors]), 4_200);
+    const baselinePixels = capture();
+    renderer.render(frame([markedSource, ...neighbors]), 5_600);
+    const troughPixels = capture();
+    renderer.render(frame([markedSource, ...neighbors]), 7_000);
+    const peakPixels = capture();
+    renderer.render(frame([markedSource]), 9_800);
+    const isolatedPeakPixels = capture();
+    renderer.render(
+      frame([
+        { ...source, column: 0, special: "blackout" as const },
+        { ...source, column: 9, special: "barrier" as const },
+        { ...source, column: 4, row: 2, special: "glitch-core" as const },
+        { ...source, column: 4, row: 21, special: "column-bomb" as const },
+      ]),
+      11_200,
+    );
+    const edgePixels = capture();
+    renderer.render(frame([]), 14_000);
+    const emptyPixels = capture();
+    renderer.render(
+      frame([
+        { ...source, row: 11, special: "blackout" as const },
+        source,
+      ]),
+      15_400,
+    );
+    const singleFieldPixels = capture();
+    renderer.render(
+      frame([
+        { ...source, row: 11, special: "blackout" as const },
+        { ...source, column: 3, special: "blackout" as const },
+        source,
+      ]),
+      18_200,
+    );
+    const overlapPixels = capture();
+    renderer.render(
+      frame(
+        [markedSource],
+        {
+          atMs: 21_000,
+          blocking: true,
+          shake: null,
+          effects: [{
+            id: "marked-line-clear",
+            kind: "line-clear",
+            board: "left",
+            stage: "action",
+            moment: "impact",
+            progress: 0.5,
+            stageProgress: 0.5,
+            rows: [12],
+            visualStyle: "motion",
+            particleCount: 0,
+            flash: true,
+          }],
+        },
+      ),
+      21_000,
+    );
+    const gameplayCuePixels = capture();
+    const activationPresentation = (
+      stage: "action" | "follow-through",
+      stageProgress: number,
+      flash: boolean,
+    ) => ({
+      atMs: 0,
+      blocking: stage === "action",
+      shake: null,
+      effects: [{
+        id: "edge-special-chain",
+        kind: "special-chain",
+        board: "left",
+        stage,
+        moment: "special-burst",
+        progress: stage === "action" ? 0.5 : 0.8,
+        stageProgress,
+        visualStyle: "motion",
+        particleCount: 0,
+        flash,
+        resolvedSpecials: [{ special: "barrier", column: 0, row: 12 }],
+      }],
+    });
+    renderer.render(frame([], activationPresentation("action", 1, true)), 23_800);
+    const activationActionEndPixels = capture();
+    renderer.render(
+      frame([], activationPresentation("follow-through", 0, false)),
+      26_600,
+    );
+    const activationFollowPixels = capture();
+
     const width = gl.drawingBufferWidth;
     const height = gl.drawingBufferHeight;
-    const pixels = new Uint8Array(width * height * 4);
-    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
 
     const viewport = renderer.layout.left;
     const centerCssX = viewport.boardX + (4 + 0.5) * viewport.cellSize;
@@ -265,66 +569,190 @@ async function readMarkedCellRenderMetrics(
     const scaleY = height / canvas.clientHeight;
     const centerX = centerCssX * scaleX;
     const centerY = height - centerCssY * scaleY;
-    const pixelLuminance = (x: number, y: number): number => {
+    const pixelColor = (
+      pixels: Uint8Array,
+      x: number,
+      y: number,
+    ): readonly [number, number, number] => {
       const offset = (y * width + x) * 4;
-      return pixels[offset]! * 0.2126 +
-        pixels[offset + 1]! * 0.7152 +
-        pixels[offset + 2]! * 0.0722;
+      return [pixels[offset]!, pixels[offset + 1]!, pixels[offset + 2]!];
     };
-    const halfSpan = viewport.cellSize * 0.41 * Math.min(scaleX, scaleY);
-    let darkPixels = 0;
-    let sampledPixels = 0;
-
-    for (let y = Math.floor(centerY - halfSpan); y <= Math.ceil(centerY + halfSpan); y += 1) {
-      for (let x = Math.floor(centerX - halfSpan); x <= Math.ceil(centerX + halfSpan); x += 1) {
-        if (pixelLuminance(x, y) < 64) darkPixels += 1;
-        sampledPixels += 1;
+    const luminance = (color: readonly [number, number, number]): number =>
+      color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+    const sampleColor = (
+      pixels: Uint8Array,
+      cellOffsetX: number,
+      cellOffsetY = 0,
+    ): readonly [number, number, number] => {
+      const sampleX = Math.round(centerX + viewport.cellSize * cellOffsetX * scaleX);
+      const sampleY = Math.round(centerY - viewport.cellSize * cellOffsetY * scaleY);
+      const radius = Math.max(1, Math.round(Math.min(scaleX, scaleY)));
+      const total: [number, number, number] = [0, 0, 0];
+      let count = 0;
+      for (let y = sampleY - radius; y <= sampleY + radius; y += 1) {
+        for (let x = sampleX - radius; x <= sampleX + radius; x += 1) {
+          const color = pixelColor(pixels, x, y);
+          total[0] += color[0];
+          total[1] += color[1];
+          total[2] += color[2];
+          count += 1;
+        }
       }
-    }
+      return [total[0]! / count, total[1]! / count, total[2]! / count];
+    };
+    const sampleLuminance = (
+      pixels: Uint8Array,
+      cellOffsetX: number,
+      cellOffsetY = 0,
+    ): number => luminance(sampleColor(pixels, cellOffsetX, cellOffsetY));
+    const luminanceLift = (
+      pixels: Uint8Array,
+      baseline: Uint8Array,
+      cellOffsetX: number,
+      cellOffsetY: number,
+    ): number =>
+      sampleLuminance(pixels, cellOffsetX, cellOffsetY) -
+      sampleLuminance(baseline, cellOffsetX, cellOffsetY);
+
+    const targetDirections = [
+      [-1, -1], [0, -1], [1, -1],
+      [-1, 0], [1, 0],
+      [-1, 1], [0, 1], [1, 1],
+    ] as const;
+    const samplePoints = targetDirections.map(([targetX, targetY]) => {
+      const diagonal = targetX !== 0 && targetY !== 0;
+      const rimInset = diagonal ? 0.36 : 0.42;
+      const surfaceInset = diagonal ? 0.22 : 0.25;
+      return {
+        rim: [targetX * (1 - rimInset), targetY * (1 - rimInset)] as const,
+        surface: [
+          targetX * (1 - surfaceInset),
+          targetY * (1 - surfaceInset),
+        ] as const,
+      };
+    });
+    const neighborRimTroughLift = samplePoints.map(({ rim }) =>
+      luminanceLift(troughPixels, baselinePixels, rim[0], rim[1])
+    );
+    const neighborRimPeakLift = samplePoints.map(({ rim }) =>
+      luminanceLift(peakPixels, baselinePixels, rim[0], rim[1])
+    );
+    const neighborSurfaceTroughLift = samplePoints.map(({ surface }) =>
+      luminanceLift(troughPixels, baselinePixels, surface[0], surface[1])
+    );
+    const neighborSurfacePeakLift = samplePoints.map(({ surface }) =>
+      luminanceLift(peakPixels, baselinePixels, surface[0], surface[1])
+    );
+
+    const sourceFacePoints = [
+      [-0.27, -0.27], [0.27, -0.27],
+      [-0.27, 0.27], [0.27, 0.27],
+    ] as const;
+    const averageSourceLuminance = (pixels: Uint8Array): number =>
+      sourceFacePoints.reduce(
+        (total, [offsetX, offsetY]) =>
+          total + sampleLuminance(pixels, offsetX, offsetY),
+        0,
+      ) / sourceFacePoints.length;
+    const sourceBaseline = averageSourceLuminance(baselinePixels);
+    const sourceTroughLift = averageSourceLuminance(troughPixels) - sourceBaseline;
+    const sourcePeakLift = averageSourceLuminance(peakPixels) - sourceBaseline;
 
     const glyphRadius = viewport.cellSize * 0.3 * Math.min(scaleX, scaleY);
-    let accentPixels = 0;
+    let ivoryPixels = 0;
     let glyphPixels = 0;
     for (let y = Math.floor(centerY - glyphRadius); y <= Math.ceil(centerY + glyphRadius); y += 1) {
       for (let x = Math.floor(centerX - glyphRadius); x <= Math.ceil(centerX + glyphRadius); x += 1) {
         if ((x - centerX) ** 2 + (y - centerY) ** 2 > glyphRadius ** 2) continue;
-        const offset = (y * width + x) * 4;
-        const accentDistance = Math.hypot(
-          pixels[offset]! - 155,
-          pixels[offset + 1]! - 123,
-          pixels[offset + 2]! - 255,
-        );
-        if (accentDistance < 72) accentPixels += 1;
+        const [red, green, blue] = pixelColor(peakPixels, x, y);
+        if (red > 220 && green > 210 && blue > 175 && red - blue < 70) {
+          ivoryPixels += 1;
+        }
         glyphPixels += 1;
       }
     }
 
-    const sampleLuminance = (cellOffset: number): number => {
-      const sampleX = Math.round(
-        centerX + viewport.cellSize * cellOffset * scaleX,
+    const patternOffsets = [-0.28, -0.14, 0, 0.14, 0.28];
+    const patternContrast = (
+      pixels: Uint8Array,
+      targetX: number,
+      targetY: number,
+    ): number => {
+      const values = patternOffsets.flatMap((offsetY) =>
+        patternOffsets.map((offsetX) =>
+          sampleLuminance(pixels, targetX + offsetX, targetY + offsetY)
+        )
       );
-      const sampleY = Math.round(centerY);
-      const radius = Math.max(1, Math.round(Math.min(scaleX, scaleY)));
-      let total = 0;
-      let count = 0;
-      for (let y = sampleY - radius; y <= sampleY + radius; y += 1) {
-        for (let x = sampleX - radius; x <= sampleX + radius; x += 1) {
-          total += pixelLuminance(x, y);
-          count += 1;
-        }
-      }
-      return total / count;
+      const mean = values.reduce((total, value) => total + value, 0) / values.length;
+      return Math.sqrt(
+        values.reduce((total, value) => total + (value - mean) ** 2, 0) /
+          values.length,
+      );
     };
+    const minimumNeighborPatternContrastRatioAt = (pixels: Uint8Array): number =>
+      Math.min(
+        ...targetDirections.map(([targetX, targetY]) =>
+          patternContrast(pixels, targetX, targetY) /
+            Math.max(0.001, patternContrast(baselinePixels, targetX, targetY))
+        ),
+      );
+    const minimumLightChannelDelta = Math.min(
+      ...[troughPixels, peakPixels].flatMap((pixels) =>
+        samplePoints.flatMap(({ rim, surface }) =>
+          [rim, surface].flatMap(([offsetX, offsetY]) => {
+            const marked = sampleColor(pixels, offsetX, offsetY);
+            const baseline = sampleColor(baselinePixels, offsetX, offsetY);
+            return marked.map((channel, index) => channel - baseline[index]!);
+          })
+        )
+      ),
+    );
 
     const metrics = {
-      darkBadgeCoverage: darkPixels / sampledPixels,
-      accentGlyphCoverage: accentPixels / glyphPixels,
-      haloLuminance: {
-        near: sampleLuminance(0.55),
-        middle: sampleLuminance(0.68),
-        far: sampleLuminance(0.8),
-        background: sampleLuminance(1),
+      neighborRimTroughLift,
+      neighborRimPeakLift,
+      neighborSurfaceTroughLift,
+      neighborSurfacePeakLift,
+      sourceTroughLift,
+      sourcePeakLift,
+      ivoryGlyphCoverage: ivoryPixels / glyphPixels,
+      minimumNeighborPatternContrastRatioAtTrough:
+        minimumNeighborPatternContrastRatioAt(troughPixels),
+      minimumNeighborPatternContrastRatioAtPeak:
+        minimumNeighborPatternContrastRatioAt(peakPixels),
+      minimumLightChannelDelta,
+      outsideBoardLightDelta: {
+        left: Math.abs(
+          sampleLuminance(edgePixels, -4.62) -
+            sampleLuminance(emptyPixels, -4.62),
+        ),
+        right: Math.abs(
+          sampleLuminance(edgePixels, 5.62) -
+            sampleLuminance(emptyPixels, 5.62),
+        ),
+        top: Math.abs(
+          sampleLuminance(edgePixels, 0, -10.62) -
+            sampleLuminance(emptyPixels, 0, -10.62),
+        ),
+        bottom: Math.abs(
+          sampleLuminance(edgePixels, 0, 9.62) -
+          sampleLuminance(emptyPixels, 0, 9.62),
+        ),
       },
+      overlapTargetDelta: Math.abs(
+        sampleLuminance(overlapPixels, 0, 0) -
+          sampleLuminance(singleFieldPixels, 0, 0),
+      ),
+      gameplayCueLift: sampleLuminance(gameplayCuePixels, 0, 0) -
+        sampleLuminance(isolatedPeakPixels, 0, 0),
+      activationOutsideBoardLightDelta: Math.abs(
+        sampleLuminance(activationFollowPixels, -4.62) -
+          sampleLuminance(emptyPixels, -4.62),
+      ),
+      activationBoundaryDelta: Math.abs(
+        sampleLuminance(activationActionEndPixels, -4) -
+          sampleLuminance(activationFollowPixels, -4),
+      ),
     };
     renderer.dispose();
     canvas.remove();
@@ -377,7 +805,7 @@ async function readMarkedCellOrderDifference(page: Page): Promise<number> {
     const first = new Uint8Array(width * height * 4);
     gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, first);
 
-    renderer.render(frame([dim, bright]), 1_925);
+    renderer.render(frame([dim, bright]), 3_625);
     gl.finish();
     const second = new Uint8Array(width * height * 4);
     gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, second);
@@ -1992,18 +2420,51 @@ test("Home keeps help opt-in and exposes the complete settings surface", async (
   await expect(page.getByRole("heading", { name: "Marked-piece powers" })).toBeVisible();
   await expect(page.locator('[data-help-group="marked"] .marked-cell-sample')).toHaveCount(5);
   await expect(page.getByRole("heading", { name: "Special pieces" })).toBeVisible();
-  const markedPresentationAnimations = await page
+  const markedPresentationStyles = await page
     .locator(".marked-cell-sample .piece-preview-cell")
     .first()
-    .evaluate((cell) => ({
-      cell: getComputedStyle(cell).animationName,
-      halo: getComputedStyle(cell, "::after").animationName,
-      glyph: getComputedStyle(cell.querySelector("svg")!).animationName,
-    }));
-  expect(markedPresentationAnimations).toEqual({
+    .evaluate((cell) => {
+      const helpSourceLight = getComputedStyle(cell, "::after");
+      const glyph = getComputedStyle(cell.querySelector("svg")!);
+      const glyphUnderstroke = getComputedStyle(
+        cell.querySelector<SVGPathElement>(".glyph-understroke")!,
+      );
+      const glyphStroke = getComputedStyle(
+        cell.querySelector<SVGPathElement>(".glyph-stroke")!,
+      );
+      const animatedProbe = cell.cloneNode(true) as HTMLElement;
+      document.querySelector(".split-stack-app")!.append(animatedProbe);
+      const animatedSourceLight = getComputedStyle(animatedProbe, "::after");
+      const result = {
+        cell: getComputedStyle(cell).animationName,
+        animatedSourceLight: animatedSourceLight.animationName,
+        animatedSourceLightDuration: animatedSourceLight.animationDuration,
+        animatedSourceLightBorderWidth: animatedSourceLight.borderTopWidth,
+        helpSourceLight: helpSourceLight.animationName,
+        helpSourceLightOpacity: helpSourceLight.opacity,
+        glyph: glyph.animationName,
+        glyphBackground: glyph.backgroundImage,
+        glyphBackgroundColor: glyph.backgroundColor,
+        glyphOpacity: glyph.opacity,
+        glyphUnderstroke: glyphUnderstroke.stroke,
+        glyphStroke: glyphStroke.stroke,
+      };
+      animatedProbe.remove();
+      return result;
+    });
+  expect(markedPresentationStyles).toMatchObject({
     cell: "none",
-    halo: "preview-marked-breathe",
+    animatedSourceLight: "preview-marked-source-pulse",
+    animatedSourceLightDuration: "2.8s",
+    animatedSourceLightBorderWidth: "0px",
+    helpSourceLight: "none",
+    helpSourceLightOpacity: "0.76",
     glyph: "none",
+    glyphBackground: "none",
+    glyphBackgroundColor: "rgba(0, 0, 0, 0)",
+    glyphOpacity: "1",
+    glyphUnderstroke: "rgb(3, 7, 17)",
+    glyphStroke: "rgb(255, 253, 244)",
   });
   await page.getByRole("button", { name: "Back" }).click();
 
@@ -2036,31 +2497,129 @@ test("Home keeps help opt-in and exposes the complete settings surface", async (
   await expect(page.getByText("Diagnostics cleared.")).toBeVisible();
 });
 
-test("gameplay marked cells match the guide badge and soft halo", DEVICE_MATRIX, async ({
+test("dense renderer cell art survives palette switches at common sizes", DEVICE_MATRIX, async ({
+  page,
+}) => {
+  await openApp(page);
+  const standard = await readDenseCellArtMetrics(page, "standard", "full");
+  const colorblind = await readDenseCellArtMetrics(page, "colorblind", "full");
+  const expectedKinds = [
+    "I", "J", "L", "O", "S", "T", "Z", "cross", "small-cross", "monomino",
+    "garbage", "acid",
+  ];
+  const viewport = page.viewportSize();
+
+  expect(standard.portrait).toBe(
+    viewport === null ? standard.portrait : viewport.height > viewport.width,
+  );
+  expect(colorblind.portrait).toBe(standard.portrait);
+  expect(standard.cellSize).toBeGreaterThan(12);
+  expect(colorblind.cellSize).toBeCloseTo(standard.cellSize);
+  expect(standard.cells.map(({ kind }) => kind)).toEqual(expectedKinds);
+  expect(colorblind.cells.map(({ kind }) => kind)).toEqual(expectedKinds);
+
+  for (let index = 0; index < expectedKinds.length; index += 1) {
+    const standardCell = standard.cells[index]!;
+    const colorblindCell = colorblind.cells[index]!;
+    expect(standardCell.contrast).toBeGreaterThan(2);
+    expect(colorblindCell.contrast).toBeGreaterThan(2);
+    expect(colorblindCell.contrast / standardCell.contrast).toBeGreaterThan(0.45);
+    expect(colorblindCell.contrast / standardCell.contrast).toBeLessThan(2.2);
+    expect(Math.hypot(
+      standardCell.color[0] - colorblindCell.color[0],
+      standardCell.color[1] - colorblindCell.color[1],
+      standardCell.color[2] - colorblindCell.color[2],
+    )).toBeGreaterThan(2);
+  }
+
+  for (const metrics of [standard, colorblind]) {
+    const garbage = metrics.cells.find(({ kind }) => kind === "garbage")!;
+    expect(garbage.contrast).toBeGreaterThan(3);
+    expect(metrics.ghost.solidCenterLuminance - metrics.ghost.centerLuminance)
+      .toBeGreaterThan(12);
+    expect(metrics.ghost.edgeLuminance - metrics.ghost.backgroundLuminance)
+      .toBeGreaterThan(0);
+  }
+});
+
+test("graphics tiers retain every dense pattern and ghost silhouette", async ({ page }) => {
+  await openApp(page);
+  const full = await readDenseCellArtMetrics(page, "standard", "full");
+  const limited = await readDenseCellArtMetrics(page, "standard", "limited");
+  const reduced = await readDenseCellArtMetrics(page, "standard", "reduced");
+
+  expect(limited.cellSize).toBeCloseTo(full.cellSize);
+  expect(reduced.cellSize).toBeCloseTo(full.cellSize);
+  for (let index = 0; index < full.cells.length; index += 1) {
+    const fullContrast = full.cells[index]!.contrast;
+    const limitedContrast = limited.cells[index]!.contrast;
+    const reducedContrast = reduced.cells[index]!.contrast;
+    expect(limitedContrast).toBeGreaterThan(2);
+    expect(reducedContrast).toBeGreaterThan(2);
+    expect(limitedContrast / fullContrast).toBeGreaterThan(0.5);
+    expect(reducedContrast / fullContrast).toBeGreaterThan(0.45);
+  }
+  for (const metrics of [full, limited, reduced]) {
+    expect(metrics.ghost.solidCenterLuminance - metrics.ghost.centerLuminance)
+      .toBeGreaterThan(12);
+    expect(metrics.ghost.edgeLuminance - metrics.ghost.backgroundLuminance)
+      .toBeGreaterThan(0);
+  }
+});
+
+test("gameplay marked cells render the synchronized P4 field", DEVICE_MATRIX, async ({
   page,
 }) => {
   await openApp(page);
   const {
-    accentGlyphCoverage,
-    darkBadgeCoverage,
-    haloLuminance,
+    neighborRimTroughLift,
+    neighborRimPeakLift,
+    neighborSurfaceTroughLift,
+    neighborSurfacePeakLift,
+    sourceTroughLift,
+    sourcePeakLift,
+    ivoryGlyphCoverage,
+    minimumNeighborPatternContrastRatioAtTrough,
+    minimumNeighborPatternContrastRatioAtPeak,
+    minimumLightChannelDelta,
+    outsideBoardLightDelta,
+    overlapTargetDelta,
+    gameplayCueLift,
+    activationOutsideBoardLightDelta,
+    activationBoundaryDelta,
   } = await readMarkedCellRenderMetrics(page);
-  const minimumFalloffStep = Math.min(
-    haloLuminance.near - haloLuminance.middle,
-    haloLuminance.middle - haloLuminance.far,
-    haloLuminance.far - haloLuminance.background,
-  );
 
-  // The guide reference has roughly 43% dark-center coverage. Keep the
-  // gameplay badge above 65% of that reference under real WebGL lighting.
-  expect(darkBadgeCoverage).toBeGreaterThanOrEqual(0.28);
-  // Sample only the inner 60% of the badge so the circular accent rim cannot
-  // satisfy this assertion when the canonical glyph is missing.
-  expect(accentGlyphCoverage).toBeGreaterThanOrEqual(0.03);
-  expect(minimumFalloffStep).toBeGreaterThan(1);
+  expect(neighborRimTroughLift).toHaveLength(8);
+  expect(neighborRimPeakLift).toHaveLength(8);
+  expect(neighborSurfaceTroughLift).toHaveLength(8);
+  expect(neighborSurfacePeakLift).toHaveLength(8);
+  for (let index = 0; index < 8; index += 1) {
+    expect(neighborRimTroughLift[index]).toBeGreaterThan(0);
+    expect(
+      neighborRimPeakLift[index]! - neighborRimTroughLift[index]!,
+    ).toBeGreaterThan(2);
+    expect(neighborSurfaceTroughLift[index]).toBeGreaterThanOrEqual(0);
+    expect(
+      neighborSurfacePeakLift[index]! - neighborSurfaceTroughLift[index]!,
+    ).toBeGreaterThan(1);
+  }
+  expect(sourceTroughLift).toBeGreaterThan(0);
+  expect(sourcePeakLift - sourceTroughLift).toBeGreaterThan(5);
+  expect(ivoryGlyphCoverage).toBeGreaterThanOrEqual(0.03);
+  expect(minimumNeighborPatternContrastRatioAtTrough).toBeGreaterThan(0.65);
+  expect(minimumNeighborPatternContrastRatioAtPeak).toBeGreaterThan(0.65);
+  expect(minimumLightChannelDelta).toBeGreaterThanOrEqual(-1);
+  expect(outsideBoardLightDelta.left).toBeLessThan(1);
+  expect(outsideBoardLightDelta.right).toBeLessThan(1);
+  expect(outsideBoardLightDelta.top).toBeLessThan(1);
+  expect(outsideBoardLightDelta.bottom).toBeLessThan(1);
+  expect(overlapTargetDelta).toBeLessThan(1);
+  expect(gameplayCueLift).toBeGreaterThan(20);
+  expect(activationOutsideBoardLightDelta).toBeLessThan(1);
+  expect(activationBoundaryDelta).toBeLessThan(0.001);
 });
 
-test("Auto Very Low keeps marked-cell breathing while explicit accessibility policy is static", async ({ page }) => {
+test("Auto Very Low keeps the cheap marked-source pulse while explicit accessibility is static", async ({ page }) => {
   await openApp(page);
 
   const result = await page.evaluate(async () => {
@@ -2089,17 +2648,18 @@ test("Auto Very Low keeps marked-cell breathing while explicit accessibility pol
       },
       right: null,
     };
-    const sampleHalo = (renderer: InstanceType<typeof ThreeRenderer>): number => {
+    const sampleSourceFace = (renderer: InstanceType<typeof ThreeRenderer>): number => {
       const gl = canvas.getContext("webgl2");
       if (gl === null) throw new Error("WebGL2 unavailable in browser test");
       gl.finish();
       const viewport = renderer.layout.left;
       const x = Math.round(
-        (viewport.boardX + (4 + 0.5 + 0.68) * viewport.cellSize) *
+        (viewport.boardX + (4 + 0.5 + 0.27) * viewport.cellSize) *
           gl.drawingBufferWidth / canvas.clientWidth,
       );
       const y = Math.round(
-        (canvas.clientHeight - (viewport.boardY + (12 - 2 + 0.5) * viewport.cellSize)) *
+        (canvas.clientHeight -
+          (viewport.boardY + (12 - 2 + 0.5 + 0.27) * viewport.cellSize)) *
           gl.drawingBufferHeight / canvas.clientHeight,
       );
       const pixel = new Uint8Array(4);
@@ -2113,21 +2673,25 @@ test("Auto Very Low keeps marked-cell breathing while explicit accessibility pol
     const adaptive = new ThreeRenderer(canvas, { initialQuality: "full" });
     adaptive.setQuality(auto.tier === "very-low" ? "reduced" : "full");
     const adaptiveQuality = adaptive.quality.effects;
-    adaptive.render(frame, 3_050);
-    const adaptiveFirst = sampleHalo(adaptive);
-    adaptive.render(frame, 3_575);
-    const adaptiveSecond = sampleHalo(adaptive);
+    adaptive.render(frame, 5_600);
+    const adaptiveTrough = sampleSourceFace(adaptive);
+    adaptive.render(frame, 7_000);
+    const adaptivePeak = sampleSourceFace(adaptive);
     adaptive.dispose();
 
     const explicitStatic = new ThreeRenderer(canvas, { initialQuality: "reduced" });
     explicitStatic.setStaticMarkedCells(true);
-    explicitStatic.render(frame, 3_050);
-    const staticFirst = sampleHalo(explicitStatic);
-    explicitStatic.render(frame, 3_575);
-    const staticSecond = sampleHalo(explicitStatic);
+    explicitStatic.render(frame, 5_600);
+    const staticTrough = sampleSourceFace(explicitStatic);
+    explicitStatic.render(frame, 7_000);
+    const staticPeak = sampleSourceFace(explicitStatic);
     explicitStatic.dispose();
     canvas.remove();
-    return { adaptiveQuality, adaptiveDelta: Math.abs(adaptiveFirst - adaptiveSecond), staticDelta: Math.abs(staticFirst - staticSecond) };
+    return {
+      adaptiveQuality,
+      adaptiveDelta: adaptivePeak - adaptiveTrough,
+      staticDelta: Math.abs(staticPeak - staticTrough),
+    };
   });
 
   expect(result.adaptiveQuality).toBe("reduced");
@@ -4145,8 +4709,10 @@ test("Graphics persists fixed tiers and Very Low removes heavy CSS while preserv
       power: getComputedStyle(power).animationName,
     };
     root.dataset.reducedMotion = "true";
-    root.dataset.reducedFlashes = "true";
     result.ants = `${result.ants}/${getComputedStyle(target, "::before").animationName}`;
+    result.marked = `${result.marked}/${getComputedStyle(marked, "::after").animationName}`;
+    delete root.dataset.reducedMotion;
+    root.dataset.reducedFlashes = "true";
     result.marked = `${result.marked}/${getComputedStyle(marked, "::after").animationName}`;
     pane.remove();
     return result;
@@ -4156,7 +4722,7 @@ test("Graphics persists fixed tiers and Very Low removes heavy CSS while preserv
     ants: /none\/none$/,
     blackout: "none",
     scan: "none",
-    marked: /^preview-marked-breathe\/none$/,
+    marked: /^preview-marked-source-pulse\/none\/none$/,
     incoming: "incoming-garbage-ready",
     power: "power-meter-activate",
   });

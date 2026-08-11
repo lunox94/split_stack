@@ -15,34 +15,51 @@ export type PiecePattern =
   | "bubbles";
 
 export const STANDARD_PIECE_COLORS = {
-  I: "#2bd9fe",
-  J: "#3975ff",
-  L: "#ff9029",
-  O: "#ffd83d",
-  S: "#43dc78",
-  T: "#b65cff",
-  Z: "#ff4f62",
-  cross: "#f5ff72",
-  "small-cross": "#dc143c",
-  monomino: "#f2f6ff",
-  garbage: "#768094",
-  acid: "#8dff5a",
+  I: "#20c8ee",
+  J: "#4868e8",
+  L: "#f4932f",
+  O: "#f2d13f",
+  S: "#45dc80",
+  T: "#b95eeb",
+  Z: "#f05b6d",
+  cross: "#effb76",
+  "small-cross": "#df5065",
+  monomino: "#dceef8",
+  garbage: "#737d90",
+  acid: "#82ed50",
 } as const satisfies Readonly<Record<PieceVisualKind, string>>;
 
 export const COLORBLIND_PIECE_COLORS = {
-  I: "#56b4e9",
-  J: "#0072b2",
-  L: "#e69f00",
-  O: "#f0e442",
-  S: "#009e73",
-  T: "#cc79a7",
-  Z: "#d55e00",
+  I: "#4caddd",
+  J: "#0e6fae",
+  L: "#e99b16",
+  O: "#e8d82e",
+  S: "#07976f",
+  T: "#c873a4",
+  Z: "#d75b12",
   cross: "#ffffff",
-  "small-cross": "#ffffff",
-  monomino: "#bde8ff",
-  garbage: "#777777",
-  acid: "#8cff00",
+  "small-cross": "#f8f8ff",
+  monomino: "#bde3f7",
+  garbage: "#787878",
+  acid: "#7fe51f",
 } as const satisfies Readonly<Record<PieceVisualKind, string>>;
+
+/**
+ * Shared production targets for the prototype-inspired cell surface. The
+ * renderer bakes light, bevel and pattern into one texture, so richer art does
+ * not add a draw pass per cell. DOM previews mirror these proportions in CSS.
+ */
+export const PIECE_CELL_ART = {
+  textureSize: 128,
+  inset: 0.91,
+  ghostInset: 0.74,
+  cornerRadius: 0.18,
+  garbageCornerRadius: 0.11,
+  patternAlpha: {
+    standard: 0.23,
+    colorblind: 0.34,
+  },
+} as const;
 
 export const PIECE_PATTERNS = {
   I: "diagonal",

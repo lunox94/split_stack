@@ -210,6 +210,7 @@ export class MarkedCellPulseTracker {
       return {
         ...cell,
         specialEmphasis: Math.max(cell.specialEmphasis ?? 0, emphasis),
+        specialEmphasisKind: cell.role === "active" ? "spawn" as const : "lock" as const,
       };
     });
     return changed ? { ...board, cells } : board;

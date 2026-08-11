@@ -813,7 +813,7 @@ describe("application shell", () => {
     );
     expect(heldCell?.dataset.shape).toBe("T");
     expect(heldCell?.dataset.pattern).toBe("crosses");
-    expect(heldCell?.style.getPropertyValue("--piece-color")).toBe("#b65cff");
+    expect(heldCell?.style.getPropertyValue("--piece-color")).toBe("#b95eeb");
     expect(
       shell.left.hold.querySelector('[data-special-icon="glitch-core"] path')
         ?.getAttribute("d"),
@@ -1063,7 +1063,7 @@ describe("application shell", () => {
     expect([...hollowCross!.querySelectorAll<HTMLElement>(".piece-preview-cell")]
       .every((cell) => cell.dataset.shape === "small-cross" &&
         cell.dataset.pattern === "cross" &&
-        cell.style.getPropertyValue("--piece-color") === "#dc143c"))
+        cell.style.getPropertyValue("--piece-color") === "#df5065"))
       .toBe(true);
     expect(pieces?.textContent).toContain("Glitch Piece");
     expect(pieces?.textContent).toContain("Oversize shapes");
