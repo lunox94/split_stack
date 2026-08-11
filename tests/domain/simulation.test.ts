@@ -137,13 +137,21 @@ describe("simulation facade", () => {
     });
 
     simulation.dispatch("hard-drop");
-    simulation.tick(9);
+    const effects = simulation.tick(9);
     const snapshot = simulation.readSnapshot();
 
     expect(snapshot.player.lines).toBe(1);
     expect(snapshot.player.score).toBe(100);
     expect(snapshot.player.powerCharge).toBe(1);
     expect(snapshot.player.comboIndex).toBe(0);
+    expect(effects).toContainEqual(
+      expect.objectContaining({
+        kind: "line-clear",
+        phase: "impact",
+        comboCount: 1,
+        clearOrigin: "piece",
+      }),
+    );
   });
 
   it("holds a completed row for exactly nine ticks before resolving and spawning", () => {
@@ -755,6 +763,8 @@ describe("simulation facade", () => {
 
   it("sequences Collapse as power cue, then a 400ms drop-and-clear resolution", () => {
     const player = createPlayerState("a", SEED);
+    player.comboIndex = 3;
+    player.backToBack = true;
     player.grid = createBoard();
     for (let column = 0; column < 9; column += 1) {
       player.grid[21]![column] = { kind: "J" };
@@ -811,9 +821,17 @@ describe("simulation facade", () => {
     expect(impact).toContainEqual(
       expect.objectContaining({ kind: "collapse", phase: "impact", value: 1 }),
     );
+    expect(impact).toContainEqual(
+      expect.objectContaining({
+        kind: "line-clear",
+        phase: "impact",
+        comboCount: 4,
+        clearOrigin: "power-collapse",
+      }),
+    );
     expect(simulation.readSnapshot()).toMatchObject({
       resolution: null,
-      player: { lines: 1, score: 100 },
+      player: { lines: 1, score: 100, comboIndex: 3, backToBack: true },
     });
     expect(simulation.readSnapshot().tick).toBe(36);
     expect(simulation.readSnapshot().tick - 12).toBe(24);

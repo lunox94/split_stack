@@ -3,9 +3,10 @@ import { expect, test } from "@playwright/test";
 interface RenderedLevel {
   readonly peak: number;
   readonly activeRms: number;
+  readonly probeRms: number;
 }
 
-test("gameplay effects stay audible with music disabled and retain safe headroom", async ({
+test("Music, SFX, and Callouts remain independent and retain safe headroom", async ({
   page,
 }) => {
   await page.goto("/");
@@ -16,9 +17,16 @@ test("gameplay effects stay audible with music disabled and retain safe headroom
       /* @vite-ignore */ audioEngineModuleUrl
     ) as typeof import("../../src/audio/engine");
     const NativeOfflineAudioContext = window.OfflineAudioContext;
+    interface CaptureContext {
+      readonly bufferSourceCount: number;
+      advanceTo(time: number): void;
+    }
 
     const render = async (
-      play: (engine: InstanceType<typeof AudioEngine>) => void,
+      play: (
+        engine: InstanceType<typeof AudioEngine>,
+        context: CaptureContext,
+      ) => void | Promise<void>,
       effectsVolume = 0.8,
     ): Promise<RenderedLevel> => {
       let offlineContext: OfflineAudioContext | null = null;
@@ -27,6 +35,7 @@ test("gameplay effects stay audible with music disabled and retain safe headroom
         readonly destination: AudioDestinationNode;
         readonly sampleRate: number;
         state: AudioContextState = "running";
+        bufferSourceCount = 0;
         private virtualCurrentTime = 0;
 
         constructor() {
@@ -60,6 +69,7 @@ test("gameplay effects stay audible with music disabled and retain safe headroom
         }
 
         createBufferSource(): AudioBufferSourceNode {
+          this.bufferSourceCount += 1;
           return offlineContext!.createBufferSource();
         }
 
@@ -69,6 +79,10 @@ test("gameplay effects stay audible with music disabled and retain safe headroom
           sampleRate: number,
         ): AudioBuffer {
           return offlineContext!.createBuffer(numberOfChannels, length, sampleRate);
+        }
+
+        decodeAudioData(audioData: ArrayBuffer): Promise<AudioBuffer> {
+          return offlineContext!.decodeAudioData(audioData);
         }
 
         async resume(): Promise<void> {
@@ -89,10 +103,11 @@ test("gameplay effects stay audible with music disabled and retain safe headroom
       engine.setEffectsVolume(effectsVolume);
       engine.setMusicMuted(true);
       captureContext.advanceTo(0.12);
-      play(engine);
+      await play(engine, captureContext);
 
       const rendered = await offlineContext!.startRendering();
       const samples = rendered.getChannelData(0);
+      const rightSamples = rendered.getChannelData(1);
       let peak = 0;
       let activeEnergy = 0;
       let activeSamples = 0;
@@ -107,9 +122,27 @@ test("gameplay effects stay audible with music disabled and retain safe headroom
       const level = {
         peak,
         activeRms: Math.sqrt(activeEnergy / Math.max(1, activeSamples)),
+        probeRms: Math.sqrt(
+          rightSamples.slice(7_056, 15_435).reduce(
+            (energy, sample) => energy + sample * sample,
+            0,
+          ) / (15_435 - 7_056),
+        ),
       };
       await engine.dispose();
       return level;
+    };
+
+    const startMusic = async (
+      engine: InstanceType<typeof AudioEngine>,
+      context: CaptureContext,
+    ): Promise<void> => {
+      engine.setMusicMuted(false);
+      engine.startMusic("collapse-continuity");
+      for (let attempt = 0; attempt < 100 && context.bufferSourceCount === 0; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 10));
+      }
+      if (context.bufferSourceCount === 0) throw new Error("Tracker PCM was not scheduled");
     };
 
     return {
@@ -119,6 +152,51 @@ test("gameplay effects stay audible with music disabled and retain safe headroom
       fourLine: await render((engine) => engine.play("four-line")),
       hollowCross: await render((engine) => engine.play("hollow-cross")),
       garbage: await render((engine) => engine.playGarbageRise(4)),
+      combo2Voice: await render(async (engine, context) => {
+        engine.playCallout("combo-2");
+        for (let attempt = 0; attempt < 100 && context.bufferSourceCount === 0; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 10));
+        }
+        if (context.bufferSourceCount === 0) {
+          throw new Error("Recorded Combo 2 callout was not decoded and scheduled");
+        }
+      }),
+      combo3Voice: await render(async (engine, context) => {
+        engine.playCallout("combo-3");
+        for (let attempt = 0; attempt < 100 && context.bufferSourceCount === 0; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 10));
+        }
+        if (context.bufferSourceCount === 0) {
+          throw new Error("Recorded Combo 3 callout was not decoded and scheduled");
+        }
+      }),
+      combo4Voice: await render(async (engine, context) => {
+        engine.playCallout("combo-4");
+        for (let attempt = 0; attempt < 100 && context.bufferSourceCount === 0; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 10));
+        }
+        if (context.bufferSourceCount === 0) {
+          throw new Error("Recorded Combo 4 callout was not decoded and scheduled");
+        }
+      }),
+      calloutWithEffectsMuted: await render((engine) => {
+        engine.setEffectsMuted(true);
+        engine.playCallout("combo-5-plus");
+      }),
+      mutedCallout: await render((engine) => {
+        engine.setCalloutsMuted(true);
+        engine.playCallout("combo-5-plus");
+      }),
+      combinedImpact: await render((engine) => {
+        engine.play("four-line");
+        engine.playCallout("combo-5-plus");
+      }, 1),
+      musicOnly: await render((engine, context) => startMusic(engine, context)),
+      musicWithCollapse: await render(async (engine, context) => {
+        await startMusic(engine, context);
+        context.advanceTo(0.12);
+        engine.play("collapse-impact", { pan: -1 });
+      }),
       stackedImpactFull: await render((engine) => {
         for (let index = 0; index < 6; index += 1) engine.play("four-line");
       }, 1),
@@ -143,6 +221,23 @@ test("gameplay effects stay audible with music disabled and retain safe headroom
   }
 
   expect(levels.hardDrop.peak).toBeGreaterThan(levels.move.peak);
+  expect(levels.combo2Voice.peak).toBeGreaterThan(0.05);
+  expect(levels.combo2Voice.activeRms).toBeGreaterThan(0.01);
+  expect(levels.combo2Voice.peak).toBeLessThanOrEqual(0.95);
+  expect(levels.combo3Voice.peak).toBeGreaterThan(0.05);
+  expect(levels.combo3Voice.activeRms).toBeGreaterThan(0.01);
+  expect(levels.combo3Voice.peak).toBeLessThanOrEqual(0.95);
+  expect(levels.combo4Voice.peak).toBeGreaterThan(0.05);
+  expect(levels.combo4Voice.activeRms).toBeGreaterThan(0.01);
+  expect(levels.combo4Voice.peak).toBeLessThanOrEqual(0.95);
+  expect(levels.calloutWithEffectsMuted.activeRms).toBeGreaterThan(0.02);
+  expect(levels.mutedCallout.peak).toBe(0);
+  expect(levels.combinedImpact.peak).toBeLessThanOrEqual(0.95);
+  expect(levels.musicWithCollapse.peak).toBeLessThanOrEqual(0.95);
+  const collapseMusicRatio = levels.musicWithCollapse.probeRms /
+    levels.musicOnly.probeRms;
+  expect(collapseMusicRatio).toBeGreaterThanOrEqual(0.95);
+  expect(collapseMusicRatio).toBeLessThanOrEqual(1.05);
   expect(levels.stackedImpactFull.peak).toBeLessThanOrEqual(0.8);
   const quarterVolumeRatio = levels.stackedImpactQuarter.peak /
     levels.stackedImpactFull.peak;

@@ -404,6 +404,8 @@ export interface SettingsInputs {
   effectsVolume: HTMLInputElement;
   musicEnabled: HTMLInputElement;
   musicVolume: HTMLInputElement;
+  calloutsEnabled: HTMLInputElement;
+  calloutsVolume: HTMLInputElement;
   vibration: HTMLInputElement;
   touchControls: HTMLSelectElement;
   colorPalette: HTMLSelectElement;
@@ -951,6 +953,22 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
   musicVolume.step = "0.05";
   musicVolumeLabel.append(musicVolume);
   settingsList.append(musicVolumeLabel);
+  const calloutsEnabled = checkboxSetting(
+    document,
+    settingsList,
+    STRINGS["settings.callouts"],
+  );
+  const calloutsVolumeLabel = element(document, "label", "setting-row");
+  calloutsVolumeLabel.append(
+    element(document, "span", undefined, STRINGS["settings.calloutsVolume"]),
+  );
+  const calloutsVolume = element(document, "input");
+  calloutsVolume.type = "range";
+  calloutsVolume.min = "0";
+  calloutsVolume.max = "1";
+  calloutsVolume.step = "0.05";
+  calloutsVolumeLabel.append(calloutsVolume);
+  settingsList.append(calloutsVolumeLabel);
   const vibration = checkboxSetting(document, settingsList, STRINGS["settings.vibration"]);
   const touchLabel = element(document, "label", "setting-row");
   touchLabel.append(element(document, "span", undefined, STRINGS["settings.controls"]));
@@ -1491,6 +1509,8 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
       effectsVolume,
       musicEnabled,
       musicVolume,
+      calloutsEnabled,
+      calloutsVolume,
       vibration,
       touchControls,
       colorPalette,
@@ -1836,6 +1856,8 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
       effectsVolume.value = String(preferences.effectsVolume);
       musicEnabled.checked = preferences.musicEnabled;
       musicVolume.value = String(preferences.musicVolume);
+      calloutsEnabled.checked = preferences.calloutsEnabled;
+      calloutsVolume.value = String(preferences.calloutsVolume);
       vibration.checked = preferences.vibration;
       touchControls.value = preferences.touchControls;
       colorPalette.value = preferences.colorPalette;

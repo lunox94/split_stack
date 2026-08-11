@@ -924,7 +924,7 @@ describe("application shell", () => {
     expect(shell.watchStatus.hidden).toBe(true);
   });
 
-  it("shows independent music and effects controls", () => {
+  it("shows independent music, effects, and callout controls", () => {
     const mount = document.createElement("div");
     const shell = createAppShell(document, mount);
     shell.setPreferences({
@@ -933,14 +933,19 @@ describe("application shell", () => {
       effectsVolume: 0.2,
       musicEnabled: true,
       musicVolume: 0.65,
+      calloutsEnabled: false,
+      calloutsVolume: 0.45,
     });
 
     expect(shell.settingsInputs.effectsEnabled.checked).toBe(false);
     expect(shell.settingsInputs.effectsVolume.value).toBe("0.2");
     expect(shell.settingsInputs.musicEnabled.checked).toBe(true);
     expect(shell.settingsInputs.musicVolume.value).toBe("0.65");
+    expect(shell.settingsInputs.calloutsEnabled.checked).toBe(false);
+    expect(shell.settingsInputs.calloutsVolume.value).toBe("0.45");
     expect(shell.settings.textContent).toContain("Music volume");
     expect(shell.settings.textContent).toContain("Effects volume");
+    expect(shell.settings.textContent).toContain("Callout volume");
   });
 
   it("exposes bounded connection-diagnostic actions with polite feedback", () => {

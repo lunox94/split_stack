@@ -1,6 +1,4 @@
 import { AudioEngine } from "../audio/engine";
-import type { AudioCue } from "../audio/cues";
-import type { MusicIntensity } from "../audio/music";
 import { RULES } from "../config/rules";
 import { RULES_HASH } from "../config/rules-hash";
 import {
@@ -81,8 +79,11 @@ import type { PiecePreviewOptions } from "../ui/piece-preview";
 import { boardModelFromRemoteSnapshot, boardModelFromSimulation } from "./view-model";
 import { GraphicsAutoController, resolveGraphicsPlan } from "./graphics-policy";
 import {
+  audioPlanForLineClear,
+  calloutForPower,
   cueForAcceptedInput,
   cueForIncomingAttack,
+  cueForPhysicalEffect,
   panForPowerCue,
 } from "./audio-policy";
 import { hapticDurationForSimulationEffect } from "./haptic-policy";
@@ -375,10 +376,6 @@ export function updateHud(
   setTimedEffectsIfChanged(hud, timedEffectHudItems(statuses, replacementMode));
 }
 
-function cueForPower(power: PowerKind): AudioCue {
-  return `power-${power}` as AudioCue;
-}
-
 export async function bootstrap(): Promise<void> {
   const mount = document.getElementById("app");
   if (mount === null) throw new Error("Split Stack mount point is missing");
@@ -572,29 +569,6 @@ export async function bootstrap(): Promise<void> {
     );
   };
 
-  const musicIntensityFor = (
-    snapshot: SimulationSnapshot | undefined,
-  ): MusicIntensity => {
-    if (snapshot === undefined) return "calm";
-    const highestOccupiedRow = snapshot.player.grid.findIndex((row) =>
-      row.some((cell) => cell !== null),
-    );
-    const incomingRows = snapshot.player.incomingGarbage.reduce(
-      (total, packet) => total + packet.rows,
-      0,
-    );
-    if (
-      (highestOccupiedRow >= 0 && highestOccupiedRow <= RULES.board.hiddenRows + 4) ||
-      incomingRows >= 6
-    ) {
-      return "danger";
-    }
-    if (snapshot.level >= 4 || snapshot.player.lines >= 12 || incomingRows >= 3) {
-      return "building";
-    }
-    return "calm";
-  };
-
   const host = window.webxdc;
   const selfActor: CompetitionActor = {
     id: host?.selfAddr ?? "local-practice",
@@ -738,6 +712,8 @@ export async function bootstrap(): Promise<void> {
     audio.setEffectsVolume(preferences.effectsVolume);
     audio.setMusicMuted(!preferences.musicEnabled);
     audio.setMusicVolume(preferences.musicVolume);
+    audio.setCalloutsMuted(!preferences.calloutsEnabled);
+    audio.setCalloutsVolume(preferences.calloutsVolume);
     renderer?.setColorPalette(preferences.colorPalette);
     if (!preferences.gameplayTips) hidePowerTip();
   };
@@ -1133,6 +1109,12 @@ export async function bootstrap(): Promise<void> {
       });
     }
     presentationRouter.consumeSimulationEffects(effects, board);
+    const comboCalloutRequested = board === "left" && effects.some((effect) =>
+      effect.kind === "line-clear" &&
+      effect.phase === "impact" &&
+      effect.clearOrigin === "piece" &&
+      (effect.comboCount ?? 0) >= 2
+    );
     for (const effect of effects) {
       const hapticDuration = hapticDurationForSimulationEffect(
         effect,
@@ -1143,8 +1125,15 @@ export async function bootstrap(): Promise<void> {
       if (effect.kind === "piece-locked") audio.play("lock", { pan });
       else if (effect.kind === "t-spin") audio.play("t-spin", { pan });
       else if (effect.kind === "line-clear" && effect.phase === "impact") {
-        const cue: AudioCue = effect.rows === 1 ? "single" : effect.rows === 2 ? "double" : effect.rows === 3 ? "triple" : "four-line";
-        audio.play(cue, { pan });
+        const plan = audioPlanForLineClear({
+          rows: effect.rows ?? 1,
+          comboCount: effect.comboCount ?? 0,
+          clearOrigin: effect.clearOrigin ?? "piece",
+        });
+        audio.play(plan.sfx, { pan });
+        if (board === "left" && plan.callout !== null) {
+          audio.playCallout(plan.callout, { pan, delayMs: plan.calloutDelayMs });
+        }
       } else if (effect.kind === "garbage-rise") {
         audio.playGarbageRise(effect.rows ?? 1, { pan });
       }
@@ -1152,25 +1141,24 @@ export async function bootstrap(): Promise<void> {
       else if (effect.kind === "glitch-piece") audio.play("special-trigger", { pan });
       else if (effect.kind === "blackout-start") {
         audio.play("power-blackout", { pan });
-        audio.duckMusic();
       } else if (effect.kind === "barrier-start") {
         audio.play("power-barrier", { pan });
       }
       else if (effect.kind === "power-activated" && effect.power !== undefined) {
-        audio.play(cueForPower(effect.power), {
-          pan: panForPowerCue(effect.power, pan),
-        });
-        if (
-          effect.power === "nuke" ||
-          effect.power === "collapse" ||
-          effect.power === "oversize" ||
-          effect.power === "ghost-jam" ||
-          effect.power === "scramble"
-        ) {
-          audio.duckMusic();
+        if (board === "left") {
+          audio.playCallout(calloutForPower(effect.power), {
+            pan: panForPowerCue(effect.power, pan),
+            delayMs: comboCalloutRequested ? 150 : 0,
+          });
         }
       }
-      else if (effect.kind === "top-out" && mode === "practice" && practice !== null) showPracticeResult(practice.readSnapshot());
+      else {
+        const physicalCue = cueForPhysicalEffect(effect);
+        if (physicalCue !== null) audio.play(physicalCue, { pan });
+        else if (effect.kind === "top-out" && mode === "practice" && practice !== null) {
+          showPracticeResult(practice.readSnapshot());
+        }
+      }
     }
   };
 
@@ -1876,7 +1864,6 @@ export async function bootstrap(): Promise<void> {
           const cue = cueForIncomingAttack(kind);
           if (cue !== null) {
             audio.play(cue, { pan: -0.45 });
-            audio.duckMusic();
           }
         },
         onTransportRecoveryNeeded: () => {
@@ -2218,6 +2205,8 @@ export async function bootstrap(): Promise<void> {
       effectsVolume: Number(shell.settingsInputs.effectsVolume.value),
       musicEnabled: shell.settingsInputs.musicEnabled.checked,
       musicVolume: Number(shell.settingsInputs.musicVolume.value),
+      calloutsEnabled: shell.settingsInputs.calloutsEnabled.checked,
+      calloutsVolume: Number(shell.settingsInputs.calloutsVolume.value),
       vibration: shell.settingsInputs.vibration.checked,
       touchControls: shell.settingsInputs.touchControls.value === "buttons" ? "buttons" : "gestures",
       colorPalette: shell.settingsInputs.colorPalette.value === "colorblind" ? "colorblind" : "standard",
@@ -2789,7 +2778,6 @@ export async function bootstrap(): Promise<void> {
     let leftBoard = null;
     let rightBoard = null;
     let renderMode: "practice" | "versus" = "versus";
-    let musicIntensity: MusicIntensity = "calm";
 
     if (mode === "practice" && practice !== null) {
       if (!practicePaused) {
@@ -2800,7 +2788,6 @@ export async function bootstrap(): Promise<void> {
         }
       }
       const snapshot = practice.readSnapshot();
-      musicIntensity = musicIntensityFor(snapshot);
       processSnapshotAudio(snapshot);
       leftBoard = boardModelFromSimulation(snapshot, true, false);
       const glitchElapsedMs = syncPrimaryGlitchPreview(
@@ -2836,7 +2823,6 @@ export async function bootstrap(): Promise<void> {
       const remote = competitiveRemoteCache?.matchId === activeMatch.matchId
         ? competitiveRemoteCache
         : null;
-      musicIntensity = musicIntensityFor(view.local);
       processSnapshotAudio(view.local);
       const competitivePresentation = applyCompetitivePresentation(view);
       if (competitivePresentation.countdownCueSecond !== null) {
@@ -2951,23 +2937,7 @@ export async function bootstrap(): Promise<void> {
       ) {
         setElementHidden(shell.overlay, true);
       }
-      const spectatorIncoming = [
-        ...(left?.snapshot.incomingGarbage ?? []),
-        ...(right?.snapshot.incomingGarbage ?? []),
-      ]
-        .reduce((total, packet) => total + packet.rows, 0);
-      const spectatorLevel = Math.max(
-        left?.snapshot.level ?? 1,
-        right?.snapshot.level ?? 1,
-      );
-      musicIntensity = spectatorIncoming >= 6
-        ? "danger"
-        : spectatorIncoming >= 3 || spectatorLevel >= 4
-          ? "building"
-          : "calm";
     }
-
-    audio.updateMusic(musicIntensity);
     latestLeftBoard = leftBoard;
     latestRightBoard = rightBoard;
     renderer?.render(

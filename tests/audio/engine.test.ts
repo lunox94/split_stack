@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { AudioEngine } from "../../src/audio/engine";
-import { CUE_DEFINITIONS, GLITCH_PREVIEW_STEP_MS } from "../../src/audio/cues";
+import {
+  CALLOUT_DEFINITIONS,
+  CUE_DEFINITIONS,
+  GLITCH_PREVIEW_STEP_MS,
+} from "../../src/audio/cues";
 
 const trackerModule = (): ArrayBuffer => {
   const bytes = readFileSync(resolve("public/music/radix-mountain_king.mod"));
@@ -70,6 +74,7 @@ function fakeAudioContext(): AudioContext & {
         getChannelData: (channel: number) => channelData[channel],
       };
     }),
+    decodeAudioData: vi.fn(async () => ({ duration: 1.227_75 }) as AudioBuffer),
     close: vi.fn(async () => {
       context.state = "closed";
     }),
@@ -85,6 +90,205 @@ function fakeAudioContext(): AudioContext & {
 }
 
 describe("audio engine lifecycle", () => {
+  it("keeps recorded combo callouts bundled and compact", () => {
+    for (const fileName of ["good.mp3", "excellent.mp3", "incredible.mp3"]) {
+      const bytes = readFileSync(resolve("public/audio/callouts", fileName));
+      expect(bytes.subarray(0, 3).toString("ascii")).toBe("ID3");
+      expect(bytes.byteLength).toBeGreaterThan(0);
+      expect(bytes.byteLength).toBeLessThanOrEqual(64 * 1_024);
+    }
+  });
+
+  it("protects the combined Music, SFX, and Callouts mix at a 0.95 ceiling", async () => {
+    const context = fakeAudioContext();
+    const engine = new AudioEngine({ contextFactory: () => context });
+    expect(await engine.unlock()).toBe(true);
+
+    const master = vi.mocked(context.createWaveShaper).mock.results[1]?.value;
+    const curve = master?.curve;
+    expect(curve).toBeInstanceOf(Float32Array);
+    expect(Math.max(...(curve ?? []))).toBeCloseTo(0.95, 5);
+    expect(Math.min(...(curve ?? []))).toBeCloseTo(-0.95, 5);
+  });
+
+  it("uses a gentle default music duck reserved for future voice callouts", async () => {
+    const context = fakeAudioContext();
+    const engine = new AudioEngine({ contextFactory: () => context });
+    expect(await engine.unlock()).toBe(true);
+    const musicBus = vi.mocked(context.createGain).mock.results[2]?.value;
+    vi.mocked(musicBus?.gain.setTargetAtTime).mockClear();
+
+    engine.duckMusic();
+
+    expect(musicBus?.gain.setTargetAtTime).toHaveBeenNthCalledWith(
+      1,
+      0.55 * 0.68,
+      context.currentTime,
+      0.02,
+    );
+  });
+
+  it("owns enough tracker scheduling to survive a 750ms render stall", async () => {
+    const context = fakeAudioContext();
+    const engine = new AudioEngine({
+      contextFactory: () => context,
+      moduleLoader: async () => trackerModule(),
+    });
+    expect(await engine.unlock()).toBe(true);
+    engine.startMusic("scheduler-owned");
+    await vi.waitFor(() => expect(context.createBufferSource).toHaveBeenCalled());
+
+    const initialSources = vi.mocked(context.createBufferSource).mock.results
+      .map((result) => result.value);
+    const initialStarts = initialSources.map((source) =>
+      vi.mocked(source.start).mock.calls[0]?.[0] as number
+    );
+    const chunkSeconds = 8_192 / context.sampleRate;
+    const initialCoverage = initialStarts[initialStarts.length - 1]! + chunkSeconds -
+      initialStarts[0]!;
+    expect(initialCoverage).toBeGreaterThanOrEqual(0.85);
+
+    const scheduledEnd = initialStarts[initialStarts.length - 1]! + chunkSeconds;
+    context.currentTime += 0.75;
+    engine.updateMusic();
+    const appended = vi.mocked(context.createBufferSource).mock.results[
+      initialSources.length
+    ]?.value;
+    expect(vi.mocked(appended?.start).mock.calls[0]?.[0]).toBeCloseTo(scheduledEnd, 8);
+    await engine.dispose();
+  });
+
+  it("keeps callouts independently controllable from gameplay effects", async () => {
+    const context = fakeAudioContext();
+    const engine = new AudioEngine({ contextFactory: () => context });
+    expect(await engine.unlock()).toBe(true);
+
+    engine.setEffectsMuted(true);
+    engine.playCallout("combo-5-plus");
+    expect(context.createOscillator).toHaveBeenCalled();
+
+    const audibleCalloutTones = vi.mocked(context.createOscillator).mock.calls.length;
+    engine.setCalloutsMuted(true);
+    engine.playCallout("combo-5-plus");
+    expect(context.createOscillator).toHaveBeenCalledTimes(audibleCalloutTones);
+  });
+
+  it("preloads recorded combo voices and serializes a metered-power callout behind one", async () => {
+    const context = fakeAudioContext();
+    const calloutLoader = vi.fn(async () => new ArrayBuffer(8));
+    const engine = new AudioEngine({
+      contextFactory: () => context,
+      calloutLoader,
+    });
+    expect(await engine.unlock()).toBe(true);
+    await vi.waitFor(() => {
+      expect(calloutLoader).toHaveBeenCalledWith("./audio/callouts/good.mp3");
+      expect(calloutLoader).toHaveBeenCalledWith("./audio/callouts/excellent.mp3");
+      expect(calloutLoader).toHaveBeenCalledWith("./audio/callouts/incredible.mp3");
+      expect(context.decodeAudioData).toHaveBeenCalled();
+    });
+
+    const musicBus = vi.mocked(context.createGain).mock.results[2]?.value;
+    vi.mocked(musicBus?.gain.setTargetAtTime).mockClear();
+    vi.useFakeTimers();
+    try {
+      engine.playCallout("combo-2", { delayMs: 70 });
+      engine.playCallout("power-nuke", { delayMs: 150 });
+      await vi.advanceTimersByTimeAsync(69);
+      expect(context.createBufferSource).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(context.createBufferSource).toHaveBeenCalledTimes(1);
+      expect(context.createOscillator).not.toHaveBeenCalled();
+      expect(musicBus?.gain.setTargetAtTime).toHaveBeenNthCalledWith(
+        1,
+        0.55 * 0.68,
+        context.currentTime,
+        0.02,
+      );
+
+      await vi.advanceTimersByTimeAsync(1_227);
+      expect(context.createOscillator).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(context.createOscillator).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(context.createOscillator).mock.results[0]?.value.frequency
+        .setValueAtTime).toHaveBeenCalledWith(110, context.currentTime);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("falls back to the procedural Combo 2 cue when its voice cannot load", async () => {
+    vi.useFakeTimers();
+    try {
+      const context = fakeAudioContext();
+      const engine = new AudioEngine({
+        contextFactory: () => context,
+        calloutLoader: async () => {
+          throw new Error("decode unavailable");
+        },
+      });
+      expect(await engine.unlock()).toBe(true);
+
+      engine.playCallout("combo-2", { delayMs: 70 });
+      await vi.advanceTimersByTimeAsync(70);
+
+      expect(context.createBufferSource).not.toHaveBeenCalled();
+      expect(context.createOscillator).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(context.createOscillator).mock.results[0]?.value.frequency
+        .setValueAtTime).toHaveBeenCalledWith(660, context.currentTime);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds pending callouts and drops the oldest pending combo first", async () => {
+    vi.useFakeTimers();
+    try {
+      const context = fakeAudioContext();
+      const engine = new AudioEngine({ contextFactory: () => context });
+      expect(await engine.unlock()).toBe(true);
+
+      engine.playCallout("combo-5-plus");
+      engine.playCallout("combo-3");
+      engine.playCallout("power-nuke");
+      engine.playCallout("power-collapse");
+      engine.playCallout("power-acid-rain");
+      await vi.runAllTimersAsync();
+
+      const startingFrequencies = vi.mocked(context.createOscillator).mock.results
+        .map((result) => vi.mocked(result.value.frequency.setValueAtTime).mock.calls[0]?.[0]);
+      expect(startingFrequencies).toContain(840);
+      expect(startingFrequencies).not.toContain(720);
+      expect(startingFrequencies).toEqual(expect.arrayContaining([110, 520, 620]));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("coalesces rapid input tones without suppressing later accepted input", async () => {
+    const context = fakeAudioContext();
+    const engine = new AudioEngine({ contextFactory: () => context });
+    expect(await engine.unlock()).toBe(true);
+
+    engine.play("move");
+    engine.play("move");
+    expect(context.createOscillator).toHaveBeenCalledTimes(1);
+
+    context.currentTime += 0.031;
+    engine.play("move");
+    expect(context.createOscillator).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds synthesized SFX to 24 simultaneously active tones", async () => {
+    const context = fakeAudioContext();
+    const engine = new AudioEngine({ contextFactory: () => context });
+    expect(await engine.unlock()).toBe(true);
+
+    for (let index = 0; index < 6; index += 1) engine.play("four-line");
+
+    expect(context.createOscillator).toHaveBeenCalledTimes(24);
+  });
+
   it("streams tracker PCM and resumes it after a suspended audio context", async () => {
     const context = fakeAudioContext();
     const engine = new AudioEngine({
@@ -218,8 +422,8 @@ describe("audio engine lifecycle", () => {
 
   it("gives Hollow Cross, Oversize, Ghost Jam, and Glitch distinct readable sound identities", () => {
     const hollowCross = CUE_DEFINITIONS["hollow-cross"];
-    const oversize = CUE_DEFINITIONS["power-oversize"];
-    const ghostJam = CUE_DEFINITIONS["power-ghost-jam"];
+    const oversize = CALLOUT_DEFINITIONS["power-oversize"];
+    const ghostJam = CALLOUT_DEFINITIONS["power-ghost-jam"];
     const glitchLow = CUE_DEFINITIONS["glitch-preview-low"][0]!;
     const glitchHigh = CUE_DEFINITIONS["glitch-preview-high"][0]!;
 

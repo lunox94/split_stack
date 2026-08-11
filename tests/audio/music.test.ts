@@ -2,10 +2,18 @@ import { describe, expect, it } from "vitest";
 
 import {
   MODULE_TRACKS,
+  musicProgramForMatch,
   selectTrackForMatch,
 } from "../../src/audio/music";
 
 describe("tracker match music", () => {
+  it("represents current playback as a one-track music program", () => {
+    const program = musicProgramForMatch("shared-match-seed", 2);
+
+    expect(program.tracks).toHaveLength(1);
+    expect(program.tracks[0]).toBe(selectTrackForMatch("shared-match-seed", 2));
+  });
+
   it("selects all four supplied modules deterministically before repeating", () => {
     const firstCycle = [0, 1, 2, 3].map(
       (rematch) => selectTrackForMatch("shared-match-seed", rematch).id,

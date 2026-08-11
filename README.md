@@ -31,7 +31,9 @@ phone players do not have to keep every swipe inside the local board.
 Scramble effects remap logical movement controls consistently for their full
 duration. Accessibility options include a colorblind palette, surface patterns,
 reduced motion, reduced flashes, optional screen shake and vibration, and
-independent music and effects controls.
+independent music, effects, and callout controls. The consecutive-clear Combo 2,
+Combo 3, and Combo 4 milestones use bundled recorded callouts; Combo 5+
+currently uses a procedural cue.
 
 ### Graphics
 
@@ -67,7 +69,15 @@ Each match deterministically selects one of four bundled 4-channel ProTracker
 modules and rotates the choice on rematches. A small local replay engine streams
 short PCM chunks into Web Audio, so the tracker music stays offline without
 retaining an entire decoded song in memory. Music pauses with the game and has
-independent mute and volume controls.
+independent mute and volume controls. A dedicated scheduler keeps roughly
+850 ms of PCM queued independently of rendering so expensive visual frames do
+not interrupt playback.
+
+Gameplay audio separates Music, SFX, and Callouts. SFX describe physical board
+events; Callouts announce local combo milestones and metered-power activation.
+Callouts have their own mute and volume settings. Procedural combo identities
+cover consecutive clearing placements 2, 3, 4, and 5+, while the ordinary
+Single, Double, Triple, and Four-Line sounds continue to describe rows cleared.
 
 ## Development
 

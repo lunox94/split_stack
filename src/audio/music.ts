@@ -19,6 +19,10 @@ export interface ModuleTrack {
   readonly sha256: string;
 }
 
+export interface MusicProgram {
+  readonly tracks: readonly [ModuleTrack, ...ModuleTrack[]];
+}
+
 function moduleTrack(
   track: Omit<ModuleTrack, "assetUrl" | "sourceUrl">,
 ): ModuleTrack {
@@ -82,4 +86,11 @@ export function selectTrackForMatch(
   const offset = Math.max(0, Math.floor(rematchIndex));
   const index = (stableHash(matchSeed) + offset) % MODULE_TRACKS.length;
   return MODULE_TRACKS[index] as ModuleTrack;
+}
+
+export function musicProgramForMatch(
+  matchSeed: string,
+  rematchIndex: number,
+): MusicProgram {
+  return { tracks: [selectTrackForMatch(matchSeed, rematchIndex)] };
 }

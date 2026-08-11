@@ -76,6 +76,8 @@ export type ResolutionPhase =
   | "check-top-out"
   | "spawn-next";
 
+export type ClearOrigin = "piece" | "power-collapse";
+
 export interface SimulationEffect {
   kind:
     | "piece-locked"
@@ -105,6 +107,8 @@ export interface SimulationEffect {
   rows?: number;
   power?: PowerKind;
   value?: number;
+  comboCount?: number;
+  clearOrigin?: ClearOrigin;
   phase?: "anticipation" | "impact" | "drop" | "dissolve";
   cells?: Coordinate[];
   movements?: CollapseMovement[];
@@ -800,6 +804,8 @@ class LocalSimulation implements Simulation {
         phase: "impact",
         rows: progress.lineCount,
         value: progress.score,
+        comboCount: progress.comboIndex + 1,
+        clearOrigin: "piece",
       });
     }
     if (progress.hollowCross !== null) {
@@ -976,6 +982,8 @@ class LocalSimulation implements Simulation {
           phase: "impact",
           rows: result.clearedLines,
           value: result.score,
+          comboCount: Math.max(0, this.#player.comboIndex + 1),
+          clearOrigin: "power-collapse",
         },
         {
           kind: "collapse",

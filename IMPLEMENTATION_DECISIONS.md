@@ -360,6 +360,30 @@ rules version 2 and must change together with the peer rules hash.
   deterministically and rematches rotate the choice. The replay core renders
   short stereo PCM chunks into scheduled Web Audio buffer sources rather than
   retaining a full decoded song, which bounds memory use on phones.
+- Music, SFX, and Callouts use independent buses followed by a transparent
+  master safety ceiling. SFX never duck music. Callouts have independent mute
+  and volume controls; the reserved voice-callout duck lowers music only to
+  68% of its normal gain. Metered-power activation identities and local combo
+  milestones are Callouts, while marked triggers and physical board events
+  remain SFX.
+- The tracker scheduler runs independently of rendering at a 100 ms cadence
+  and keeps approximately 850 ms queued. A one-track music program preserves
+  current match selection while leaving a bounded seam for future playlists.
+  This is presentation-only and remains outside the rules hash.
+- Normal line-clear impact effects carry a one-based combo count and `piece`
+  origin. Collapse clear impacts carry `power-collapse` and the unchanged
+  combo count. Audio combines the normal row-count SFX with Callouts only for
+  piece-created clears: Combo 2, Combo 3, and Combo 4 use bundled recorded
+  voices, while Combo 5+ remains procedural. Recorded callouts preload after
+  audio unlock, retain their procedural fallback, and alone use the reserved
+  music duck.
+  Collapse participation would be a future gameplay-rules change rather than
+  an audio-policy change.
+- Synthesized SFX are bounded to 24 active tones. Movement and soft-drop cues
+  coalesce within 30 ms and yield before unique clears, powers, warnings, and
+  results. Callouts allow one active item plus three pending items; overflow
+  removes the oldest pending combo first and otherwise the oldest pending
+  callout. Pause, suspension, teardown, and disposal discard stale Callouts.
 - Pausing, backgrounding, muting, track replacement, and Web Audio suspension
   stop queued module buffers and resume from the audible sample position. The
   modules keep their authored tempo and arrangement; gameplay intensity does

@@ -229,6 +229,8 @@ export const STRINGS = {
   "settings.effectsVolume": "Effects volume",
   "settings.music": "Music",
   "settings.musicVolume": "Music volume",
+  "settings.callouts": "Callouts",
+  "settings.calloutsVolume": "Callout volume",
   "settings.vibration": "Vibration",
   "settings.controls": "Touch controls",
   "settings.gestures": "Gestures",

@@ -17,7 +17,7 @@ class MemoryStorage implements StoragePort {
 }
 
 describe("local preferences", () => {
-  it("keeps music and effects independently controllable", () => {
+  it("keeps music, effects, and callouts independently controllable", () => {
     const storage = new MemoryStorage();
     savePreferences(storage, {
       ...DEFAULT_PREFERENCES,
@@ -25,6 +25,8 @@ describe("local preferences", () => {
       effectsVolume: 0.25,
       musicEnabled: true,
       musicVolume: 0.6,
+      calloutsEnabled: false,
+      calloutsVolume: 0.45,
     });
 
     expect(loadPreferences(storage, false)).toMatchObject({
@@ -32,6 +34,15 @@ describe("local preferences", () => {
       effectsVolume: 0.25,
       musicEnabled: true,
       musicVolume: 0.6,
+      calloutsEnabled: false,
+      calloutsVolume: 0.45,
+    });
+  });
+
+  it("enables callouts at their independent default volume", () => {
+    expect(loadPreferences(new MemoryStorage(), false)).toMatchObject({
+      calloutsEnabled: true,
+      calloutsVolume: 0.8,
     });
   });
 

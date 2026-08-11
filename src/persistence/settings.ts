@@ -10,6 +10,8 @@ export interface Preferences {
   effectsVolume: number;
   musicEnabled: boolean;
   musicVolume: number;
+  calloutsEnabled: boolean;
+  calloutsVolume: number;
   vibration: boolean;
   touchControls: "gestures" | "buttons";
   colorPalette: "standard" | "colorblind";
@@ -27,6 +29,8 @@ export const DEFAULT_PREFERENCES: Preferences = {
   effectsVolume: 0.8,
   musicEnabled: true,
   musicVolume: 0.55,
+  calloutsEnabled: true,
+  calloutsVolume: 0.8,
   vibration: true,
   touchControls: "gestures",
   colorPalette: "standard",
@@ -67,6 +71,8 @@ function parsePreferences(value: unknown, firstRunReducedMotion: boolean): Prefe
     effectsVolume: volume(record.effectsVolume, legacyVolume ?? DEFAULT_PREFERENCES.effectsVolume),
     musicEnabled: boolean(record.musicEnabled, legacyEnabled),
     musicVolume: volume(record.musicVolume, legacyVolume ?? DEFAULT_PREFERENCES.musicVolume),
+    calloutsEnabled: boolean(record.calloutsEnabled, DEFAULT_PREFERENCES.calloutsEnabled),
+    calloutsVolume: volume(record.calloutsVolume, DEFAULT_PREFERENCES.calloutsVolume),
     vibration: boolean(record.vibration, DEFAULT_PREFERENCES.vibration),
     touchControls: record.touchControls === "buttons" ? "buttons" : "gestures",
     colorPalette: record.colorPalette === "colorblind" ? "colorblind" : "standard",
