@@ -44,6 +44,8 @@ export const COLORBLIND_PIECE_COLORS = {
   acid: "#7fe51f",
 } as const satisfies Readonly<Record<PieceVisualKind, string>>;
 
+export const MARKED_GLYPH_IVORY = "#fff8df";
+
 /**
  * Shared production targets for the prototype-inspired cell surface. The
  * renderer bakes light, bevel and pattern into one texture, so richer art does
@@ -55,8 +57,7 @@ export const PIECE_CELL_ART = {
   ghostInset: 0.74,
   cornerRadius: 0.18,
   garbageCornerRadius: 0.11,
-  markedPlaqueFootprint: 0.52,
-  markedGlyphFootprint: 0.42,
+  markedGlyphFootprint: 0.56,
   patternAlpha: {
     standard: 0.23,
     colorblind: 0.34,

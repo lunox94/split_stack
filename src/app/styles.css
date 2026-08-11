@@ -881,6 +881,10 @@ button.destructive:focus-visible {
   z-index: 1;
 }
 
+.piece-preview-cell.is-marked > .piece-preview-pattern {
+  display: none;
+}
+
 .piece-preview-cell.is-marked::after {
   position: absolute;
   z-index: 0;
@@ -914,37 +918,28 @@ button.destructive:focus-visible {
 .piece-preview-cell.is-marked > svg[data-special-icon] {
   position: absolute;
   z-index: 2;
-  inset: 24%;
-  box-sizing: border-box;
-  width: 52%;
-  height: 52%;
+  inset: 22%;
+  width: 56%;
+  height: 56%;
   overflow: visible;
-  border: 0;
-  border-radius: 22%;
   color: var(--special-accent) !important;
-  background: color-mix(in srgb, var(--piece-color) 19%, #030711);
-  box-shadow:
-    inset 2px 2px 3px rgba(0, 0, 0, 0.54),
-    inset -1px -1px 1px color-mix(in srgb, var(--piece-color) 32%, transparent),
-    inset 0 0 0 1px color-mix(in srgb, var(--piece-color) 12%, transparent);
+  background: transparent;
+  box-shadow: none;
   opacity: 1;
 }
 
 .piece-preview-cell.is-marked > svg[data-special-icon] path {
   opacity: 1;
-  transform: translateY(1px) scale(0.81);
-  transform-box: view-box;
-  transform-origin: 50% 50%;
 }
 
 .piece-preview-cell.is-marked > svg[data-special-icon] .glyph-understroke {
-  stroke: #080c14;
-  stroke-width: 7;
+  stroke: #030711;
+  stroke-width: 9;
 }
 
 .piece-preview-cell.is-marked > svg[data-special-icon] .glyph-stroke {
-  stroke: var(--special-accent);
-  stroke-width: 5;
+  stroke: #fff8df;
+  stroke-width: 5.5;
 }
 
 .piece-preview-slot[data-glitch="cycling"] {

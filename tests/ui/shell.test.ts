@@ -816,7 +816,8 @@ describe("application shell", () => {
     );
     expect(heldCell?.dataset.shape).toBe("T");
     expect(heldCell?.dataset.pattern).toBe("crosses");
-    expect(heldCell?.style.getPropertyValue("--piece-color")).toBe("#b95eeb");
+    expect(heldCell?.style.getPropertyValue("--piece-color"))
+      .toBe(SPECIAL_ACCENT_COLORS["glitch-core"]);
     expect(
       shell.left.hold.querySelector('[data-special-icon="glitch-core"] path')
         ?.getAttribute("d"),

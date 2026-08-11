@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   COLORBLIND_PIECE_COLORS,
+  MARKED_GLYPH_IVORY,
   PIECE_CELL_ART,
   PIECE_PATTERNS,
   STANDARD_PIECE_COLORS,
@@ -66,9 +67,9 @@ describe("renderer cell-art contract", () => {
     expect(PIECE_CELL_ART).toMatchObject({
       inset: 0.91,
       cornerRadius: 0.18,
-      markedPlaqueFootprint: 0.52,
-      markedGlyphFootprint: 0.42,
+      markedGlyphFootprint: 0.56,
     });
+    expect(MARKED_GLYPH_IVORY).toBe("#fff8df");
     expect(PIECE_CELL_ART.cornerRadius).toBeLessThan(0.25);
     expect(PIECE_PATTERNS.monomino).toBe("circle");
   });

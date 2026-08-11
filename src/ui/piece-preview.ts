@@ -170,6 +170,10 @@ function appendCell(
     node.classList.add("is-marked");
     node.dataset.special = descriptor.specialKind;
     node.style.setProperty(
+      "--piece-color",
+      SPECIAL_ACCENT_COLORS[descriptor.specialKind],
+    );
+    node.style.setProperty(
       "--special-accent",
       SPECIAL_ACCENT_COLORS[descriptor.specialKind],
     );

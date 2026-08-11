@@ -83,7 +83,7 @@ export function markedCellPresentationAt(
   return {
     accent: SPECIAL_ACCENT_HEX[special],
     // The synchronized field adds no light at its trough: the source then uses
-    // the exact ordinary piece surface beneath its always-opaque glyph.
+    // its unlit power-accent surface beneath the always-opaque glyph.
     emissiveIntensity: field * 0.078 * roleStrength,
     glyphOpacity: 1,
     sourceFaceOpacity: Math.min(

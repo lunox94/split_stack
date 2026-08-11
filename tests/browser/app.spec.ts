@@ -107,23 +107,25 @@ interface MarkedCellRenderMetrics {
   readonly neighborSurfacePeakLift: readonly number[];
   readonly sourceTroughLift: number;
   readonly sourcePeakLift: number;
-  readonly glyphAccentFootprintRatioAtTrough: number;
-  readonly glyphAccentFootprintRatioAtPeak: number;
-  readonly glyphAccentRetentionRatio: number;
-  readonly glyphAccentMinimumColorDistanceAtTrough: number;
-  readonly glyphAccentMinimumColorDistanceAtPeak: number;
+  readonly markedBaseAccentChromaDistance: number;
+  readonly markedBaseOrdinaryChromaDistance: number;
+  readonly markedSurfacePatternVariationRatio: number;
+  readonly markedSurfaceShadingRange: number;
+  readonly markedBevelContrast: number;
+  readonly markedCentralDarkCoverageAtTrough: number;
+  readonly markedCentralDarkCoverageAtPeak: number;
+  readonly glyphIvoryFootprintRatioAtTrough: number;
+  readonly glyphIvoryFootprintRatioAtPeak: number;
+  readonly glyphIvoryRetentionRatio: number;
+  readonly glyphIvoryMinimumColorDistanceAtTrough: number;
+  readonly glyphIvoryMinimumColorDistanceAtPeak: number;
   readonly glyphStaticColorDelta: number;
   readonly glyphUnderstrokeCoverageAtTrough: number;
   readonly glyphUnderstrokeCoverageAtPeak: number;
+  readonly glyphUnderstrokeFaceDropAtTrough: number;
+  readonly glyphUnderstrokeFaceDropAtPeak: number;
   readonly glyphContrastAtTrough: number;
   readonly glyphContrastAtPeak: number;
-  readonly socketFootprintRatio: number;
-  readonly socketInteriorLuminanceDrop: number;
-  readonly socketInteriorPulseMeanDelta: number;
-  readonly socketInteriorPulseMaximumDelta: number;
-  readonly socketSurfaceFlatnessRatio: number;
-  readonly socketEdgeLuminanceDrop: number;
-  readonly socketRoundedCornerLuminanceDrop: number;
   readonly sourceFacePeakClippedCoverage: number;
   readonly minimumNeighborPatternContrastRatioAtTrough: number;
   readonly minimumNeighborPatternContrastRatioAtPeak: number;
@@ -752,36 +754,70 @@ async function readMarkedCellRenderMetrics(
       left[2] - right[2],
     );
     const accentColor = [0x9b, 0x7b, 0xff] as const;
+    const ordinaryColor = [0x48, 0x68, 0xe8] as const;
+    const ivoryColor = [0xff, 0xf8, 0xdf] as const;
+    const understrokeColor = [0x03, 0x07, 0x11] as const;
+    const chromaDistance = (
+      left: readonly [number, number, number],
+      right: readonly [number, number, number],
+    ): number => {
+      const leftTotal = Math.max(1, left[0] + left[1] + left[2]);
+      const rightTotal = Math.max(1, right[0] + right[1] + right[2]);
+      return Math.hypot(
+        left[0] / leftTotal - right[0] / rightTotal,
+        left[1] / leftTotal - right[1] / rightTotal,
+        left[2] / leftTotal - right[2] / rightTotal,
+      );
+    };
+    const averageSourceColor = (
+      pixels: Uint8Array,
+    ): readonly [number, number, number] => {
+      const total = sourceFacePoints.reduce<[number, number, number]>(
+        (sum, [offsetX, offsetY]) => {
+          const color = sampleColor(pixels, offsetX, offsetY);
+          sum[0] += color[0];
+          sum[1] += color[1];
+          sum[2] += color[2];
+          return sum;
+        },
+        [0, 0, 0],
+      );
+      return [
+        total[0] / sourceFacePoints.length,
+        total[1] / sourceFacePoints.length,
+        total[2] / sourceFacePoints.length,
+      ];
+    };
+    const markedBaseColor = averageSourceColor(troughPixels);
     const glyphStats = (pixels: Uint8Array) => {
       const cellSpanX = viewport.cellSize * scaleX;
       const cellSpanY = viewport.cellSize * scaleY;
-      // This square is fully inside the socket's rounded corners. Restricting
-      // the classifier to it separates the static glyph from the legitimate
-      // power-colored source field that pulses just outside the socket.
-      const minimumX = Math.floor(centerX - cellSpanX * 0.19);
-      const maximumX = Math.ceil(centerX + cellSpanX * 0.19);
-      const minimumY = Math.floor(centerY - cellSpanY * 0.19);
-      const maximumY = Math.ceil(centerY + cellSpanY * 0.19);
-      const accent = new Set<number>();
+      // Cover the full 56% glyph carrier. The ivory classifier stays distinct
+      // from the power-colored face at both ends of the P4 pulse.
+      const minimumX = Math.floor(centerX - cellSpanX * 0.28);
+      const maximumX = Math.ceil(centerX + cellSpanX * 0.28);
+      const minimumY = Math.floor(centerY - cellSpanY * 0.28);
+      const maximumY = Math.ceil(centerY + cellSpanY * 0.28);
+      const ivory = new Set<number>();
       const sampled = new Map<number, {
         readonly x: number;
         readonly y: number;
         readonly color: readonly [number, number, number];
         readonly luminance: number;
       }>();
-      let accentLuminance = 0;
-      let accentMinimumX = Number.POSITIVE_INFINITY;
-      let accentMaximumX = Number.NEGATIVE_INFINITY;
-      let accentMinimumY = Number.POSITIVE_INFINITY;
-      let accentMaximumY = Number.NEGATIVE_INFINITY;
-      let minimumAccentColorDistance = Number.POSITIVE_INFINITY;
+      let ivoryLuminance = 0;
+      let ivoryMinimumX = Number.POSITIVE_INFINITY;
+      let ivoryMaximumX = Number.NEGATIVE_INFINITY;
+      let ivoryMinimumY = Number.POSITIVE_INFINITY;
+      let ivoryMaximumY = Number.NEGATIVE_INFINITY;
+      let minimumIvoryColorDistance = Number.POSITIVE_INFINITY;
       const keyFor = (x: number, y: number): number => y * width + x;
 
       for (let y = minimumY; y <= maximumY; y += 1) {
         for (let x = minimumX; x <= maximumX; x += 1) {
           const color = pixelColor(pixels, x, y);
-          const accentDistance = colorDistance(color, accentColor);
-          const isAccent = accentDistance <= 48;
+          const ivoryDistance = colorDistance(color, ivoryColor);
+          const isIvory = ivoryDistance <= 48;
           const key = keyFor(x, y);
           const sampleLuminance = luminance(color);
           sampled.set(key, {
@@ -790,26 +826,31 @@ async function readMarkedCellRenderMetrics(
             color,
             luminance: sampleLuminance,
           });
-          minimumAccentColorDistance = Math.min(
-            minimumAccentColorDistance,
-            accentDistance,
+          minimumIvoryColorDistance = Math.min(
+            minimumIvoryColorDistance,
+            ivoryDistance,
           );
-          if (isAccent) {
-            accent.add(key);
-            accentLuminance += sampleLuminance;
-            accentMinimumX = Math.min(accentMinimumX, x);
-            accentMaximumX = Math.max(accentMaximumX, x);
-            accentMinimumY = Math.min(accentMinimumY, y);
-            accentMaximumY = Math.max(accentMaximumY, y);
+          if (isIvory) {
+            ivory.add(key);
+            ivoryLuminance += sampleLuminance;
+            ivoryMinimumX = Math.min(ivoryMinimumX, x);
+            ivoryMaximumX = Math.max(ivoryMaximumX, x);
+            ivoryMinimumY = Math.min(ivoryMinimumY, y);
+            ivoryMaximumY = Math.max(ivoryMaximumY, y);
           }
         }
       }
 
-      const meanAccentLuminance = accentLuminance / Math.max(1, accent.size);
-      const dark = new Set<number>();
+      const meanIvoryLuminance = ivoryLuminance / Math.max(1, ivory.size);
+      const voidDark = new Set<number>();
+      const understrokeCandidates = new Set<number>();
       for (const [key, sample] of sampled) {
-        const isDark = sample.luminance <= meanAccentLuminance - 45;
-        if (isDark) dark.add(key);
+        if (colorDistance(sample.color, understrokeColor) <= 70) {
+          voidDark.add(key);
+        }
+        if (sample.luminance <= meanIvoryLuminance - 45) {
+          understrokeCandidates.add(key);
+        }
       }
       const adjacencyRadius = Math.max(
         1,
@@ -817,13 +858,13 @@ async function readMarkedCellRenderMetrics(
       );
       let adjacentDarkPixels = 0;
       let adjacentDarkLuminance = 0;
-      for (const key of dark) {
+      for (const key of understrokeCandidates) {
         const sample = sampled.get(key)!;
         const { x, y } = sample;
         let touchesAccent = false;
         for (let offsetY = -adjacencyRadius; offsetY <= adjacencyRadius; offsetY += 1) {
           for (let offsetX = -adjacencyRadius; offsetX <= adjacencyRadius; offsetX += 1) {
-            if (accent.has(keyFor(x + offsetX, y + offsetY))) {
+            if (ivory.has(keyFor(x + offsetX, y + offsetY))) {
               touchesAccent = true;
               break;
             }
@@ -835,87 +876,42 @@ async function readMarkedCellRenderMetrics(
         adjacentDarkLuminance += sample.luminance;
       }
 
-      const footprintRatio = accent.size === 0
+      const footprintRatio = ivory.size === 0
         ? 0
         : Math.max(
-          (accentMaximumX - accentMinimumX + 1) / cellSpanX,
-          (accentMaximumY - accentMinimumY + 1) / cellSpanY,
+          (ivoryMaximumX - ivoryMinimumX + 1) / cellSpanX,
+          (ivoryMaximumY - ivoryMinimumY + 1) / cellSpanY,
         );
       const meanUnderstrokeLuminance = adjacentDarkLuminance /
         Math.max(1, adjacentDarkPixels);
       return {
-        accent,
+        ivory,
         sampled,
-        accentPixels: accent.size,
+        ivoryPixels: ivory.size,
         footprintRatio,
-        minimumAccentColorDistance,
-        understrokeCoverage: adjacentDarkPixels / Math.max(1, accent.size),
+        minimumIvoryColorDistance,
+        understrokeCoverage: adjacentDarkPixels / Math.max(1, ivory.size),
+        understrokeFaceDrop: averageSourceLuminance(pixels) -
+          meanUnderstrokeLuminance,
+        centralDarkCoverage: voidDark.size / Math.max(1, sampled.size),
         contrast: adjacentDarkPixels === 0
           ? 0
-          : meanAccentLuminance - meanUnderstrokeLuminance,
+          : meanIvoryLuminance - meanUnderstrokeLuminance,
       };
     };
     const troughGlyph = glyphStats(troughPixels);
     const peakGlyph = glyphStats(peakPixels);
-    let retainedAccentPixels = 0;
+    let retainedIvoryPixels = 0;
     let glyphStaticColorDeltaTotal = 0;
-    for (const key of troughGlyph.accent) {
-      if (!peakGlyph.accent.has(key)) continue;
-      retainedAccentPixels += 1;
+    for (const key of troughGlyph.ivory) {
+      if (!peakGlyph.ivory.has(key)) continue;
+      retainedIvoryPixels += 1;
       glyphStaticColorDeltaTotal += colorDistance(
         troughGlyph.sampled.get(key)!.color,
         peakGlyph.sampled.get(key)!.color,
       );
     }
 
-    let socketMinimumX = Number.POSITIVE_INFINITY;
-    let socketMaximumX = Number.NEGATIVE_INFINITY;
-    let socketMinimumY = Number.POSITIVE_INFINITY;
-    let socketMaximumY = Number.NEGATIVE_INFINITY;
-    let socketDarkPixels = 0;
-    let socketInteriorPulseDeltaTotal = 0;
-    let socketInteriorPulseMaximumDelta = 0;
-    let socketInteriorPixels = 0;
-    const cellSpanX = viewport.cellSize * scaleX;
-    const cellSpanY = viewport.cellSize * scaleY;
-    for (
-      let y = Math.floor(centerY - cellSpanY * 0.3);
-      y <= Math.ceil(centerY + cellSpanY * 0.3);
-      y += 1
-    ) {
-      for (
-        let x = Math.floor(centerX - cellSpanX * 0.3);
-        x <= Math.ceil(centerX + cellSpanX * 0.3);
-        x += 1
-      ) {
-        const offsetX = Math.abs((x - centerX) / cellSpanX);
-        const offsetY = Math.abs((y - centerY) / cellSpanY);
-        const baseline = pixelColor(baselinePixels, x, y);
-        const trough = pixelColor(troughPixels, x, y);
-        if (luminance(baseline) - luminance(trough) >= 18) {
-          socketDarkPixels += 1;
-          socketMinimumX = Math.min(socketMinimumX, x);
-          socketMaximumX = Math.max(socketMaximumX, x);
-          socketMinimumY = Math.min(socketMinimumY, y);
-          socketMaximumY = Math.max(socketMaximumY, y);
-        }
-        if (offsetX <= 0.14 && offsetY <= 0.14) {
-          const delta = colorDistance(trough, pixelColor(peakPixels, x, y));
-          socketInteriorPulseDeltaTotal += delta;
-          socketInteriorPulseMaximumDelta = Math.max(
-            socketInteriorPulseMaximumDelta,
-            delta,
-          );
-          socketInteriorPixels += 1;
-        }
-      }
-    }
-    const socketFootprintRatio = socketDarkPixels === 0
-      ? 0
-      : Math.max(
-        (socketMaximumX - socketMinimumX + 1) / cellSpanX,
-        (socketMaximumY - socketMinimumY + 1) / cellSpanY,
-      );
     const standardDeviation = (values: readonly number[]): number => {
       const mean = values.reduce((total, value) => total + value, 0) / values.length;
       return Math.sqrt(
@@ -923,13 +919,37 @@ async function readMarkedCellRenderMetrics(
           values.length,
       );
     };
-    const socketSurfaceOffsets = [-0.14, -0.1, -0.06, 0, 0.06, 0.1, 0.14];
-    const baselineSocketSurface = socketSurfaceOffsets.map((offsetX) =>
-      sampleLuminance(baselinePixels, offsetX, -0.18)
+    const surfacePatternOffsets = [-0.28, -0.14, 0, 0.14, 0.28];
+    const baselinePatternSurface = surfacePatternOffsets.map((offsetX) =>
+      sampleLuminance(baselinePixels, offsetX, -0.3)
     );
-    const markedSocketSurface = socketSurfaceOffsets.map((offsetX) =>
-      sampleLuminance(troughPixels, offsetX, -0.18)
+    const markedPatternSurface = surfacePatternOffsets.map((offsetX) =>
+      sampleLuminance(troughPixels, offsetX, -0.3)
     );
+    const markedSurfaceSamples = ([
+      [-0.27, -0.27], [0.27, -0.27],
+      [-0.27, 0.27], [0.27, 0.27],
+    ] as const).map(([offsetX, offsetY]) =>
+      sampleLuminance(troughPixels, offsetX, offsetY)
+    );
+    const bevelDirections = [
+      [-1, 0], [1, 0], [0, -1], [0, 1],
+    ] as const;
+    const markedBevelContrast = bevelDirections.reduce(
+      (total, [directionX, directionY]) =>
+        total + Math.abs(
+          sampleLuminance(
+            troughPixels,
+            directionX * 0.4,
+            directionY * 0.4,
+          ) - sampleLuminance(
+            troughPixels,
+            directionX * 0.31,
+            directionY * 0.31,
+          ),
+        ),
+      0,
+    ) / bevelDirections.length;
     let clippedSourcePixels = 0;
     let sampledSourcePixels = 0;
     for (
@@ -994,34 +1014,32 @@ async function readMarkedCellRenderMetrics(
       neighborSurfacePeakLift,
       sourceTroughLift,
       sourcePeakLift,
-      glyphAccentFootprintRatioAtTrough: troughGlyph.footprintRatio,
-      glyphAccentFootprintRatioAtPeak: peakGlyph.footprintRatio,
-      glyphAccentRetentionRatio: retainedAccentPixels /
-        Math.max(1, troughGlyph.accentPixels, peakGlyph.accentPixels),
-      glyphAccentMinimumColorDistanceAtTrough:
-        troughGlyph.minimumAccentColorDistance,
-      glyphAccentMinimumColorDistanceAtPeak: peakGlyph.minimumAccentColorDistance,
+      markedBaseAccentChromaDistance: chromaDistance(markedBaseColor, accentColor),
+      markedBaseOrdinaryChromaDistance:
+        chromaDistance(markedBaseColor, ordinaryColor),
+      markedSurfacePatternVariationRatio:
+        standardDeviation(markedPatternSurface) /
+          Math.max(0.001, standardDeviation(baselinePatternSurface)),
+      markedSurfaceShadingRange:
+        Math.max(...markedSurfaceSamples) - Math.min(...markedSurfaceSamples),
+      markedBevelContrast,
+      markedCentralDarkCoverageAtTrough: troughGlyph.centralDarkCoverage,
+      markedCentralDarkCoverageAtPeak: peakGlyph.centralDarkCoverage,
+      glyphIvoryFootprintRatioAtTrough: troughGlyph.footprintRatio,
+      glyphIvoryFootprintRatioAtPeak: peakGlyph.footprintRatio,
+      glyphIvoryRetentionRatio: retainedIvoryPixels /
+        Math.max(1, troughGlyph.ivoryPixels, peakGlyph.ivoryPixels),
+      glyphIvoryMinimumColorDistanceAtTrough:
+        troughGlyph.minimumIvoryColorDistance,
+      glyphIvoryMinimumColorDistanceAtPeak: peakGlyph.minimumIvoryColorDistance,
       glyphStaticColorDelta: glyphStaticColorDeltaTotal /
-        Math.max(1, retainedAccentPixels),
+        Math.max(1, retainedIvoryPixels),
       glyphUnderstrokeCoverageAtTrough: troughGlyph.understrokeCoverage,
       glyphUnderstrokeCoverageAtPeak: peakGlyph.understrokeCoverage,
+      glyphUnderstrokeFaceDropAtTrough: troughGlyph.understrokeFaceDrop,
+      glyphUnderstrokeFaceDropAtPeak: peakGlyph.understrokeFaceDrop,
       glyphContrastAtTrough: troughGlyph.contrast,
       glyphContrastAtPeak: peakGlyph.contrast,
-      socketFootprintRatio,
-      socketInteriorLuminanceDrop:
-        sampleLuminance(baselinePixels, 0.18) -
-          sampleLuminance(troughPixels, 0.18),
-      socketInteriorPulseMeanDelta: socketInteriorPulseDeltaTotal /
-        Math.max(1, socketInteriorPixels),
-      socketInteriorPulseMaximumDelta,
-      socketSurfaceFlatnessRatio: standardDeviation(markedSocketSurface) /
-        Math.max(0.001, standardDeviation(baselineSocketSurface)),
-      socketEdgeLuminanceDrop:
-        sampleLuminance(baselinePixels, 0.22) -
-          sampleLuminance(troughPixels, 0.22),
-      socketRoundedCornerLuminanceDrop:
-        sampleLuminance(baselinePixels, 0.24, 0.24) -
-          sampleLuminance(troughPixels, 0.24, 0.24),
       sourceFacePeakClippedCoverage: clippedSourcePixels /
         Math.max(1, sampledSourcePixels),
       minimumNeighborPatternContrastRatioAtTrough:
@@ -2239,13 +2257,33 @@ test("Lobby actions and tables keep their responsive layout", DEVICE_MATRIX, asy
   const challenge = page.locator(".lobby-challenge-row").filter({ hasText: "Carol" });
   const copy = challenge.locator(".lobby-row-copy");
   const join = challenge.getByRole("button", { name: "Join Carol", exact: true });
-  await expect(join).toBeVisible();
-
-  const [challengeRect, copyRect, joinRect] = await Promise.all([
-    elementRect(challenge),
-    elementRect(copy),
-    elementRect(join),
+  await Promise.all([
+    expect(challenge).toBeVisible(),
+    expect(copy).toBeVisible(),
+    expect(join).toBeVisible(),
   ]);
+
+  const { challengeRect, copyRect, joinRect } = await challenge.evaluate((row) => {
+    const copyNode = row.querySelector<HTMLElement>(".lobby-row-copy");
+    const joinNode = row.querySelector<HTMLElement>(".lobby-row-action");
+    if (copyNode === null || joinNode === null) {
+      throw new Error("Challenge row is missing its copy or Join action");
+    }
+    const readRect = (node: Element): ElementRect => {
+      const rect = node.getBoundingClientRect();
+      return {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+      };
+    };
+    return {
+      challengeRect: readRect(row),
+      copyRect: readRect(copyNode),
+      joinRect: readRect(joinNode),
+    };
+  });
   const viewport = page.viewportSize();
   expect(viewport).not.toBeNull();
   if (viewport === null) return;
@@ -2909,23 +2947,25 @@ test("gameplay marked cells render the synchronized P4 field", DEVICE_MATRIX, as
     neighborSurfacePeakLift,
     sourceTroughLift,
     sourcePeakLift,
-    glyphAccentFootprintRatioAtTrough,
-    glyphAccentFootprintRatioAtPeak,
-    glyphAccentRetentionRatio,
-    glyphAccentMinimumColorDistanceAtTrough,
-    glyphAccentMinimumColorDistanceAtPeak,
+    markedBaseAccentChromaDistance,
+    markedBaseOrdinaryChromaDistance,
+    markedSurfacePatternVariationRatio,
+    markedSurfaceShadingRange,
+    markedBevelContrast,
+    markedCentralDarkCoverageAtTrough,
+    markedCentralDarkCoverageAtPeak,
+    glyphIvoryFootprintRatioAtTrough,
+    glyphIvoryFootprintRatioAtPeak,
+    glyphIvoryRetentionRatio,
+    glyphIvoryMinimumColorDistanceAtTrough,
+    glyphIvoryMinimumColorDistanceAtPeak,
     glyphStaticColorDelta,
     glyphUnderstrokeCoverageAtTrough,
     glyphUnderstrokeCoverageAtPeak,
+    glyphUnderstrokeFaceDropAtTrough,
+    glyphUnderstrokeFaceDropAtPeak,
     glyphContrastAtTrough,
     glyphContrastAtPeak,
-    socketFootprintRatio,
-    socketInteriorLuminanceDrop,
-    socketInteriorPulseMeanDelta,
-    socketInteriorPulseMaximumDelta,
-    socketSurfaceFlatnessRatio,
-    socketEdgeLuminanceDrop,
-    socketRoundedCornerLuminanceDrop,
     sourceFacePeakClippedCoverage,
     minimumNeighborPatternContrastRatioAtTrough,
     minimumNeighborPatternContrastRatioAtPeak,
@@ -2952,42 +2992,46 @@ test("gameplay marked cells render the synchronized P4 field", DEVICE_MATRIX, as
       neighborSurfacePeakLift[index]! - neighborSurfaceTroughLift[index]!,
     ).toBeGreaterThan(1);
   }
-  expect(Math.abs(sourceTroughLift)).toBeLessThan(2);
   expect(sourcePeakLift - sourceTroughLift).toBeGreaterThan(5);
-  // The glyph uses a static 42% carrier. Individual paths occupy less than the
-  // carrier, remain at the exact power accent, and never bloom beyond it.
+  expect(markedBaseAccentChromaDistance).toBeLessThan(
+    markedBaseOrdinaryChromaDistance,
+  );
+  expect(markedBaseAccentChromaDistance).toBeLessThan(0.1);
+  // Marked cells remove their piece pattern but retain the cell surface's
+  // directional shading and rounded bevel instead of becoming a flat tile.
+  expect(markedSurfacePatternVariationRatio).toBeLessThan(0.75);
+  expect(markedSurfaceShadingRange).toBeGreaterThan(3);
+  expect(markedBevelContrast).toBeGreaterThan(1);
+  // A socket or badge would occupy most of the central face with a near-black
+  // field; the narrow antialiased glyph understroke must not form one.
+  expect(markedCentralDarkCoverageAtTrough).toBeLessThan(0.3);
+  expect(markedCentralDarkCoverageAtPeak).toBeLessThan(0.3);
+  // The glyph uses a static 56% carrier. Individual paths occupy less than the
+  // carrier, stay ivory, and never bloom beyond it.
   for (const footprint of [
-    glyphAccentFootprintRatioAtTrough,
-    glyphAccentFootprintRatioAtPeak,
+    glyphIvoryFootprintRatioAtTrough,
+    glyphIvoryFootprintRatioAtPeak,
   ]) {
-    expect(footprint).toBeGreaterThan(0.16);
-    expect(footprint).toBeLessThanOrEqual(0.43);
+    expect(footprint).toBeGreaterThan(0.3);
+    expect(footprint).toBeLessThanOrEqual(0.57);
   }
-  // At portrait cell sizes antialiased edges cross the accent classifier in
+  // At portrait cell sizes antialiased edges cross the ivory classifier in
   // whole-pixel steps even though the carrier and texture stay static.
   expect(Math.abs(
-    glyphAccentFootprintRatioAtPeak - glyphAccentFootprintRatioAtTrough,
+    glyphIvoryFootprintRatioAtPeak - glyphIvoryFootprintRatioAtTrough,
   )).toBeLessThan(0.2);
-  expect(glyphAccentRetentionRatio).toBeGreaterThan(0.85);
-  expect(glyphAccentMinimumColorDistanceAtTrough).toBeLessThan(36);
-  expect(glyphAccentMinimumColorDistanceAtPeak).toBeLessThan(36);
+  expect(glyphIvoryRetentionRatio).toBeGreaterThan(0.85);
+  expect(glyphIvoryMinimumColorDistanceAtTrough).toBeLessThan(36);
+  expect(glyphIvoryMinimumColorDistanceAtPeak).toBeLessThan(36);
   expect(glyphStaticColorDelta).toBeLessThan(2);
   expect(glyphUnderstrokeCoverageAtTrough).toBeGreaterThan(0.04);
   expect(glyphUnderstrokeCoverageAtPeak).toBeGreaterThan(0.04);
   expect(glyphUnderstrokeCoverageAtTrough).toBeLessThan(3);
   expect(glyphUnderstrokeCoverageAtPeak).toBeLessThan(3);
-  expect(glyphContrastAtTrough).toBeGreaterThan(45);
-  expect(glyphContrastAtPeak).toBeGreaterThan(45);
-  expect(socketFootprintRatio).toBeGreaterThan(0.47);
-  expect(socketFootprintRatio).toBeLessThan(0.57);
-  expect(socketInteriorLuminanceDrop).toBeGreaterThan(18);
-  expect(socketInteriorPulseMeanDelta).toBeLessThan(1);
-  expect(socketInteriorPulseMaximumDelta).toBeLessThan(4);
-  expect(socketSurfaceFlatnessRatio).toBeLessThan(0.6);
-  expect(socketEdgeLuminanceDrop).toBeGreaterThan(18);
-  expect(socketRoundedCornerLuminanceDrop).toBeLessThan(
-    socketEdgeLuminanceDrop * 0.5,
-  );
+  expect(glyphUnderstrokeFaceDropAtTrough).toBeGreaterThan(3);
+  expect(glyphUnderstrokeFaceDropAtPeak).toBeGreaterThan(3);
+  expect(glyphContrastAtTrough).toBeGreaterThan(65);
+  expect(glyphContrastAtPeak).toBeGreaterThan(65);
   expect(sourceFacePeakClippedCoverage).toBeLessThan(0.02);
   expect(minimumNeighborPatternContrastRatioAtTrough).toBeGreaterThan(0.65);
   expect(minimumNeighborPatternContrastRatioAtPeak).toBeGreaterThan(0.65);

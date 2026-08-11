@@ -33,26 +33,24 @@ rules version 2 and must change together with the peer rules hash.
   accent lift and a full rim brighten the source from an ordinary-cell trough
   while every occupied,
   non-Ghost cell in its eight-neighbor field receives a source-facing rim and
-  clipped inward surface wash on the same envelope. Its compact power-colored
-  glyph sits in a matte 52%-of-cell rounded-square socket derived from the
-  underlying cell color and echoing the cell silhouette. The opaque socket
-  interrupts the pattern and stays unlit, using only a soft inner seam; the
-  socket reverses the cell's raised lighting with a dark upper-left inner edge,
-  a restrained lower-right reflection, and a flat opaque interior without the
-  cell pattern or either surface gradient. The smaller, slightly lowered glyph
-  remains fully opaque with a narrow neutral
-  separator, stays at its exact power color, and does not pulse or glow. Every
+  clipped inward surface wash on the same envelope. Every marked cell uses its
+  power accent as the base color and removes the piece pattern while retaining
+  the shared surface shading and bevel. Its larger ivory glyph sits directly
+  on that surface with a strong dark understroke for small-screen contrast;
+  there is no socket or badge. The glyph remains fully opaque and does not
+  pulse or glow. Every
   visible source and its
   field share one global envelope; when several sources affect one target, it
   receives one deterministic contribution per source-facing direction so each
   relevant rim section responds without mixing duplicate overlays. Ghost
-  markers keep only a faint static socket outline and glyph and
+  markers keep only a faint static glyph and
   neither cast nor receive neighbor light. Lower graphics tiers
   reduce or remove the surface wash before essential source, rim, and glyph
   cues, while reduced motion or flashes freeze a representative static state.
   Spawn and lock emphasis may strengthen only the source lift and rim, never
-  the neighboring field or glyph. NEXT and HOLD previews use the same socket
-  and 2.8-second curve, while How to Play retains bare power-colored glyphs.
+  the neighboring field or glyph. NEXT and HOLD previews use the same marked-
+  cell treatment and 2.8-second curve, while How to Play retains bare power-
+  colored glyphs.
 - Board cells and DOM previews share one vivid palette and one pattern identity
   per visual kind. Their prototype-derived surface uses a rounded dimensional
   silhouette, a restrained upper sheen and lower bevel, and a larger navy

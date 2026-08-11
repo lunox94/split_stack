@@ -1,11 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
-import { existsSync } from "node:fs";
 import { DEVICE_MATRIX_TAG } from "./tests/browser/device-matrix";
 
-const macChrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const executablePath = process.platform === "darwin" && existsSync(macChrome)
-  ? macChrome
-  : undefined;
 const deviceMatrix = new RegExp(`${DEVICE_MATRIX_TAG}\\b`);
 
 export default defineConfig({
@@ -17,8 +12,8 @@ export default defineConfig({
   reporter: "list",
   use: {
     baseURL: "http://127.0.0.1:3000",
+    channel: "chromium",
     trace: "retain-on-failure",
-    ...(executablePath === undefined ? {} : { launchOptions: { executablePath } }),
   },
   projects: [
     // Desktop is the canonical behavioral suite. Portrait only repeats tests
