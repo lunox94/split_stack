@@ -260,7 +260,7 @@ export const STRINGS = {
   "help.powers":
     "Line clears charge your meter. The displayed power activates automatically when the meter is full.",
   "help.specialCells":
-    "A marked cell triggers only when it participates in a normal line clear.",
+    "A marked cell triggers only when it participates in a normal line clear. Rotate an O piece to choose which row or column carries its mark.",
   "power.blackout": "Blackout",
   "power.scramble": "Scramble",
   "power.nuke": "Nuke",

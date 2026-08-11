@@ -66,7 +66,8 @@ describe("renderer cell-art contract", () => {
     expect(PIECE_CELL_ART).toMatchObject({
       inset: 0.91,
       cornerRadius: 0.18,
-      markedGlyphFootprint: 0.46,
+      markedPlaqueFootprint: 0.52,
+      markedGlyphFootprint: 0.42,
     });
     expect(PIECE_CELL_ART.cornerRadius).toBeLessThan(0.25);
     expect(PIECE_PATTERNS.monomino).toBe("circle");

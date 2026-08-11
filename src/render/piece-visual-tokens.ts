@@ -55,7 +55,8 @@ export const PIECE_CELL_ART = {
   ghostInset: 0.74,
   cornerRadius: 0.18,
   garbageCornerRadius: 0.11,
-  markedGlyphFootprint: 0.46,
+  markedPlaqueFootprint: 0.52,
+  markedGlyphFootprint: 0.42,
   patternAlpha: {
     standard: 0.23,
     colorblind: 0.34,

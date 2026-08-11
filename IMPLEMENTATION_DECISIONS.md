@@ -33,18 +33,26 @@ rules version 2 and must change together with the peer rules hash.
   accent lift and a full rim brighten the source from an ordinary-cell trough
   while every occupied,
   non-Ghost cell in its eight-neighbor field receives a source-facing rim and
-  clipped inward surface wash on the same envelope. The glyph is a compact
-  46%-of-cell opaque ivory inlay with a dark legibility understroke and has no
-  badge, centered core, or board-spanning bubble. Every visible source and its
+  clipped inward surface wash on the same envelope. Its compact power-colored
+  glyph sits in a matte 52%-of-cell rounded-square socket derived from the
+  underlying cell color and echoing the cell silhouette. The opaque socket
+  interrupts the pattern and stays unlit, using only a soft inner seam; the
+  socket reverses the cell's raised lighting with a dark upper-left inner edge,
+  a restrained lower-right reflection, and a flat opaque interior without the
+  cell pattern or either surface gradient. The smaller, slightly lowered glyph
+  remains fully opaque with a narrow neutral
+  separator, stays at its exact power color, and does not pulse or glow. Every
+  visible source and its
   field share one global envelope; when several sources affect one target, it
   receives one deterministic contribution per source-facing direction so each
   relevant rim section responds without mixing duplicate overlays. Ghost
-  markers keep only a static low-emphasis marker and
+  markers keep only a faint static socket outline and glyph and
   neither cast nor receive neighbor light. Lower graphics tiers
   reduce or remove the surface wash before essential source, rim, and glyph
   cues, while reduced motion or flashes freeze a representative static state.
   Spawn and lock emphasis may strengthen only the source lift and rim, never
-  the neighboring field.
+  the neighboring field or glyph. NEXT and HOLD previews use the same socket
+  and 2.8-second curve, while How to Play retains bare power-colored glyphs.
 - Board cells and DOM previews share one vivid palette and one pattern identity
   per visual kind. Their prototype-derived surface uses a rounded dimensional
   silhouette, a restrained upper sheen and lower bevel, and a larger navy
@@ -77,9 +85,12 @@ rules version 2 and must change together with the peer rules hash.
 - A delayed line clear captures its level at lock time; crossing a timed level
   boundary during anticipation does not multiply that clear's score. The event
   ordinal participates in the authoritative state hash and checkpoints.
-- O rotation is a no-op and is not a successful action, so it cannot reset lock
-  delay or qualify a T-Spin. A hard drop is the final successful action and,
-  per the literal T-Spin rule, disqualifies a prior rotation.
+- O rotation preserves the occupied 2×2 footprint and uses no kick offset, but
+  cycles the four indexed mino identities around the center so a marked power
+  can be placed in any quadrant. The input is a successful directional action,
+  while its unchanged footprint deliberately does not reset grounded lock
+  delay; O can never qualify for a T-Spin. A hard drop is the final successful
+  action and, per the literal T-Spin rule, disqualifies a prior rotation.
 
 ## Effects and queues
 

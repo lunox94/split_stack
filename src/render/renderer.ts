@@ -177,7 +177,8 @@ function effectRenderOrderFor(key: string): number {
   if (key.startsWith("marked-neighbor-rim-")) return 6;
   if (key.startsWith("marked-source-face-")) return 7;
   if (key.startsWith("marked-source-rim-")) return 8;
-  if (key.startsWith("marked-source-glyph-")) return 9;
+  if (key.startsWith("marked-source-plaque-")) return 9;
+  if (key.startsWith("marked-source-glyph-")) return 10;
   return 20;
 }
 
@@ -1021,14 +1022,24 @@ export class ThreeRenderer {
       );
     }
     this.#drawEffectTexture(
+      `marked-source-plaque-${this.#palette}-${cell.kind}-${cell.role}`,
+      this.#markedSourcePlaqueTexture(cell.kind, cell.role === "ghost"),
+      x,
+      y,
+      viewport.cellSize * PIECE_CELL_ART.markedPlaqueFootprint,
+      viewport.cellSize * PIECE_CELL_ART.markedPlaqueFootprint,
+      cell.role === "ghost" ? presentation.glyphOpacity : 1,
+      { z: overlayBaseZ + 0.16 },
+    );
+    this.#drawEffectTexture(
       `marked-source-glyph-${cell.role}-${cell.special}`,
       this.#markedSourceGlyphTexture(cell.special),
       x,
-      y,
+      y - Math.max(0.25, viewport.cellSize * 0.012),
       viewport.cellSize * PIECE_CELL_ART.markedGlyphFootprint,
       viewport.cellSize * PIECE_CELL_ART.markedGlyphFootprint,
       presentation.glyphOpacity,
-      { z: overlayBaseZ + 0.16 },
+      { z: overlayBaseZ + 0.2 },
     );
   }
 
@@ -1759,6 +1770,71 @@ export class ThreeRenderer {
     return texture;
   }
 
+  #markedSourcePlaqueTexture(kind: RenderCellKind, ghost: boolean): Texture {
+    const textureKey =
+      `marked-source-plaque:${this.#palette}:${kind}:${ghost ? "ghost" : "solid"}`;
+    const existing = this.#textures.get(textureKey);
+    if (existing !== undefined) return existing;
+    const canvas = this.#canvas.ownerDocument.createElement("canvas");
+    canvas.width = 128;
+    canvas.height = 128;
+    const context = canvas.getContext("2d");
+    if (context === null) throw new Error("Canvas 2D unavailable for marked plaque");
+
+    const cellColor = this.#colors()[kind];
+    const red = Number.parseInt(cellColor.slice(1, 3), 16);
+    const green = Number.parseInt(cellColor.slice(3, 5), 16);
+    const blue = Number.parseInt(cellColor.slice(5, 7), 16);
+    if (ghost) {
+      context.strokeStyle = `rgba(${red}, ${green}, ${blue}, 0.46)`;
+      context.lineWidth = 3;
+      context.beginPath();
+      context.roundRect(3.5, 3.5, 121, 121, 25);
+      context.stroke();
+    } else {
+      const darkChannel = (
+        channel: number,
+        darkBase: number,
+        mix: number,
+      ): number => Math.round(darkBase * (1 - mix) + channel * mix);
+      context.fillStyle =
+        `rgb(${darkChannel(red, 3, 0.19)}, ${darkChannel(green, 7, 0.19)}, ${darkChannel(blue, 17, 0.19)})`;
+      context.beginPath();
+      context.roundRect(2, 2, 124, 124, 27);
+      context.fill();
+
+      context.lineCap = "round";
+      context.strokeStyle = "rgba(0, 0, 0, 0.52)";
+      context.lineWidth = 5;
+      context.beginPath();
+      context.moveTo(27, 6);
+      context.lineTo(101, 6);
+      context.moveTo(6, 27);
+      context.lineTo(6, 101);
+      context.stroke();
+
+      context.strokeStyle = `rgba(${red}, ${green}, ${blue}, 0.32)`;
+      context.lineWidth = 2.5;
+      context.beginPath();
+      context.moveTo(27, 122);
+      context.lineTo(101, 122);
+      context.moveTo(122, 27);
+      context.lineTo(122, 101);
+      context.stroke();
+
+      context.strokeStyle = `rgba(${red}, ${green}, ${blue}, 0.12)`;
+      context.lineWidth = 2;
+      context.beginPath();
+      context.roundRect(5, 5, 118, 118, 24);
+      context.stroke();
+    }
+
+    const texture = new CanvasTexture(canvas);
+    texture.colorSpace = SRGBColorSpace;
+    this.#textures.set(textureKey, texture);
+    return texture;
+  }
+
   #markedSourceGlyphTexture(special: SpecialKind): Texture {
     const textureKey = `marked-source-glyph:${special}`;
     const existing = this.#textures.get(textureKey);
@@ -1771,18 +1847,13 @@ export class ThreeRenderer {
 
     context.lineCap = "round";
     context.lineJoin = "round";
-    context.save();
-    // The 64×64 icon viewBox fills this texture. Its mesh carrier is exactly
-    // 46% of the cell, matching the selected prototype rather than enlarging
-    // the visible path to a 46% bounding box.
     context.scale(2, 2);
-    context.strokeStyle = "#030711";
-    context.lineWidth = 8;
+    context.strokeStyle = "#080c14";
+    context.lineWidth = 7;
     context.stroke(new Path2D(SPECIAL_ICON_PATHS[special]));
-    context.strokeStyle = "#fff8df";
+    context.strokeStyle = SPECIAL_ACCENT_COLORS[special];
     context.lineWidth = 5;
     context.stroke(new Path2D(SPECIAL_ICON_PATHS[special]));
-    context.restore();
 
     const texture = new CanvasTexture(canvas);
     texture.colorSpace = SRGBColorSpace;

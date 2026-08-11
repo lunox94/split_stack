@@ -5,6 +5,12 @@ describe("approved balance configuration", () => {
   it("keeps board, timing, garbage, and meter values in the peer-hashed config", () => {
     expect(RULES.rulesVersion).toBe(2);
     expect(RULES.board).toEqual({ width: 10, height: 22, hiddenRows: 2 });
+    expect(RULES.rotation.oPiece).toEqual({
+      footprint: "fixed-2x2",
+      indexedMinoPivot: { x: 1.5, y: 0.5 },
+      kickPolicy: "none",
+      resetsLockDelay: false,
+    });
     expect(RULES.timing).toMatchObject({
       ticksPerSecond: 60,
       levelTicks: 3600,

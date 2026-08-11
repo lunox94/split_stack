@@ -9,6 +9,14 @@ export const STANDARD_SHAPES = ["I", "J", "L", "O", "S", "T", "Z"] as const;
 export const RULES = {
   rulesVersion: 2,
   board: { width: 10, height: 22, hiddenRows: 2 },
+  rotation: {
+    oPiece: {
+      footprint: "fixed-2x2",
+      indexedMinoPivot: { x: 1.5, y: 0.5 },
+      kickPolicy: "none",
+      resetsLockDelay: false,
+    },
+  },
   timing: {
     ticksPerSecond: 60,
     levelTicks: 3_600,

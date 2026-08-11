@@ -69,7 +69,6 @@ export function tryRotate(
   direction: RotationDirection,
 ): ActivePiece | null {
   if (!isStandardShape(piece.descriptor.shape)) return null;
-  if (piece.descriptor.shape === "O") return null;
 
   const rotation = nextRotation(piece.rotation, direction);
   const kicks = piece.descriptor.source === "oversize"
@@ -84,6 +83,10 @@ export function tryRotate(
       lastSuccessfulAction: direction === "cw" ? "rotate-cw" : "rotate-ccw",
     };
     if (!collides(grid, rotated)) {
+      if (
+        piece.descriptor.shape === "O" &&
+        !RULES.rotation.oPiece.resetsLockDelay
+      ) return rotated;
       return resetLockDelayIfGrounded(grid, piece, rotated);
     }
   }

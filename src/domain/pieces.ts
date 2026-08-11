@@ -86,11 +86,13 @@ export function getPieceCells(
   let cells: readonly Coordinate[] = STANDARD_SPAWN_CELLS[
     shape as keyof typeof STANDARD_SPAWN_CELLS
   ];
-  if (shape !== "O") {
-    const pivot = shape === "I" ? { x: 1.5, y: 1.5 } : { x: 1, y: 1 };
-    for (let turn = 0; turn < rotation; turn += 1) {
-      cells = cells.map((cell) => rotateClockwise(cell, pivot));
-    }
+  const pivot = shape === "I"
+    ? { x: 1.5, y: 1.5 }
+    : shape === "O"
+      ? RULES.rotation.oPiece.indexedMinoPivot
+      : { x: 1, y: 1 };
+  for (let turn = 0; turn < rotation; turn += 1) {
+    cells = cells.map((cell) => rotateClockwise(cell, pivot));
   }
   return cells.map((cell, index) => ({ ...cell, index }));
 }

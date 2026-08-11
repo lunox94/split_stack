@@ -95,6 +95,44 @@ describe("board operations", () => {
     expect(grid.every((row) => row.every((cell) => cell === null))).toBe(true);
   });
 
+  it.each([
+    [0, 4, 20],
+    [1, 5, 20],
+    [2, 5, 21],
+    [3, 4, 21],
+  ] as const)(
+    "merges a marked O at rotation %i with its indexed mino at (%i, %i)",
+    (rotation, markedColumn, markedRow) => {
+      const piece: ActivePiece = {
+        descriptor: {
+          source: "base",
+          shape: "O",
+          specialCellIndex: 0,
+          specialKind: "barrier",
+        },
+        x: 3,
+        y: 20,
+        rotation,
+        lockTicksRemaining: 0,
+        lockResetCount: 0,
+      };
+
+      const merged = mergePiece(createBoard(), piece);
+      const marked = merged.flatMap((row, rowIndex) =>
+        row.flatMap((cell, column) =>
+          cell?.special === undefined ? [] : [{ cell, column, row: rowIndex }]
+        )
+      );
+
+      expect(marked).toEqual([{
+        cell: { kind: "O", special: "barrier" },
+        column: markedColumn,
+        row: markedRow,
+      }]);
+      expect(merged.flat().filter((cell) => cell?.kind === "O")).toHaveLength(4);
+    },
+  );
+
   it("persists the distinct Small Cross cell kind after lock", () => {
     const piece: ActivePiece = {
       descriptor: { source: "cross", shape: "cross", crossVariant: "small" },

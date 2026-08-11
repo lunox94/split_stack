@@ -84,6 +84,34 @@ describe("canonical piece geometry", () => {
       ]);
   });
 
+  it("rotates O-mino identities while keeping the occupied 2x2 footprint fixed", () => {
+    const orientations = ([0, 1, 2, 3] as const).map((rotation) =>
+      getPieceCells("O", rotation)
+    );
+
+    expect(orientations).toEqual([
+      [
+        { x: 1, y: 0, index: 0 }, { x: 2, y: 0, index: 1 },
+        { x: 1, y: 1, index: 2 }, { x: 2, y: 1, index: 3 },
+      ],
+      [
+        { x: 2, y: 0, index: 0 }, { x: 2, y: 1, index: 1 },
+        { x: 1, y: 0, index: 2 }, { x: 1, y: 1, index: 3 },
+      ],
+      [
+        { x: 2, y: 1, index: 0 }, { x: 1, y: 1, index: 1 },
+        { x: 2, y: 0, index: 2 }, { x: 1, y: 0, index: 3 },
+      ],
+      [
+        { x: 1, y: 1, index: 0 }, { x: 1, y: 0, index: 1 },
+        { x: 2, y: 1, index: 2 }, { x: 2, y: 0, index: 3 },
+      ],
+    ]);
+    expect(orientations.map((cells) =>
+      cells.map(({ x, y }) => `${x}:${y}`).sort()
+    )).toEqual(Array.from({ length: 4 }, () => ["1:0", "1:1", "2:0", "2:1"]));
+  });
+
   it("uses the configured Small and Large Hollow Cross geometries", () => {
     expect(getDescriptorCells({ source: "cross", shape: "cross", crossVariant: "small" }, 3))
       .toEqual([
@@ -309,15 +337,40 @@ describe("piece movement", () => {
     });
   });
 
-  it("treats O rotation as a true no-op without a lock reset", () => {
+  it("rotates O-mino identities in place without resetting grounded lock delay", () => {
     const groundedO = {
       ...active({ source: "base", shape: "O" }, 3, 20),
       lockTicksRemaining: 4,
       lockResetCount: 6,
     };
 
-    expect(tryRotate(createBoard(), groundedO, "cw")).toBeNull();
+    expect(tryRotate(createBoard(), groundedO, "cw")).toEqual({
+      ...groundedO,
+      rotation: 1,
+      lastSuccessfulAction: "rotate-cw",
+    });
     expect(groundedO).toMatchObject({ lockTicksRemaining: 4, lockResetCount: 6 });
+
+    expect(tryRotate(
+      createBoard(),
+      active({ source: "base", shape: "O" }, -1, 8),
+      "ccw",
+    )).toMatchObject({
+      x: -1,
+      y: 8,
+      rotation: 3,
+      lastSuccessfulAction: "rotate-ccw",
+    });
+    expect(tryRotate(
+      createBoard(),
+      active({ source: "base", shape: "O" }, 7, 8, 3),
+      "cw",
+    )).toMatchObject({
+      x: 7,
+      y: 8,
+      rotation: 0,
+      lastSuccessfulAction: "rotate-cw",
+    });
   });
 
   it("computes the exact ghost landing and makes hard drop lock immediately", () => {

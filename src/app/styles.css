@@ -914,32 +914,37 @@ button.destructive:focus-visible {
 .piece-preview-cell.is-marked > svg[data-special-icon] {
   position: absolute;
   z-index: 2;
-  inset: 27%;
-  width: 46%;
-  height: 46%;
+  inset: 24%;
+  box-sizing: border-box;
+  width: 52%;
+  height: 52%;
   overflow: visible;
-  color: #fffdf4 !important;
-  background: transparent;
+  border: 0;
+  border-radius: 22%;
+  color: var(--special-accent) !important;
+  background: color-mix(in srgb, var(--piece-color) 19%, #030711);
+  box-shadow:
+    inset 2px 2px 3px rgba(0, 0, 0, 0.54),
+    inset -1px -1px 1px color-mix(in srgb, var(--piece-color) 32%, transparent),
+    inset 0 0 0 1px color-mix(in srgb, var(--piece-color) 12%, transparent);
   opacity: 1;
 }
 
 .piece-preview-cell.is-marked > svg[data-special-icon] path {
   opacity: 1;
+  transform: translateY(1px) scale(0.81);
+  transform-box: view-box;
+  transform-origin: 50% 50%;
 }
 
 .piece-preview-cell.is-marked > svg[data-special-icon] .glyph-understroke {
-  stroke: #030711;
-  stroke-width: 8;
+  stroke: #080c14;
+  stroke-width: 7;
 }
 
 .piece-preview-cell.is-marked > svg[data-special-icon] .glyph-stroke {
-  stroke: #fff8df;
-  stroke-width: 4.75;
-}
-
-.piece-preview-slot.is-queued .piece-preview-cell.is-marked::after {
-  animation: none;
-  opacity: 0.5;
+  stroke: var(--special-accent);
+  stroke-width: 5;
 }
 
 .piece-preview-slot[data-glitch="cycling"] {
@@ -2365,7 +2370,7 @@ kbd {
 [data-reduced-motion="true"] .piece-preview-cell.is-marked::after,
 [data-reduced-flashes="true"] .piece-preview-cell.is-marked::after {
   animation: none;
-  opacity: 0.5;
+  opacity: 0.45;
 }
 
 [data-reduced-flashes="true"] {

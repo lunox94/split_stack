@@ -71,10 +71,10 @@ export function markedCellPresentationAt(
   if (ghost) {
     return {
       accent: SPECIAL_ACCENT_HEX[special],
-      emissiveIntensity: 0.025,
+      emissiveIntensity: 0,
       glyphOpacity: 0.3,
       sourceFaceOpacity: 0,
-      sourceRimOpacity: 0.12,
+      sourceRimOpacity: 0,
       neighborRimOpacity: 0,
       neighborSurfaceOpacity: 0,
     };

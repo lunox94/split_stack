@@ -73,6 +73,52 @@ describe("simulation facade", () => {
     expect(simulation.readSnapshot().player.active?.descriptor).toEqual(first);
   });
 
+  it("accepts marked O identity rotation and checkpoints its strategic orientation", () => {
+    const player = createPlayerState("a", SEED);
+    player.grid = createBoard();
+    player.active = spawnPiece(player.grid, {
+      source: "base",
+      shape: "O",
+      specialCellIndex: 0,
+      specialKind: "column-bomb",
+    });
+    player.active!.y = 10;
+    player.active!.lockTicksRemaining = 7;
+    player.active!.lockResetCount = 6;
+    const simulation = createSimulation({
+      seed: SEED,
+      playerId: "a",
+      practice: true,
+      initialPlayer: player,
+    });
+    const before = simulation.readSnapshot();
+
+    expect(simulation.dispatchWithResult("rotate-ccw")).toEqual({
+      accepted: true,
+      effects: [],
+    });
+    const rotated = simulation.readSnapshot();
+
+    expect(rotated.player.active).toMatchObject({
+      descriptor: {
+        shape: "O",
+        specialCellIndex: 0,
+        specialKind: "column-bomb",
+      },
+      x: 3,
+      y: 10,
+      rotation: 3,
+      lockTicksRemaining: 7,
+      lockResetCount: 6,
+      lastSuccessfulAction: "rotate-ccw",
+    });
+    expect(rotated.stateHash).not.toBe(before.stateHash);
+
+    const restored = createSimulation({ seed: SEED, playerId: "a", practice: true });
+    restored.restore(simulation.checkpoint());
+    expect(restored.readSnapshot()).toEqual(rotated);
+  });
+
   it("performs normal clear scoring and charge in one lock transaction", () => {
     const player = createPlayerState("a", SEED);
     player.grid = createBoard();
