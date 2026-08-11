@@ -40,6 +40,7 @@ import {
 import {
   COLORBLIND_PIECE_COLORS,
   PIECE_CELL_ART,
+  PIECE_PATTERN_PRIMITIVES,
   PIECE_PATTERNS,
   STANDARD_PIECE_COLORS,
   type PieceVisualKind,
@@ -573,9 +574,6 @@ export class ThreeRenderer {
     1,
     PIECE_CELL_ART.garbageCornerRadius,
   );
-  readonly #monominoGeometry = new RoundedBoxGeometry(1, 1, 0.92, 3, 0.46);
-  readonly #limitedMonominoGeometry = new RoundedBoxGeometry(1, 1, 0.92, 2, 0.46);
-  readonly #reducedMonominoGeometry = new RoundedBoxGeometry(1, 1, 0.92, 1, 0.46);
   readonly #acidGeometry = createAcidDropGeometry();
   readonly #effectGeometry = createUnitPanelGeometry();
   readonly #pools = new Map<string, CellPool>();
@@ -747,9 +745,6 @@ export class ThreeRenderer {
     this.#reducedCellGeometry.dispose();
     this.#garbageGeometry.dispose();
     this.#reducedGarbageGeometry.dispose();
-    this.#monominoGeometry.dispose();
-    this.#limitedMonominoGeometry.dispose();
-    this.#reducedMonominoGeometry.dispose();
     this.#acidGeometry.dispose();
     this.#effectGeometry.dispose();
     for (const panel of this.#panels) {
@@ -861,6 +856,22 @@ export class ThreeRenderer {
       cell.row < RULES.board.height;
   }
 
+  #cellDepthScale(kind: RenderCellKind): number {
+    return kind === "garbage" || kind === "acid" ? 1 : 0.75;
+  }
+
+  #markedOverlayBaseZ(cell: RenderCellModel, viewport: BoardViewport): number {
+    const cellCenterZ = cell.role === "active" ? 0.7 : 0;
+    const geometryHalfDepth = cell.kind === "acid"
+      ? 0
+      : cell.kind === "garbage"
+        ? PIECE_CELL_ART.garbageCornerRadius
+        : PIECE_CELL_ART.cornerRadius;
+    const cellFrontZ = cellCenterZ + viewport.cellSize *
+      this.#cellDepthScale(cell.kind) * geometryHalfDepth;
+    return cellFrontZ + Math.max(0.08, viewport.cellSize * 0.012);
+  }
+
   #drawCellBase(
     cell: RenderCellModel,
     viewport: BoardViewport,
@@ -880,11 +891,7 @@ export class ThreeRenderer {
     const inset = cell.role === "ghost"
       ? PIECE_CELL_ART.ghostInset
       : PIECE_CELL_ART.inset;
-    const depthScale = cell.kind === "monomino"
-      ? 0.3
-      : cell.kind === "garbage" || cell.kind === "acid"
-        ? 1
-        : 0.75;
+    const depthScale = this.#cellDepthScale(cell.kind);
     this.#position.set(x, y, cell.role === "active" ? 0.7 : 0);
     this.#scale.set(
       viewport.cellSize * inset,
@@ -908,10 +915,10 @@ export class ThreeRenderer {
       const key = `${cell.column}:${cell.row}`;
       if (!targets.has(key)) targets.set(key, cell);
     }
-    const overlayBaseZ = viewport.cellSize * 0.15 + 0.85;
     for (const field of resolveMarkedNeighborFields(visibleCells)) {
       const target = targets.get(`${field.targetColumn}:${field.targetRow}`);
       if (target === undefined) continue;
+      const overlayBaseZ = this.#markedOverlayBaseZ(target, viewport);
       const presentation = markedCellPresentationAt(
         field.sourceSpecial,
         field.sourceRole,
@@ -979,7 +986,7 @@ export class ThreeRenderer {
     if (cell.special === undefined || presentation === null) return;
     if (!this.#cellIsVisible(cell)) return;
     const { x, y } = this.#cellVisualPoint(cell, viewport, movementEffect);
-    const overlayBaseZ = viewport.cellSize * 0.15 + 0.85;
+    const overlayBaseZ = this.#markedOverlayBaseZ(cell, viewport);
     const span = viewport.cellSize * (cell.role === "ghost" ? 0.72 : 0.91);
     if (presentation.sourceFaceOpacity > 0) {
       this.#drawEffectTexture(
@@ -1018,8 +1025,8 @@ export class ThreeRenderer {
       this.#markedSourceGlyphTexture(cell.special),
       x,
       y,
-      viewport.cellSize,
-      viewport.cellSize,
+      viewport.cellSize * PIECE_CELL_ART.markedGlyphFootprint,
+      viewport.cellSize * PIECE_CELL_ART.markedGlyphFootprint,
       presentation.glyphOpacity,
       { z: overlayBaseZ + 0.16 },
     );
@@ -1566,13 +1573,6 @@ export class ThreeRenderer {
       ? "reduced"
       : this.#quality.profile.effects;
     if (kind === "acid") return this.#acidGeometry;
-    if (kind === "monomino") {
-      return quality === "full"
-        ? this.#monominoGeometry
-        : quality === "limited"
-          ? this.#limitedMonominoGeometry
-          : this.#reducedMonominoGeometry;
-    }
     if (kind === "garbage") {
       return quality === "full" ? this.#garbageGeometry : this.#reducedGarbageGeometry;
     }
@@ -1588,7 +1588,7 @@ export class ThreeRenderer {
     const reduced = quality === "reduced";
     const limited = quality === "limited";
     const ghost = pool.role === "ghost";
-    const baseColor = this.#cellBaseColor(pool.kind, pool.special);
+    const baseColor = this.#cellBaseColor(pool.kind);
     const material = pool.material;
 
     material.color.copy(baseColor);
@@ -1601,9 +1601,6 @@ export class ThreeRenderer {
     if (pool.kind === "garbage") {
       material.metalness = reduced ? 0.08 : limited ? 0.24 : 0.38;
       material.roughness = reduced ? 0.8 : limited ? 0.7 : 0.64;
-    } else if (pool.kind === "monomino") {
-      material.metalness = reduced ? 0.02 : limited ? 0.08 : 0.12;
-      material.roughness = reduced ? 0.55 : limited ? 0.34 : 0.24;
     } else if (pool.kind === "acid") {
       material.metalness = reduced ? 0 : limited ? 0.04 : 0.08;
       material.roughness = reduced ? 0.62 : limited ? 0.4 : 0.28;
@@ -1655,15 +1652,8 @@ export class ThreeRenderer {
       : STANDARD_PIECE_COLORS;
   }
 
-  #cellBaseColor(kind: RenderCellKind, special?: SpecialKind): Color {
-    const color = new Color(this.#colors()[kind]);
-    if (special !== undefined) {
-      // P4 treats the marked cell as the power's light source. Keep a trace of
-      // the piece hue, while letting the power accent lead at the dim phase so
-      // complementary piece colors cannot mix into a pale or muddy source.
-      color.lerp(new Color(SPECIAL_ACCENT_HEX[special]), 0.96);
-    }
-    return color;
+  #cellBaseColor(kind: RenderCellKind): Color {
+    return new Color(this.#colors()[kind]);
   }
 
   #markedCellQuality(): EffectQuality {
@@ -1681,17 +1671,10 @@ export class ThreeRenderer {
     if (context === null) return null;
 
     const size = PIECE_CELL_ART.textureSize;
-    const surface = kind === "monomino"
-      ? context.createRadialGradient(47, 35, 0, 64, 64, 92)
-      : kind === "acid"
-        ? context.createRadialGradient(45, 34, 0, 64, 64, 102)
-        : context.createLinearGradient(8, 4, 120, 126);
-    if (kind === "monomino") {
-      surface.addColorStop(0, "#ffffff");
-      surface.addColorStop(0.28, "#f8fbff");
-      surface.addColorStop(0.7, "#e3eaf2");
-      surface.addColorStop(1, "#c7d1dd");
-    } else if (kind === "acid") {
+    const surface = kind === "acid"
+      ? context.createRadialGradient(45, 34, 0, 64, 64, 102)
+      : context.createLinearGradient(8, 4, 120, 126);
+    if (kind === "acid") {
       surface.addColorStop(0, "#ffffff");
       surface.addColorStop(0.24, "#f6fff0");
       surface.addColorStop(0.68, "#dfecd8");
@@ -1711,102 +1694,33 @@ export class ThreeRenderer {
     context.fillStyle = patternColor;
     context.lineCap = "round";
     context.lineJoin = "round";
-    context.lineWidth = 9;
-
-    const drawChevron = (mirrored: boolean): void => {
-      context.save();
-      if (mirrored) {
-        context.translate(size, 0);
-        context.scale(-1, 1);
+    for (const primitive of PIECE_PATTERN_PRIMITIVES[PIECE_PATTERNS[kind]]) {
+      if (primitive.kind === "rect") {
+        context.fillRect(primitive.x, primitive.y, primitive.width, primitive.height);
+        continue;
       }
-      for (const x of [-20, 42, 104]) {
-        context.beginPath();
-        context.moveTo(x, 22);
-        context.lineTo(x + 30, 64);
-        context.lineTo(x, 106);
+      context.beginPath();
+      if (primitive.kind === "line") {
+        context.lineWidth = primitive.strokeWidth;
+        context.moveTo(primitive.x1, primitive.y1);
+        context.lineTo(primitive.x2, primitive.y2);
         context.stroke();
+      } else if (primitive.kind === "polyline") {
+        context.lineWidth = primitive.strokeWidth;
+        const [first, ...rest] = primitive.points;
+        if (first === undefined) continue;
+        context.moveTo(first[0], first[1]);
+        for (const point of rest) context.lineTo(point[0], point[1]);
+        context.stroke();
+      } else {
+        context.arc(primitive.x, primitive.y, primitive.radius, 0, Math.PI * 2);
+        if (primitive.filled) {
+          context.fill();
+        } else {
+          context.lineWidth = primitive.strokeWidth;
+          context.stroke();
+        }
       }
-      context.restore();
-    };
-
-    switch (PIECE_PATTERNS[kind]) {
-      case "diagonal":
-        context.lineWidth = 12;
-        for (let offset = -96; offset <= 144; offset += 54) {
-          context.beginPath();
-          context.moveTo(offset, size);
-          context.lineTo(offset + size, 0);
-          context.stroke();
-        }
-        break;
-      case "vertical":
-        for (const x of [24, 64, 104]) context.fillRect(x - 6, 0, 12, size);
-        break;
-      case "horizontal":
-        for (const y of [24, 64, 104]) context.fillRect(0, y - 6, size, 12);
-        break;
-      case "dots":
-        for (const y of [24, 64, 104]) {
-          for (const x of [24, 64, 104]) {
-            context.beginPath();
-            context.arc(x, y, 8, 0, Math.PI * 2);
-            context.fill();
-          }
-        }
-        break;
-      case "chevron-left":
-        drawChevron(false);
-        break;
-      case "crosses":
-        for (const y of [32, 96]) {
-          for (const x of [32, 96]) {
-            context.fillRect(x - 5, y - 16, 10, 32);
-            context.fillRect(x - 16, y - 5, 32, 10);
-          }
-        }
-        break;
-      case "chevron-right":
-        drawChevron(true);
-        break;
-      case "grid":
-        context.lineWidth = 5;
-        for (let index = 0; index <= size; index += 32) {
-          context.beginPath();
-          context.moveTo(index, 0);
-          context.lineTo(index, size);
-          context.moveTo(0, index);
-          context.lineTo(size, index);
-          context.stroke();
-        }
-        break;
-      case "cross":
-        context.lineWidth = 13;
-        context.beginPath();
-        context.moveTo(64, 13);
-        context.lineTo(64, 115);
-        context.moveTo(13, 64);
-        context.lineTo(115, 64);
-        context.stroke();
-        break;
-      case "circle":
-        context.lineWidth = 11;
-        context.beginPath();
-        context.arc(64, 64, 33, 0, Math.PI * 2);
-        context.stroke();
-        break;
-      case "bubbles":
-        for (const [x, y, radius] of [
-          [32, 36, 12],
-          [86, 28, 8],
-          [76, 86, 16],
-          [26, 96, 6],
-        ] as const) {
-          context.lineWidth = 7;
-          context.beginPath();
-          context.arc(x, y, radius, 0, Math.PI * 2);
-          context.stroke();
-        }
-        break;
     }
 
     const sheen = context.createLinearGradient(10, 4, 94, 94);
@@ -1858,12 +1772,14 @@ export class ThreeRenderer {
     context.lineCap = "round";
     context.lineJoin = "round";
     context.save();
-    context.translate(12.8, 12.8);
-    context.scale(1.6, 1.6);
-    context.strokeStyle = "rgba(4, 8, 14, 0.98)";
-    context.lineWidth = 7.8;
+    // The 64×64 icon viewBox fills this texture. Its mesh carrier is exactly
+    // 46% of the cell, matching the selected prototype rather than enlarging
+    // the visible path to a 46% bounding box.
+    context.scale(2, 2);
+    context.strokeStyle = "#030711";
+    context.lineWidth = 8;
     context.stroke(new Path2D(SPECIAL_ICON_PATHS[special]));
-    context.strokeStyle = "#fffdf4";
+    context.strokeStyle = "#fff8df";
     context.lineWidth = 5;
     context.stroke(new Path2D(SPECIAL_ICON_PATHS[special]));
     context.restore();
@@ -1966,7 +1882,7 @@ export class ThreeRenderer {
       context.beginPath();
       context.roundRect(7, 7, 114, 114, 25);
       context.clip();
-      const radius = directionX !== 0 && directionY !== 0 ? 106 : 92;
+      const radius = directionX !== 0 && directionY !== 0 ? 99 : 86;
       const wash = context.createRadialGradient(
         anchorX,
         anchorY,
@@ -2002,7 +1918,7 @@ export class ThreeRenderer {
       context.stroke();
       context.shadowBlur = 0;
 
-      const maskRadius = directionX !== 0 && directionY !== 0 ? 88 : 76;
+      const maskRadius = directionX !== 0 && directionY !== 0 ? 83 : 72;
       const mask = context.createRadialGradient(
         anchorX,
         anchorY,

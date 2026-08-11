@@ -7,7 +7,6 @@ import { createSpecialIcon } from "../render/special-icons";
 import type { BoardViewport, RendererLayout } from "../render/renderer";
 import { BARRIER_CAPACITY_TRANSITION_MS } from "./barrier-capacity";
 import {
-  createMarkedCellSample,
   renderPiecePreviewSlot,
   type PiecePreviewOptions,
 } from "./piece-preview";
@@ -2112,13 +2111,7 @@ export function showHelp(shell: AppShell, kind: "how" | "controls"): void {
         element(document, "p", undefined, STRINGS[entry.description]),
       );
       card.append(
-        createMarkedCellSample(
-          document,
-          entry.special,
-          shell.container.dataset.palette === "colorblind"
-            ? "colorblind"
-            : "standard",
-        ),
+        createSpecialIcon(document, entry.special, STRINGS[entry.name]),
         copy,
       );
       specials.append(card);
@@ -2154,6 +2147,11 @@ export function showHelp(shell: AppShell, kind: "how" | "controls"): void {
         },
         name: "help.glitchPiece",
         description: "help.glitchPieceDescription",
+      },
+      {
+        descriptor: { source: "monomino", shape: "monomino" },
+        name: "help.monomino",
+        description: "help.monominoDescription",
       },
       {
         descriptor: { source: "oversize", shape: "T" },

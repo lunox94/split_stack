@@ -82,26 +82,26 @@ export function markedCellPresentationAt(
 
   return {
     accent: SPECIAL_ACCENT_HEX[special],
-    // Emissive belongs to the shared source-cell material pool, so it cannot
-    // carry per-cell spawn or lock emphasis without leaking between instances.
-    emissiveIntensity: (0.025 + field * 0.17) * roleStrength,
+    // The synchronized field adds no light at its trough: the source then uses
+    // the exact ordinary piece surface beneath its always-opaque glyph.
+    emissiveIntensity: field * 0.078 * roleStrength,
     glyphOpacity: 1,
     sourceFaceOpacity: Math.min(
-      0.72,
-      (0.025 + field * 0.08) * roleStrength + spawn * 0.12 + lock * 0.04,
+      0.28,
+      field * 0.09 * roleStrength + spawn * 0.07 + lock * 0.025,
     ),
     sourceRimOpacity: Math.min(
-      1,
-      ((0.16 + field * 0.76) * roleStrength + spawn * 0.12 + lock * 0.04) *
+      0.72,
+      (field * 0.45 * roleStrength + spawn * 0.08 + lock * 0.03) *
         rimQuality,
     ),
     neighborRimOpacity: Math.min(
       1,
-      (0.08 + field * 1.1) * roleStrength * rimQuality,
+      (0.06 + field * 0.92) * roleStrength * rimQuality,
     ),
     neighborSurfaceOpacity: Math.min(
       1,
-      (0.04 + field * 1.01) * roleStrength * surfaceQuality,
+      (0.03 + field * 0.84) * roleStrength * surfaceQuality,
     ),
   };
 }
@@ -116,12 +116,9 @@ function fieldWinnerOrder(
   const rightDistance = Math.abs(right.directionX) + Math.abs(right.directionY);
   return leftDistance - rightDistance ||
     Number(right.sourceRole === "active") - Number(left.sourceRole === "active") ||
-    Math.max(0, Math.min(1, right.sourceEmphasis)) -
-      Math.max(0, Math.min(1, left.sourceEmphasis)) ||
     left.sourceRow - right.sourceRow ||
     left.sourceColumn - right.sourceColumn ||
-    left.sourceSpecial.localeCompare(right.sourceSpecial) ||
-    left.sourceEmphasisKind.localeCompare(right.sourceEmphasisKind);
+    left.sourceSpecial.localeCompare(right.sourceSpecial);
 }
 
 export function resolveMarkedNeighborFields(
@@ -170,6 +167,8 @@ export function resolveMarkedNeighborFields(
         // A marked cell owns its source treatment and hue. Foreign fields only
         // compete for ordinary occupied cells.
         if (target === undefined || target.special !== undefined) continue;
+        const directionX = columnDelta === 0 ? 0 : columnDelta > 0 ? -1 : 1;
+        const directionY = rowDelta === 0 ? 0 : rowDelta > 0 ? -1 : 1;
         const candidate: UnresolvedNeighborField = {
           sourceColumn: source.column,
           sourceRow: source.row,
@@ -179,12 +178,16 @@ export function resolveMarkedNeighborFields(
           sourceEmphasisKind: source.specialEmphasisKind ?? "spawn",
           targetColumn,
           targetRow,
-          directionX: columnDelta === 0 ? 0 : columnDelta > 0 ? -1 : 1,
-          directionY: rowDelta === 0 ? 0 : rowDelta > 0 ? -1 : 1,
+          directionX,
+          directionY,
         };
-        const winner = winners.get(targetKey);
+        // Keep one deterministic contribution per facing direction. A cell
+        // beside two sources must light both corresponding rim sections.
+        const directionalTargetKey =
+          `${targetKey}:${directionX}:${directionY}`;
+        const winner = winners.get(directionalTargetKey);
         if (winner === undefined || fieldWinnerOrder(candidate, winner) < 0) {
-          winners.set(targetKey, candidate);
+          winners.set(directionalTargetKey, candidate);
         }
       }
     }

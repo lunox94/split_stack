@@ -30,15 +30,17 @@ rules version 2 and must change together with the peer rules hash.
   Glitch state, barrier sequence, and progress/status readability.
 - Marked cells are presentation-only local light sources rather than animated
   outlines. Each non-Ghost source carries a deterministic 2.8-second pulse: a
-  clean accent lift and full rim brighten the source while every occupied,
+  accent lift and a full rim brighten the source from an ordinary-cell trough
+  while every occupied,
   non-Ghost cell in its eight-neighbor field receives a source-facing rim and
-  clipped inward surface wash on the same envelope. The glyph is opaque ivory
-  with a dark legibility understroke and has no badge, centered core, or
-  board-spanning bubble. Every visible source and its field share one global
-  envelope; when several sources affect one target, the strongest contribution
-  wins with a deterministic tie-break rather than adding overlays. Ghost
-  markers keep only a static low-emphasis
-  marker and neither cast nor receive neighbor light. Lower graphics tiers
+  clipped inward surface wash on the same envelope. The glyph is a compact
+  46%-of-cell opaque ivory inlay with a dark legibility understroke and has no
+  badge, centered core, or board-spanning bubble. Every visible source and its
+  field share one global envelope; when several sources affect one target, it
+  receives one deterministic contribution per source-facing direction so each
+  relevant rim section responds without mixing duplicate overlays. Ghost
+  markers keep only a static low-emphasis marker and
+  neither cast nor receive neighbor light. Lower graphics tiers
   reduce or remove the surface wash before essential source, rim, and glyph
   cues, while reduced motion or flashes freeze a representative static state.
   Spawn and lock emphasis may strengthen only the source lift and rim, never
@@ -49,8 +51,9 @@ rules version 2 and must change together with the peer rules hash.
   pattern that remains readable without hue. WebGL bakes the surface, bevel,
   and pattern into one cached texture per palette and kind on the existing
   instanced cell pass; richer art therefore adds no per-cell draw pass. Garbage
-  stays neutral and gridded, Ghosts stay textureless wireframes, Monomino and
-  Acid keep distinct silhouettes, and active cells receive only a subtle lift.
+  stays neutral and gridded, Ghosts stay textureless wireframes, Monomino uses
+  the ordinary rounded-square silhouette with its own circle pattern, Acid
+  keeps its distinct silhouette, and active cells receive only a subtle lift.
   Full, limited, and reduced profiles preserve the same silhouette and semantic
   pattern while lowering geometry segments and material response. This visual
   treatment is presentation-only and does not change the rules hash.

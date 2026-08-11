@@ -26,20 +26,23 @@ test("keeps Special Pieces readable and cycling without narrow-screen overflow",
   const illustrations = page.locator(
     '[data-help-group="pieces"] .special-piece-illustration',
   );
-  await expect(illustrations).toHaveCount(3);
+  await expect(illustrations).toHaveCount(4);
   await illustrations.first().scrollIntoViewIfNeeded();
 
   const narrow = (page.viewportSize()?.width ?? 0) <= 520;
   const expectedIllustration = narrow
-    ? { width: 72, height: 64, gridWidth: 60 }
-    : { width: 88, height: 72, gridWidth: 68 };
+    ? { width: 72, height: 64 }
+    : { width: 88, height: 72 };
   for (const illustration of await illustrations.all()) {
     const bounds = await illustration.evaluate((sample) => {
       const grid = sample.querySelector(".piece-preview-grid");
       if (!(grid instanceof HTMLElement)) return null;
       const sampleBounds = sample.getBoundingClientRect();
       const gridBounds = grid.getBoundingClientRect();
+      const cellBounds = grid.querySelector(".piece-preview-cell")
+        ?.getBoundingClientRect();
       return {
+        cellWidth: cellBounds?.width ?? 0,
         gridWidth: gridBounds.width,
         sampleHeight: sampleBounds.height,
         sampleWidth: sampleBounds.width,
@@ -50,7 +53,9 @@ test("keeps Special Pieces readable and cycling without narrow-screen overflow",
     }
     expect(bounds.sampleWidth).toBeCloseTo(expectedIllustration.width, 0);
     expect(bounds.sampleHeight).toBeCloseTo(expectedIllustration.height, 0);
-    expect(bounds.gridWidth).toBeCloseTo(expectedIllustration.gridWidth, 0);
+    expect(bounds.gridWidth).toBeLessThanOrEqual(bounds.sampleWidth);
+    expect(bounds.cellWidth).toBeGreaterThan(11);
+    expect(bounds.cellWidth).toBeLessThan(13);
   }
 
   const glitch = page.locator(

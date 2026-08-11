@@ -325,6 +325,9 @@ export const STRINGS = {
   "help.glitchPiece": "Glitch Piece",
   "help.glitchPieceDescription":
     "Its preview rapidly cycles through every tetromino, hiding its real shape until it spawns. Once revealed, it plays like a normal piece but cannot be held.",
+  "help.monomino": "Monomino",
+  "help.monominoDescription":
+    "A single-cell piece placed during Monomino Rush.",
   "help.oversizeShapes": "Oversize shapes",
   "help.oversizeShapesDescription":
     "Enlarged I, J, L, S, T, and Z shapes that handle normally and can be held.",

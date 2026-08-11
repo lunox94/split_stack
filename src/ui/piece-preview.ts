@@ -12,8 +12,10 @@ import {
 } from "../render/special-icons";
 import {
   COLORBLIND_PIECE_COLORS,
+  PIECE_PATTERN_PRIMITIVES,
   PIECE_PATTERNS,
   STANDARD_PIECE_COLORS,
+  type PiecePattern,
   type PieceVisualKind,
 } from "../render/piece-visual-tokens";
 
@@ -46,6 +48,65 @@ const STATIC_GLITCH_CELLS = [
 }>;
 
 const SLOT_SIGNATURES = new WeakMap<HTMLElement, string>();
+const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+
+function createPiecePattern(
+  document: Document,
+  pattern: PiecePattern,
+): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NAMESPACE, "svg");
+  svg.classList.add("piece-preview-pattern");
+  svg.dataset.piecePattern = pattern;
+  svg.setAttribute("viewBox", "0 0 128 128");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  for (const primitive of PIECE_PATTERN_PRIMITIVES[pattern]) {
+    if (primitive.kind === "rect") {
+      const rect = document.createElementNS(SVG_NAMESPACE, "rect");
+      rect.setAttribute("x", String(primitive.x));
+      rect.setAttribute("y", String(primitive.y));
+      rect.setAttribute("width", String(primitive.width));
+      rect.setAttribute("height", String(primitive.height));
+      rect.setAttribute("fill", "currentColor");
+      svg.append(rect);
+      continue;
+    }
+    if (primitive.kind === "circle") {
+      const circle = document.createElementNS(SVG_NAMESPACE, "circle");
+      circle.setAttribute("cx", String(primitive.x));
+      circle.setAttribute("cy", String(primitive.y));
+      circle.setAttribute("r", String(primitive.radius));
+      circle.setAttribute("fill", primitive.filled ? "currentColor" : "none");
+      if (!primitive.filled) {
+        circle.setAttribute("stroke", "currentColor");
+        circle.setAttribute("stroke-width", String(primitive.strokeWidth));
+      }
+      svg.append(circle);
+      continue;
+    }
+    const stroke = primitive.kind === "line"
+      ? document.createElementNS(SVG_NAMESPACE, "line")
+      : document.createElementNS(SVG_NAMESPACE, "polyline");
+    if (primitive.kind === "line") {
+      stroke.setAttribute("x1", String(primitive.x1));
+      stroke.setAttribute("y1", String(primitive.y1));
+      stroke.setAttribute("x2", String(primitive.x2));
+      stroke.setAttribute("y2", String(primitive.y2));
+    } else {
+      stroke.setAttribute(
+        "points",
+        primitive.points.map(([x, y]) => `${x},${y}`).join(" "),
+      );
+    }
+    stroke.setAttribute("fill", "none");
+    stroke.setAttribute("stroke", "currentColor");
+    stroke.setAttribute("stroke-width", String(primitive.strokeWidth));
+    stroke.setAttribute("stroke-linecap", "round");
+    stroke.setAttribute("stroke-linejoin", "round");
+    svg.append(stroke);
+  }
+  return svg;
+}
 
 function displayedGlitchShape(
   descriptor: PieceDescriptor,
@@ -101,6 +162,7 @@ function appendCell(
       ? COLORBLIND_PIECE_COLORS
       : STANDARD_PIECE_COLORS)[shape],
   );
+  node.append(createPiecePattern(document, PIECE_PATTERNS[shape]));
   if (
     cell.index === descriptor.specialCellIndex &&
     descriptor.specialKind !== undefined
@@ -213,23 +275,4 @@ export function renderPiecePreviewSlot(
 
   slot.setAttribute("aria-label", pieceLabel(descriptor, concealed));
   slot.append(grid);
-}
-
-export function createMarkedCellSample(
-  document: Document,
-  special: SpecialKind,
-  palette: PiecePreviewOptions["colorPalette"] = "standard",
-): HTMLElement {
-  const sample = document.createElement("span");
-  sample.className = "marked-cell-sample";
-  sample.dataset.special = special;
-  const descriptor: PieceDescriptor = {
-    source: "base",
-    shape: "O",
-    specialCellIndex: 0,
-    specialKind: special,
-  };
-  appendCell(document, sample, { x: 0, y: 0, index: 0 }, "O", descriptor, 0, 0, palette);
-  sample.setAttribute("aria-label", `${SPECIAL_LABELS[special]} marked cell`);
-  return sample;
 }

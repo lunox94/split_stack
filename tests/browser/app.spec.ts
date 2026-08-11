@@ -107,7 +107,16 @@ interface MarkedCellRenderMetrics {
   readonly neighborSurfacePeakLift: readonly number[];
   readonly sourceTroughLift: number;
   readonly sourcePeakLift: number;
-  readonly ivoryGlyphCoverage: number;
+  readonly glyphIvoryFootprintRatioAtTrough: number;
+  readonly glyphIvoryFootprintRatioAtPeak: number;
+  readonly glyphIvoryRetentionRatio: number;
+  readonly glyphUnderstrokeCoverageAtTrough: number;
+  readonly glyphUnderstrokeCoverageAtPeak: number;
+  readonly glyphDarkBadgeExcessAtTrough: number;
+  readonly glyphDarkBadgeExcessAtPeak: number;
+  readonly glyphContrastAtTrough: number;
+  readonly glyphContrastAtPeak: number;
+  readonly sourceFacePeakClippedCoverage: number;
   readonly minimumNeighborPatternContrastRatioAtTrough: number;
   readonly minimumNeighborPatternContrastRatioAtPeak: number;
   readonly minimumLightChannelDelta: number;
@@ -117,7 +126,8 @@ interface MarkedCellRenderMetrics {
     readonly top: number;
     readonly bottom: number;
   };
-  readonly overlapTargetDelta: number;
+  readonly overlapTargetRimDelta: number;
+  readonly overlapTargetSurfaceDelta: number;
   readonly gameplayCueLift: number;
   readonly activationOutsideBoardLightDelta: number;
   readonly activationBoundaryDelta: number;
@@ -136,6 +146,10 @@ interface DenseCellArtMetrics {
     readonly centerLuminance: number;
     readonly edgeLuminance: number;
     readonly solidCenterLuminance: number;
+  };
+  readonly silhouette: {
+    readonly ordinaryCornerFillRatio: number;
+    readonly monominoCornerFillRatio: number;
   };
 }
 
@@ -319,19 +333,53 @@ async function readDenseCellArtMetrics(
 
     const gl = canvas.getContext("webgl2");
     if (gl === null) throw new Error("WebGL2 unavailable in browser test");
-    gl.finish();
     const width = gl.drawingBufferWidth;
     const height = gl.drawingBufferHeight;
-    const pixels = new Uint8Array(width * height * 4);
-    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    const capture = (): Uint8Array => {
+      gl.finish();
+      const captured = new Uint8Array(width * height * 4);
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, captured);
+      return captured;
+    };
+    const pixels = capture();
+    renderer.render({
+      ...frame,
+      left: {
+        ...frame.left,
+        cells: [
+          { column: 3, row: 10, kind: "J" as const, role: "settled" as const },
+          {
+            column: 6,
+            row: 10,
+            kind: "monomino" as const,
+            role: "settled" as const,
+          },
+        ],
+      },
+    }, 400);
+    const silhouettePixels = capture();
+    renderer.render({
+      ...frame,
+      left: { ...frame.left, cells: [] },
+    }, 600);
+    const emptyPixels = capture();
     const viewport = renderer.layout.left;
     const scaleX = width / canvas.clientWidth;
     const scaleY = height / canvas.clientHeight;
-    const pixelColor = (x: number, y: number): readonly [number, number, number] => {
+    const pixelColor = (
+      sourcePixels: Uint8Array,
+      x: number,
+      y: number,
+    ): readonly [number, number, number] => {
       const offset = (y * width + x) * 4;
-      return [pixels[offset]!, pixels[offset + 1]!, pixels[offset + 2]!];
+      return [
+        sourcePixels[offset]!,
+        sourcePixels[offset + 1]!,
+        sourcePixels[offset + 2]!,
+      ];
     };
     const sampleColor = (
+      sourcePixels: Uint8Array,
       column: number,
       row: number,
       offsetX = 0,
@@ -347,7 +395,7 @@ async function readDenseCellArtMetrics(
       let count = 0;
       for (let sampleY = y - radius; sampleY <= y + radius; sampleY += 1) {
         for (let sampleX = x - radius; sampleX <= x + radius; sampleX += 1) {
-          const color = pixelColor(sampleX, sampleY);
+          const color = pixelColor(sourcePixels, sampleX, sampleY);
           total[0] += color[0];
           total[1] += color[1];
           total[2] += color[2];
@@ -361,7 +409,9 @@ async function readDenseCellArtMetrics(
     const offsets = [-0.3, -0.15, 0, 0.15, 0.3];
     const metrics = kinds.map((kind, rowIndex) => {
       const colors = offsets.flatMap((offsetY) =>
-        offsets.map((offsetX) => sampleColor(4, 2 + rowIndex, offsetX, offsetY))
+        offsets.map((offsetX) =>
+          sampleColor(pixels, 4, 2 + rowIndex, offsetX, offsetY)
+        )
       );
       const luminances = colors.map(luminance);
       const meanLuminance = luminances.reduce((total, value) => total + value, 0) /
@@ -382,10 +432,33 @@ async function readDenseCellArtMetrics(
       );
       return { kind, contrast, color };
     });
-    const backgroundLuminance = luminance(sampleColor(4, 15));
-    const centerLuminance = luminance(sampleColor(2, 15));
-    const edgeLuminance = luminance(sampleColor(2, 15, 0.35));
-    const solidCenterLuminance = luminance(sampleColor(7, 15));
+    const backgroundLuminance = luminance(sampleColor(pixels, 4, 15));
+    const centerLuminance = luminance(sampleColor(pixels, 2, 15));
+    const edgeLuminance = luminance(sampleColor(pixels, 2, 15, 0.35));
+    const solidCenterLuminance = luminance(sampleColor(pixels, 7, 15));
+    const colorDistance = (
+      left: readonly [number, number, number],
+      right: readonly [number, number, number],
+    ): number => Math.hypot(
+      left[0] - right[0],
+      left[1] - right[1],
+      left[2] - right[2],
+    );
+    const cornerFillRatio = (column: number): number => {
+      const centerFill = colorDistance(
+        sampleColor(silhouettePixels, column, 10),
+        sampleColor(emptyPixels, column, 10),
+      );
+      const cornerFill = [
+        [-0.38, -0.38], [0.38, -0.38],
+        [-0.38, 0.38], [0.38, 0.38],
+      ].reduce((total, [offsetX, offsetY]) =>
+        total + colorDistance(
+          sampleColor(silhouettePixels, column, 10, offsetX, offsetY),
+          sampleColor(emptyPixels, column, 10, offsetX, offsetY),
+        ), 0) / 4;
+      return cornerFill / Math.max(1, centerFill);
+    };
 
     const result = {
       portrait,
@@ -396,6 +469,10 @@ async function readDenseCellArtMetrics(
         centerLuminance,
         edgeLuminance,
         solidCenterLuminance,
+      },
+      silhouette: {
+        ordinaryCornerFillRatio: cornerFillRatio(3),
+        monominoCornerFillRatio: cornerFillRatio(6),
       },
     };
     renderer.dispose();
@@ -498,7 +575,7 @@ async function readMarkedCellRenderMetrics(
     renderer.render(
       frame([
         { ...source, row: 11, special: "blackout" as const },
-        { ...source, column: 3, special: "blackout" as const },
+        { ...source, column: 3, special: "barrier" as const },
         source,
       ]),
       18_200,
@@ -658,17 +735,137 @@ async function readMarkedCellRenderMetrics(
     const sourceTroughLift = averageSourceLuminance(troughPixels) - sourceBaseline;
     const sourcePeakLift = averageSourceLuminance(peakPixels) - sourceBaseline;
 
-    const glyphRadius = viewport.cellSize * 0.3 * Math.min(scaleX, scaleY);
-    let ivoryPixels = 0;
-    let glyphPixels = 0;
-    for (let y = Math.floor(centerY - glyphRadius); y <= Math.ceil(centerY + glyphRadius); y += 1) {
-      for (let x = Math.floor(centerX - glyphRadius); x <= Math.ceil(centerX + glyphRadius); x += 1) {
-        if ((x - centerX) ** 2 + (y - centerY) ** 2 > glyphRadius ** 2) continue;
-        const [red, green, blue] = pixelColor(peakPixels, x, y);
-        if (red > 220 && green > 210 && blue > 175 && red - blue < 70) {
-          ivoryPixels += 1;
+    const glyphStats = (pixels: Uint8Array) => {
+      const cellSpanX = viewport.cellSize * scaleX;
+      const cellSpanY = viewport.cellSize * scaleY;
+      const minimumX = Math.floor(centerX - cellSpanX * 0.34);
+      const maximumX = Math.ceil(centerX + cellSpanX * 0.34);
+      const minimumY = Math.floor(centerY - cellSpanY * 0.34);
+      const maximumY = Math.ceil(centerY + cellSpanY * 0.34);
+      const ivory = new Set<number>();
+      const sampled = new Map<number, {
+        readonly x: number;
+        readonly y: number;
+        readonly luminance: number;
+        readonly offsetX: number;
+        readonly offsetY: number;
+      }>();
+      let ivoryLuminance = 0;
+      let ivoryMinimumX = Number.POSITIVE_INFINITY;
+      let ivoryMaximumX = Number.NEGATIVE_INFINITY;
+      let ivoryMinimumY = Number.POSITIVE_INFINITY;
+      let ivoryMaximumY = Number.NEGATIVE_INFINITY;
+      const keyFor = (x: number, y: number): number => y * width + x;
+
+      for (let y = minimumY; y <= maximumY; y += 1) {
+        for (let x = minimumX; x <= maximumX; x += 1) {
+          const color = pixelColor(pixels, x, y);
+          const [red, green, blue] = color;
+          const isIvory = red >= 215 && green >= 200 && blue >= 155 &&
+            red + 4 >= green && green + 6 >= blue && red - blue <= 70;
+          const key = keyFor(x, y);
+          const sampleLuminance = luminance(color);
+          sampled.set(key, {
+            x,
+            y,
+            luminance: sampleLuminance,
+            offsetX: Math.abs((x - centerX) / cellSpanX),
+            offsetY: Math.abs((y - centerY) / cellSpanY),
+          });
+          if (isIvory) {
+            ivory.add(key);
+            ivoryLuminance += sampleLuminance;
+            ivoryMinimumX = Math.min(ivoryMinimumX, x);
+            ivoryMaximumX = Math.max(ivoryMaximumX, x);
+            ivoryMinimumY = Math.min(ivoryMinimumY, y);
+            ivoryMaximumY = Math.max(ivoryMaximumY, y);
+          }
         }
-        glyphPixels += 1;
+      }
+
+      const meanIvoryLuminance = ivoryLuminance / Math.max(1, ivory.size);
+      const dark = new Set<number>();
+      let darkCarrierPixels = 0;
+      let carrierPixels = 0;
+      let darkOuterPixels = 0;
+      let outerPixels = 0;
+      for (const [key, sample] of sampled) {
+        const isDark = sample.luminance <= meanIvoryLuminance - 80;
+        if (isDark) dark.add(key);
+        if (sample.offsetX <= 0.23 && sample.offsetY <= 0.23) {
+          carrierPixels += 1;
+          if (isDark) darkCarrierPixels += 1;
+        } else if (
+          Math.max(sample.offsetX, sample.offsetY) >= 0.27 &&
+          Math.max(sample.offsetX, sample.offsetY) <= 0.34
+        ) {
+          outerPixels += 1;
+          if (isDark) darkOuterPixels += 1;
+        }
+      }
+      const adjacencyRadius = Math.max(
+        1,
+        Math.round(Math.min(cellSpanX, cellSpanY) * 0.045),
+      );
+      let adjacentDarkPixels = 0;
+      let adjacentDarkLuminance = 0;
+      for (const key of dark) {
+        const sample = sampled.get(key)!;
+        const { x, y } = sample;
+        let touchesIvory = false;
+        for (let offsetY = -adjacencyRadius; offsetY <= adjacencyRadius; offsetY += 1) {
+          for (let offsetX = -adjacencyRadius; offsetX <= adjacencyRadius; offsetX += 1) {
+            if (ivory.has(keyFor(x + offsetX, y + offsetY))) {
+              touchesIvory = true;
+              break;
+            }
+          }
+          if (touchesIvory) break;
+        }
+        if (!touchesIvory) continue;
+        adjacentDarkPixels += 1;
+        adjacentDarkLuminance += sample.luminance;
+      }
+
+      const footprintRatio = ivory.size === 0
+        ? 0
+        : Math.max(
+          (ivoryMaximumX - ivoryMinimumX + 1) / cellSpanX,
+          (ivoryMaximumY - ivoryMinimumY + 1) / cellSpanY,
+        );
+      const meanUnderstrokeLuminance = adjacentDarkLuminance /
+        Math.max(1, adjacentDarkPixels);
+      return {
+        ivoryPixels: ivory.size,
+        footprintRatio,
+        understrokeCoverage: adjacentDarkPixels / Math.max(1, ivory.size),
+        darkCarrierCoverage: darkCarrierPixels / Math.max(1, carrierPixels) -
+          darkOuterPixels / Math.max(1, outerPixels),
+        contrast: adjacentDarkPixels === 0
+          ? 0
+          : meanIvoryLuminance - meanUnderstrokeLuminance,
+      };
+    };
+    const troughGlyph = glyphStats(troughPixels);
+    const peakGlyph = glyphStats(peakPixels);
+    let clippedSourcePixels = 0;
+    let sampledSourcePixels = 0;
+    for (
+      let y = Math.floor(centerY - viewport.cellSize * scaleY * 0.4);
+      y <= Math.ceil(centerY + viewport.cellSize * scaleY * 0.4);
+      y += 1
+    ) {
+      for (
+        let x = Math.floor(centerX - viewport.cellSize * scaleX * 0.4);
+        x <= Math.ceil(centerX + viewport.cellSize * scaleX * 0.4);
+        x += 1
+      ) {
+        const offsetX = Math.abs((x - centerX) / (viewport.cellSize * scaleX));
+        const offsetY = Math.abs((y - centerY) / (viewport.cellSize * scaleY));
+        if (offsetX <= 0.25 && offsetY <= 0.25) continue;
+        const [red, green, blue] = pixelColor(peakPixels, x, y);
+        sampledSourcePixels += 1;
+        if (red >= 249 && green >= 249 && blue >= 249) clippedSourcePixels += 1;
       }
     }
 
@@ -715,7 +912,20 @@ async function readMarkedCellRenderMetrics(
       neighborSurfacePeakLift,
       sourceTroughLift,
       sourcePeakLift,
-      ivoryGlyphCoverage: ivoryPixels / glyphPixels,
+      glyphIvoryFootprintRatioAtTrough: troughGlyph.footprintRatio,
+      glyphIvoryFootprintRatioAtPeak: peakGlyph.footprintRatio,
+      glyphIvoryRetentionRatio: Math.min(
+        troughGlyph.ivoryPixels,
+        peakGlyph.ivoryPixels,
+      ) / Math.max(1, troughGlyph.ivoryPixels, peakGlyph.ivoryPixels),
+      glyphUnderstrokeCoverageAtTrough: troughGlyph.understrokeCoverage,
+      glyphUnderstrokeCoverageAtPeak: peakGlyph.understrokeCoverage,
+      glyphDarkBadgeExcessAtTrough: troughGlyph.darkCarrierCoverage,
+      glyphDarkBadgeExcessAtPeak: peakGlyph.darkCarrierCoverage,
+      glyphContrastAtTrough: troughGlyph.contrast,
+      glyphContrastAtPeak: peakGlyph.contrast,
+      sourceFacePeakClippedCoverage: clippedSourcePixels /
+        Math.max(1, sampledSourcePixels),
       minimumNeighborPatternContrastRatioAtTrough:
         minimumNeighborPatternContrastRatioAt(troughPixels),
       minimumNeighborPatternContrastRatioAtPeak:
@@ -739,9 +949,13 @@ async function readMarkedCellRenderMetrics(
           sampleLuminance(emptyPixels, 0, 9.62),
         ),
       },
-      overlapTargetDelta: Math.abs(
-        sampleLuminance(overlapPixels, 0, 0) -
-          sampleLuminance(singleFieldPixels, 0, 0),
+      overlapTargetRimDelta: Math.abs(
+        sampleLuminance(overlapPixels, 0, -0.42) -
+          sampleLuminance(singleFieldPixels, 0, -0.42),
+      ),
+      overlapTargetSurfaceDelta: Math.abs(
+        sampleLuminance(overlapPixels, 0, -0.25) -
+          sampleLuminance(singleFieldPixels, 0, -0.25),
       ),
       gameplayCueLift: sampleLuminance(gameplayCuePixels, 0, 0) -
         sampleLuminance(isolatedPeakPixels, 0, 0),
@@ -2418,54 +2632,61 @@ test("Home keeps help opt-in and exposes the complete settings surface", async (
   await expect(page.getByRole("heading", { name: "Meter powers" })).toBeVisible();
   await expect(page.locator('[data-help-group="meter"] [data-power-icon]')).toHaveCount(7);
   await expect(page.getByRole("heading", { name: "Marked-piece powers" })).toBeVisible();
-  await expect(page.locator('[data-help-group="marked"] .marked-cell-sample')).toHaveCount(5);
+  await expect(
+    page.locator('[data-help-group="marked"] .special-guide-card > svg[data-special-icon]'),
+  ).toHaveCount(5);
   await expect(page.getByRole("heading", { name: "Special pieces" })).toBeVisible();
-  const markedPresentationStyles = await page
-    .locator(".marked-cell-sample .piece-preview-cell")
+  const markedIconStyles = await page
+    .locator('[data-help-group="marked"] .special-guide-card > svg[data-special-icon]')
     .first()
-    .evaluate((cell) => {
-      const helpSourceLight = getComputedStyle(cell, "::after");
-      const glyph = getComputedStyle(cell.querySelector("svg")!);
-      const glyphUnderstroke = getComputedStyle(
-        cell.querySelector<SVGPathElement>(".glyph-understroke")!,
-      );
-      const glyphStroke = getComputedStyle(
-        cell.querySelector<SVGPathElement>(".glyph-stroke")!,
-      );
-      const animatedProbe = cell.cloneNode(true) as HTMLElement;
-      document.querySelector(".split-stack-app")!.append(animatedProbe);
-      const animatedSourceLight = getComputedStyle(animatedProbe, "::after");
-      const result = {
-        cell: getComputedStyle(cell).animationName,
-        animatedSourceLight: animatedSourceLight.animationName,
-        animatedSourceLightDuration: animatedSourceLight.animationDuration,
-        animatedSourceLightBorderWidth: animatedSourceLight.borderTopWidth,
-        helpSourceLight: helpSourceLight.animationName,
-        helpSourceLightOpacity: helpSourceLight.opacity,
-        glyph: glyph.animationName,
-        glyphBackground: glyph.backgroundImage,
-        glyphBackgroundColor: glyph.backgroundColor,
-        glyphOpacity: glyph.opacity,
-        glyphUnderstroke: glyphUnderstroke.stroke,
-        glyphStroke: glyphStroke.stroke,
+    .evaluate((icon) => {
+      const style = getComputedStyle(icon);
+      return {
+        animation: style.animationName,
+        color: style.color,
+        height: Number.parseFloat(style.height),
+        width: Number.parseFloat(style.width),
       };
-      animatedProbe.remove();
-      return result;
     });
-  expect(markedPresentationStyles).toMatchObject({
-    cell: "none",
-    animatedSourceLight: "preview-marked-source-pulse",
-    animatedSourceLightDuration: "2.8s",
-    animatedSourceLightBorderWidth: "0px",
-    helpSourceLight: "none",
-    helpSourceLightOpacity: "0.76",
-    glyph: "none",
-    glyphBackground: "none",
-    glyphBackgroundColor: "rgba(0, 0, 0, 0)",
-    glyphOpacity: "1",
-    glyphUnderstroke: "rgb(3, 7, 17)",
-    glyphStroke: "rgb(255, 253, 244)",
+  expect(markedIconStyles).toMatchObject({
+    animation: "none",
+    color: "rgb(255, 179, 63)",
   });
+  expect(markedIconStyles.height).toBeCloseTo(36.8, 1);
+  expect(markedIconStyles.width).toBeCloseTo(36.8, 1);
+  await expect(
+    page.locator('[data-help-group="pieces"] .special-piece-sample[data-source="monomino"]'),
+  ).toBeVisible();
+  const glitchCellWidths = await page.evaluate(async () => {
+    const piecePreviewUrl = "/src/ui/piece-preview.ts";
+    const { renderPiecePreviewSlot } = await import(piecePreviewUrl);
+    const sample = document.createElement("div");
+    sample.className = "special-piece-sample special-piece-illustration";
+    document.body.append(sample);
+    const descriptor = {
+      source: "glitch" as const,
+      shape: "I" as const,
+      previewCosmetics: {
+        kind: "glitch-cycle" as const,
+        shapes: ["I", "J", "L", "O", "S", "T", "Z"] as const,
+        intervalMs: 150,
+        finalShapeConcealed: true,
+      },
+    };
+    const options = {
+      colorPalette: "standard" as const,
+      reducedMotion: false,
+      reducedFlashes: false,
+    };
+    const widthAt = (elapsedMs: number): number => {
+      renderPiecePreviewSlot(sample, descriptor, { ...options, elapsedMs });
+      return sample.querySelector(".piece-preview-cell")!.getBoundingClientRect().width;
+    };
+    const widths = [widthAt(0), widthAt(450)];
+    sample.remove();
+    return widths;
+  });
+  expect(Math.abs(glitchCellWidths[0]! - glitchCellWidths[1]!)).toBeLessThan(1);
   await page.getByRole("button", { name: "Back" }).click();
 
   await expect(page.getByRole("button", { name: "Power Glossary" })).toHaveCount(0);
@@ -2539,6 +2760,12 @@ test("dense renderer cell art survives palette switches at common sizes", DEVICE
       .toBeGreaterThan(12);
     expect(metrics.ghost.edgeLuminance - metrics.ghost.backgroundLuminance)
       .toBeGreaterThan(0);
+    expect(metrics.silhouette.ordinaryCornerFillRatio).toBeGreaterThan(0.2);
+    expect(metrics.silhouette.monominoCornerFillRatio).toBeGreaterThan(0.2);
+    expect(Math.abs(
+      metrics.silhouette.monominoCornerFillRatio -
+        metrics.silhouette.ordinaryCornerFillRatio,
+    )).toBeLessThan(0.3);
   }
 });
 
@@ -2564,6 +2791,12 @@ test("graphics tiers retain every dense pattern and ghost silhouette", async ({ 
       .toBeGreaterThan(12);
     expect(metrics.ghost.edgeLuminance - metrics.ghost.backgroundLuminance)
       .toBeGreaterThan(0);
+    expect(metrics.silhouette.ordinaryCornerFillRatio).toBeGreaterThan(0.2);
+    expect(metrics.silhouette.monominoCornerFillRatio).toBeGreaterThan(0.2);
+    expect(Math.abs(
+      metrics.silhouette.monominoCornerFillRatio -
+        metrics.silhouette.ordinaryCornerFillRatio,
+    )).toBeLessThan(0.3);
   }
 });
 
@@ -2578,12 +2811,22 @@ test("gameplay marked cells render the synchronized P4 field", DEVICE_MATRIX, as
     neighborSurfacePeakLift,
     sourceTroughLift,
     sourcePeakLift,
-    ivoryGlyphCoverage,
+    glyphIvoryFootprintRatioAtTrough,
+    glyphIvoryFootprintRatioAtPeak,
+    glyphIvoryRetentionRatio,
+    glyphUnderstrokeCoverageAtTrough,
+    glyphUnderstrokeCoverageAtPeak,
+    glyphDarkBadgeExcessAtTrough,
+    glyphDarkBadgeExcessAtPeak,
+    glyphContrastAtTrough,
+    glyphContrastAtPeak,
+    sourceFacePeakClippedCoverage,
     minimumNeighborPatternContrastRatioAtTrough,
     minimumNeighborPatternContrastRatioAtPeak,
     minimumLightChannelDelta,
     outsideBoardLightDelta,
-    overlapTargetDelta,
+    overlapTargetRimDelta,
+    overlapTargetSurfaceDelta,
     gameplayCueLift,
     activationOutsideBoardLightDelta,
     activationBoundaryDelta,
@@ -2603,9 +2846,30 @@ test("gameplay marked cells render the synchronized P4 field", DEVICE_MATRIX, as
       neighborSurfacePeakLift[index]! - neighborSurfaceTroughLift[index]!,
     ).toBeGreaterThan(1);
   }
-  expect(sourceTroughLift).toBeGreaterThan(0);
+  expect(Math.abs(sourceTroughLift)).toBeLessThan(2);
   expect(sourcePeakLift - sourceTroughLift).toBeGreaterThan(5);
-  expect(ivoryGlyphCoverage).toBeGreaterThanOrEqual(0.03);
+  // C uses a 46% viewBox carrier. Individual paths can occupy less of that
+  // carrier, but neither the ivory nor its understroke may grow into a badge.
+  for (const footprint of [
+    glyphIvoryFootprintRatioAtTrough,
+    glyphIvoryFootprintRatioAtPeak,
+  ]) {
+    expect(footprint).toBeGreaterThan(0.18);
+    expect(footprint).toBeLessThanOrEqual(0.48);
+  }
+  expect(Math.abs(
+    glyphIvoryFootprintRatioAtPeak - glyphIvoryFootprintRatioAtTrough,
+  // At portrait cell sizes the antialiased edge crosses the ivory classifier
+  // in whole-pixel steps even though the carrier and texture stay static.
+  )).toBeLessThan(0.2);
+  expect(glyphIvoryRetentionRatio).toBeGreaterThan(0.85);
+  expect(glyphUnderstrokeCoverageAtTrough).toBeGreaterThan(0.04);
+  expect(glyphUnderstrokeCoverageAtPeak).toBeGreaterThan(0.04);
+  expect(glyphDarkBadgeExcessAtTrough).toBeLessThan(0.18);
+  expect(glyphDarkBadgeExcessAtPeak).toBeLessThan(0.18);
+  expect(glyphContrastAtTrough).toBeGreaterThan(75);
+  expect(glyphContrastAtPeak).toBeGreaterThan(75);
+  expect(sourceFacePeakClippedCoverage).toBeLessThan(0.02);
   expect(minimumNeighborPatternContrastRatioAtTrough).toBeGreaterThan(0.65);
   expect(minimumNeighborPatternContrastRatioAtPeak).toBeGreaterThan(0.65);
   expect(minimumLightChannelDelta).toBeGreaterThanOrEqual(-1);
@@ -2613,7 +2877,8 @@ test("gameplay marked cells render the synchronized P4 field", DEVICE_MATRIX, as
   expect(outsideBoardLightDelta.right).toBeLessThan(1);
   expect(outsideBoardLightDelta.top).toBeLessThan(1);
   expect(outsideBoardLightDelta.bottom).toBeLessThan(1);
-  expect(overlapTargetDelta).toBeLessThan(1);
+  expect(overlapTargetRimDelta).toBeLessThan(1);
+  expect(overlapTargetSurfaceDelta).toBeLessThan(1);
   expect(gameplayCueLift).toBeGreaterThan(20);
   expect(activationOutsideBoardLightDelta).toBeLessThan(1);
   expect(activationBoundaryDelta).toBeLessThan(0.001);

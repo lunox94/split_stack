@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   COLORBLIND_PIECE_COLORS,
+  PIECE_CELL_ART,
   PIECE_PATTERNS,
   STANDARD_PIECE_COLORS,
   type PieceVisualKind,
@@ -59,6 +60,16 @@ describe("renderer cell-art contract", () => {
       garbage: "grid",
       acid: "bubbles",
     });
+  });
+
+  it("defines a compact rounded-square cell silhouette while Monomino keeps an interior cue", () => {
+    expect(PIECE_CELL_ART).toMatchObject({
+      inset: 0.91,
+      cornerRadius: 0.18,
+      markedGlyphFootprint: 0.46,
+    });
+    expect(PIECE_CELL_ART.cornerRadius).toBeLessThan(0.25);
+    expect(PIECE_PATTERNS.monomino).toBe("circle");
   });
 
   it("keeps garbage neutral in both palettes so its grid remains its primary identity", () => {

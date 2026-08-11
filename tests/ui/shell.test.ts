@@ -4,7 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_PREFERENCES } from "../../src/persistence/settings";
 import { calculateRendererLayout } from "../../src/render/renderer";
-import { SPECIAL_ICON_PATHS } from "../../src/render/special-icons";
+import {
+  SPECIAL_ACCENT_COLORS,
+  SPECIAL_ICON_PATHS,
+} from "../../src/render/special-icons";
 import {
   createAppShell,
   hideGameplayPowerTip,
@@ -1008,14 +1011,18 @@ describe("application shell", () => {
       "blackout",
       "barrier",
     ] as const) {
-      const sample = shell.helpBody.querySelector<HTMLElement>(
-        `.marked-cell-sample[data-special="${special}"]`,
+      const icon = shell.helpBody.querySelector<SVGSVGElement>(
+        `[data-help-group="marked"] .special-guide-card > svg[data-special-icon="${special}"]`,
       );
-      expect(sample).not.toBeNull();
-      expect(sample?.querySelector("path")?.getAttribute("d")).toBe(
+      expect(icon).not.toBeNull();
+      expect(icon?.querySelector("path")?.getAttribute("d")).toBe(
         SPECIAL_ICON_PATHS[special],
       );
+      expect(icon?.style.getPropertyValue("--special-accent"))
+        .toBe(SPECIAL_ACCENT_COLORS[special]);
     }
+    expect(shell.helpBody.querySelector('[data-help-group="marked"] .piece-preview-cell'))
+      .toBeNull();
     expect(shell.helpBody.textContent).toContain("Clears its entire column");
     expect(shell.helpBody.textContent).toContain("Sends extra garbage");
     expect(shell.helpBody.textContent).toContain(
@@ -1049,7 +1056,8 @@ describe("application shell", () => {
     expect(marked?.querySelector("h3")?.textContent).toBe("Marked-piece powers");
     expect(marked?.textContent).toContain("Blackout");
     expect(marked?.textContent).toContain("Barrier");
-    expect(marked?.querySelectorAll(".marked-cell-sample")).toHaveLength(5);
+    expect(marked?.querySelectorAll(":scope .special-guide-card > [data-special-icon]"))
+      .toHaveLength(5);
     expect(pieces?.querySelector("h3")?.textContent).toBe("Special pieces");
     expect(pieces?.textContent).toContain("Hollow Cross");
     expect(pieces?.textContent).toContain("small 3×3 cardinal crimson Cross");
@@ -1066,8 +1074,16 @@ describe("application shell", () => {
         cell.style.getPropertyValue("--piece-color") === "#df5065"))
       .toBe(true);
     expect(pieces?.textContent).toContain("Glitch Piece");
+    expect(pieces?.textContent).toContain("Monomino");
     expect(pieces?.textContent).toContain("Oversize shapes");
-    expect(pieces?.querySelectorAll(".special-piece-sample")).toHaveLength(3);
+    expect(pieces?.querySelectorAll(".special-piece-sample")).toHaveLength(4);
+    expect(
+      pieces?.querySelector('.special-piece-sample[data-source="monomino"] .piece-preview-cell[data-pattern="circle"]'),
+    ).not.toBeNull();
+    expect(
+      [...(pieces?.querySelectorAll<HTMLElement>(".piece-preview-cell") ?? [])]
+        .every((cell) => cell.querySelector(".piece-preview-pattern") !== null),
+    ).toBe(true);
     expect(shell.lobby.textContent).not.toContain("Power Glossary");
     expect(shell.controlsHelpButton.textContent).toBe("Controls");
   });
@@ -1100,7 +1116,7 @@ describe("application shell", () => {
     const illustrations = shell.helpBody.querySelectorAll<HTMLElement>(
       '[data-help-group="pieces"] .special-piece-illustration',
     );
-    expect(illustrations).toHaveLength(3);
+    expect(illustrations).toHaveLength(4);
     for (const illustration of illustrations) {
       expect(illustration.querySelector(".piece-preview-grid")).not.toBeNull();
       expect(illustration.classList).not.toContain("piece-preview-slot");
