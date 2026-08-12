@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { AudioEngine } from "../../src/audio/engine";
+import { MODULE_TRACKS } from "../../src/audio/music";
+import { planGarbageSequence } from "../../src/app/garbage-sequence";
 import {
   CALLOUT_DEFINITIONS,
   CUE_DEFINITIONS,
@@ -111,6 +113,38 @@ describe("audio engine lifecycle", () => {
     expect(Math.min(...(curve ?? []))).toBeCloseTo(-0.95, 5);
   });
 
+  it("maps user volume controls through a perceptual gain curve", async () => {
+    const context = fakeAudioContext();
+    const engine = new AudioEngine({ contextFactory: () => context });
+    expect(await engine.unlock()).toBe(true);
+    const effectsBus = vi.mocked(context.createGain).mock.results[0]?.value;
+    const musicBus = vi.mocked(context.createGain).mock.results[2]?.value;
+    const calloutsBus = vi.mocked(context.createGain).mock.results[3]?.value;
+    vi.mocked(effectsBus?.gain.setTargetAtTime).mockClear();
+    vi.mocked(musicBus?.gain.setTargetAtTime).mockClear();
+    vi.mocked(calloutsBus?.gain.setTargetAtTime).mockClear();
+
+    engine.setEffectsVolume(0.5);
+    engine.setMusicVolume(0.5);
+    engine.setCalloutsVolume(0.5);
+
+    expect(effectsBus?.gain.setTargetAtTime).toHaveBeenCalledWith(
+      0.25,
+      context.currentTime,
+      0.01,
+    );
+    expect(musicBus?.gain.setTargetAtTime).toHaveBeenCalledWith(
+      0.25,
+      context.currentTime,
+      0.02,
+    );
+    expect(calloutsBus?.gain.setTargetAtTime).toHaveBeenCalledWith(
+      0.25,
+      context.currentTime,
+      0.01,
+    );
+  });
+
   it("uses a gentle default music duck reserved for future voice callouts", async () => {
     const context = fakeAudioContext();
     const engine = new AudioEngine({ contextFactory: () => context });
@@ -122,10 +156,44 @@ describe("audio engine lifecycle", () => {
 
     expect(musicBus?.gain.setTargetAtTime).toHaveBeenNthCalledWith(
       1,
-      0.55 * 0.68,
+      0.45 ** 2 * 0.68,
       context.currentTime,
       0.02,
     );
+  });
+
+  it("keeps the strongest overlapping music duck until its own window ends", async () => {
+    vi.useFakeTimers();
+    try {
+      const context = fakeAudioContext();
+      const engine = new AudioEngine({ contextFactory: () => context });
+      expect(await engine.unlock()).toBe(true);
+      const musicBus = vi.mocked(context.createGain).mock.results[2]?.value;
+      vi.mocked(musicBus?.gain.setTargetAtTime).mockClear();
+
+      engine.duckMusic(1_000, 0.68);
+      engine.duckMusic(200, 0.88);
+      expect(musicBus?.gain.setTargetAtTime).toHaveBeenLastCalledWith(
+        0.45 ** 2 * 0.68,
+        context.currentTime,
+        0.02,
+      );
+
+      await vi.advanceTimersByTimeAsync(200);
+      expect(musicBus?.gain.setTargetAtTime).toHaveBeenLastCalledWith(
+        0.45 ** 2 * 0.68,
+        context.currentTime,
+        0.08,
+      );
+      await vi.advanceTimersByTimeAsync(800);
+      expect(musicBus?.gain.setTargetAtTime).toHaveBeenLastCalledWith(
+        0.45 ** 2,
+        context.currentTime,
+        0.08,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("owns enough tracker scheduling to survive a 750ms render stall", async () => {
@@ -158,6 +226,26 @@ describe("audio engine lifecycle", () => {
     await engine.dispose();
   });
 
+  it("applies the selected tracker track calibration below the user volume", async () => {
+    const context = fakeAudioContext();
+    const engine = new AudioEngine({
+      contextFactory: () => context,
+      moduleLoader: async () => trackerModule(),
+    });
+    expect(await engine.unlock()).toBe(true);
+    const musicBus = vi.mocked(context.createGain).mock.results[2]?.value;
+    vi.mocked(musicBus?.gain.setTargetAtTime).mockClear();
+
+    engine.startMusicProgram({ tracks: [MODULE_TRACKS[1]!] });
+
+    expect(musicBus?.gain.setTargetAtTime).toHaveBeenLastCalledWith(
+      0.45 ** 2 * 0.6774,
+      context.currentTime,
+      0.02,
+    );
+    await engine.dispose();
+  });
+
   it("keeps callouts independently controllable from gameplay effects", async () => {
     const context = fakeAudioContext();
     const engine = new AudioEngine({ contextFactory: () => context });
@@ -171,6 +259,43 @@ describe("audio engine lifecycle", () => {
     engine.setCalloutsMuted(true);
     engine.playCallout("combo-5-plus");
     expect(context.createOscillator).toHaveBeenCalledTimes(audibleCalloutTones);
+  });
+
+  it("centers and ducks music for procedural callouts", async () => {
+    const context = fakeAudioContext();
+    const engine = new AudioEngine({ contextFactory: () => context });
+    expect(await engine.unlock()).toBe(true);
+    const musicBus = vi.mocked(context.createGain).mock.results[2]?.value;
+    vi.mocked(musicBus?.gain.setTargetAtTime).mockClear();
+    vi.mocked(context.createStereoPanner).mockClear();
+
+    engine.playCallout("combo-5-plus", { pan: -0.45 });
+
+    expect(vi.mocked(context.createStereoPanner).mock.results.map((result) =>
+      vi.mocked(result.value.pan.setValueAtTime).mock.calls[0]?.[0]
+    )).toEqual([0, 0, 0]);
+    expect(musicBus?.gain.setTargetAtTime).toHaveBeenCalledWith(
+      0.45 ** 2 * 0.68,
+      context.currentTime,
+      0.02,
+    );
+  });
+
+  it("ducks music only for exceptional physical effects", async () => {
+    const context = fakeAudioContext();
+    const engine = new AudioEngine({ contextFactory: () => context });
+    expect(await engine.unlock()).toBe(true);
+    const musicBus = vi.mocked(context.createGain).mock.results[2]?.value;
+    vi.mocked(musicBus?.gain.setTargetAtTime).mockClear();
+
+    engine.play("move");
+    expect(musicBus?.gain.setTargetAtTime).not.toHaveBeenCalled();
+    engine.play("nuke-impact");
+    expect(musicBus?.gain.setTargetAtTime).toHaveBeenLastCalledWith(
+      0.45 ** 2 * 0.88,
+      context.currentTime,
+      0.02,
+    );
   });
 
   it("preloads recorded combo voices and serializes a metered-power callout behind one", async () => {
@@ -201,7 +326,7 @@ describe("audio engine lifecycle", () => {
       expect(context.createOscillator).not.toHaveBeenCalled();
       expect(musicBus?.gain.setTargetAtTime).toHaveBeenNthCalledWith(
         1,
-        0.55 * 0.68,
+        0.45 ** 2 * 0.68,
         context.currentTime,
         0.02,
       );
@@ -286,7 +411,17 @@ describe("audio engine lifecycle", () => {
 
     for (let index = 0; index < 6; index += 1) engine.play("four-line");
 
-    expect(context.createOscillator).toHaveBeenCalledTimes(24);
+    const intervals = vi.mocked(context.createOscillator).mock.results.map(
+      ({ value: oscillator }) => ({
+        start: vi.mocked(oscillator.start).mock.calls[0]?.[0] ?? 0,
+        end: (vi.mocked(oscillator.stop).mock.calls[0]?.[0] ?? 0) - 0.01,
+      }),
+    );
+    const maxConcurrent = Math.max(...intervals.map(({ start }) =>
+      intervals.filter((interval) => interval.start <= start && interval.end > start)
+        .length
+    ));
+    expect(maxConcurrent).toBeLessThanOrEqual(24);
   });
 
   it("streams tracker PCM and resumes it after a suspended audio context", async () => {
@@ -443,7 +578,7 @@ describe("audio engine lifecycle", () => {
       .toBeLessThan(GLITCH_PREVIEW_STEP_MS);
   });
 
-  it("plays one garbage lift-and-slam whose weight and duration scale with its batch", async () => {
+  it("plays a centered rumble and mildly panned impact for every garbage row", async () => {
     const context = fakeAudioContext();
     const engine = new AudioEngine({ contextFactory: () => context });
     expect(await engine.unlock()).toBe(true);
@@ -451,36 +586,84 @@ describe("audio engine lifecycle", () => {
     engine.playGarbageRise(1, { pan: -0.5 });
     const oneRowOscillators = vi.mocked(context.createOscillator).mock.results
       .map((result) => result.value);
-    const oneRowStops = oneRowOscillators.map((oscillator) =>
-      vi.mocked(oscillator.stop).mock.calls[0]?.[0] as number
-    );
     expect(oneRowOscillators).toHaveLength(2);
     expect(vi.mocked(context.createStereoPanner).mock.results.map((result) =>
       vi.mocked(result.value.pan.setValueAtTime).mock.calls[0]?.[0]
-    )).toEqual([-0.5, -0.5]);
+    )).toEqual([0, -0.2]);
+    expect(oneRowOscillators.some((oscillator) =>
+      (vi.mocked(oscillator.frequency.setValueAtTime).mock.calls[0]?.[0] ?? 0) >= 130
+    )).toBe(true);
 
     vi.mocked(context.createOscillator).mockClear();
     vi.mocked(context.createStereoPanner).mockClear();
     engine.playGarbageRise(4, { pan: 0.5 });
     const fourRowOscillators = vi.mocked(context.createOscillator).mock.results
       .map((result) => result.value);
-    const fourRowStops = fourRowOscillators.map((oscillator) =>
-      vi.mocked(oscillator.stop).mock.calls[0]?.[0] as number
-    );
-
-    // A batch remains one layered event instead of repeating once per row.
-    expect(fourRowOscillators).toHaveLength(2);
+    expect(fourRowOscillators).toHaveLength(8);
     expect(vi.mocked(context.createStereoPanner).mock.results.map((result) =>
       vi.mocked(result.value.pan.setValueAtTime).mock.calls[0]?.[0]
-    )).toEqual([0.5, 0.5]);
-    expect(Math.max(...fourRowStops)).toBeGreaterThan(Math.max(...oneRowStops));
-    expect(
-      vi.mocked(fourRowOscillators[1]!.frequency.exponentialRampToValueAtTime)
-        .mock.calls[0]?.[0],
-    ).toBeLessThan(
-      vi.mocked(oneRowOscillators[1]!.frequency.exponentialRampToValueAtTime)
-        .mock.calls[0]?.[0] as number,
+    )).toEqual([
+      0, 0.2,
+      0, 0.2,
+      0, 0.2,
+      0, 0.2,
+    ]);
+    expect([1, 3, 5, 7].map((index) =>
+      vi.mocked(fourRowOscillators[index]!.start).mock.calls[0]?.[0]
+    )).toEqual([1.22, 1.33, 1.44, 1.55]);
+  });
+
+  it("stops delayed garbage tones when terminal presentation interrupts", async () => {
+    const context = fakeAudioContext();
+    const engine = new AudioEngine({ contextFactory: () => context });
+    expect(await engine.unlock()).toBe(true);
+    engine.playGarbageRise(4);
+    const oscillators = vi.mocked(context.createOscillator).mock.results.map(
+      (result) => result.value,
     );
+
+    engine.stopEffects();
+
+    expect(oscillators).toHaveLength(8);
+    for (const oscillator of oscillators) {
+      expect(oscillator.stop).toHaveBeenCalledTimes(2);
+    }
+  });
+
+  it("schedules queued garbage audio on the same compressed row plan", async () => {
+    const context = fakeAudioContext();
+    const engine = new AudioEngine({ contextFactory: () => context });
+    expect(await engine.unlock()).toBe(true);
+    const first = planGarbageSequence(4, 0);
+    const second = planGarbageSequence(4, 0, 550);
+
+    engine.playGarbageRise(4, {}, first);
+    engine.playGarbageRise(4, {}, second);
+
+    const oscillators = vi.mocked(context.createOscillator).mock.results.map(
+      (result) => result.value,
+    );
+    expect(oscillators).toHaveLength(16);
+    const queuedImpactStarts = [9, 11, 13, 15].map((index) =>
+      vi.mocked(oscillators[index]!.start).mock.calls[0]?.[0]
+    );
+    [1.64, 1.71, 1.78, 1.85].forEach((expected, index) => {
+      expect(queuedImpactStarts[index]).toBeCloseTo(expected, 6);
+    });
+  });
+
+  it("bounds concurrent tones without dropping future extreme-backlog rows", async () => {
+    const context = fakeAudioContext();
+    const engine = new AudioEngine({ contextFactory: () => context });
+    expect(await engine.unlock()).toBe(true);
+    let tailMs = 0;
+    for (let index = 0; index < 4; index += 1) {
+      const plan = planGarbageSequence(4, 0, tailMs);
+      tailMs = Math.max(tailMs, plan.startedAtMs + plan.timing.blockingUntilMs);
+      engine.playGarbageRise(4, {}, plan);
+    }
+
+    expect(context.createOscillator).toHaveBeenCalledTimes(32);
   });
 
   it("owns one quiet alternating Glitch preview loop and stops it on mute", async () => {

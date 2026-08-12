@@ -1,5 +1,12 @@
 import type { SpecialKind } from "../domain/types";
 import type { CollapseMovement } from "../domain/powers";
+import {
+  DEFAULT_GARBAGE_CADENCE,
+  garbageTimingFor,
+  planGarbageSequence,
+  type GarbageCadence,
+  type GarbageScheduleResult,
+} from "../app/garbage-sequence";
 
 export type PresentationBoard = "left" | "right";
 export type PresentationStage = "anticipation" | "action" | "follow-through";
@@ -169,6 +176,20 @@ export interface PresentationEffect {
   readonly column?: number;
   readonly resolvedRows?: readonly number[];
   readonly rowCount?: number;
+  /** Cumulative number of cell rows already lifted, including the active fraction. */
+  readonly garbageLiftRows?: number;
+  /** Zero-based row beat most recently started by a garbage-rise sequence. */
+  readonly garbageActiveRow?: number;
+  /** Progress of the active garbage row's lift. */
+  readonly garbageRowProgress?: number;
+  /** Number of garbage rows whose lift has fully seated. */
+  readonly garbageSettledRows?: number;
+  /** Total admitted rows still contributing to the board's shared lift offset. */
+  readonly garbageStackRows?: number;
+  /** Cumulative shared lift across active, queued, and just-completed batches. */
+  readonly garbageStackLiftRows?: number;
+  /** Short highlight envelope fired as each row seats. */
+  readonly garbageSeatPulse?: number;
   readonly completedRows?: readonly number[];
   readonly movements?: readonly CollapseMovement[];
   readonly capacity?: number;
@@ -196,6 +217,8 @@ interface ScheduledCue {
   readonly cue: PresentationCue;
   readonly startedAtMs: number;
   readonly timing: PresentationTiming;
+  readonly garbageCadence?: GarbageCadence;
+  readonly requestedAtMs?: number;
 }
 
 const MAX_SCHEDULED_CUES = 64;
@@ -216,12 +239,6 @@ const NUKE_TIMING: PresentationTiming = {
   impactAtMs: 200,
   blockingUntilMs: 230,
   durationMs: 650,
-};
-
-const GARBAGE_RISE_TIMING: PresentationTiming = {
-  impactAtMs: 100,
-  blockingUntilMs: 250,
-  durationMs: 400,
 };
 
 const COLLAPSE_TIMING: PresentationTiming = {
@@ -255,12 +272,17 @@ const acidRows = (cue: AcidDissolveCue): number[] =>
 const acidStepMs = (cue: AcidDissolveCue): number =>
   Math.min(35, 310 / Math.max(1, acidRows(cue).length));
 
-const timingFor = (cue: PresentationCue): PresentationTiming => {
+const timingFor = (
+  cue: PresentationCue,
+  garbageCadence = DEFAULT_GARBAGE_CADENCE,
+): PresentationTiming => {
   if (cue.kind === "barrier-hit") return BARRIER_HIT_TIMING;
   if (cue.kind === "line-clear") return LINE_CLEAR_TIMING;
   if (cue.kind === "offensive-transfer") return OFFENSIVE_TRANSFER_TIMING;
   if (cue.kind === "nuke") return NUKE_TIMING;
-  if (cue.kind === "garbage-rise") return GARBAGE_RISE_TIMING;
+  if (cue.kind === "garbage-rise") {
+    return garbageTimingFor(cue.rowCount, garbageCadence);
+  }
   if (cue.kind === "collapse") return COLLAPSE_TIMING;
   if (
     cue.kind === "barrier" ||
@@ -296,6 +318,67 @@ const timingFor = (cue: PresentationCue): PresentationTiming => {
 
 const clampProgress = (value: number): number => Math.max(0, Math.min(1, value));
 
+interface GarbageProgress {
+  readonly liftRows: number;
+  readonly activeRow: number;
+  readonly rowProgress: number;
+  readonly settledRows: number;
+}
+
+interface GarbageSeatImpact {
+  readonly row: number;
+  readonly pulse: number;
+  readonly strength: number;
+}
+
+const garbageProgressAt = (
+  cue: GarbageRiseCue,
+  elapsedMs: number,
+  cadence: GarbageCadence,
+): GarbageProgress => {
+  const rows = Math.max(1, Math.round(cue.rowCount));
+  const liftElapsed = elapsedMs - cadence.pressureMs;
+  if (liftElapsed <= 0) {
+    return { liftRows: 0, activeRow: 0, rowProgress: 0, settledRows: 0 };
+  }
+  const progress = Array.from({ length: rows }, (_, index) =>
+    clampProgress(
+      (liftElapsed - index * cadence.rowIntervalMs) / cadence.rowLiftMs,
+    )
+  );
+  const activeRow = Math.min(
+    rows - 1,
+    Math.max(0, Math.floor(liftElapsed / cadence.rowIntervalMs)),
+  );
+  return {
+    liftRows: progress.reduce((total, value) => total + value, 0),
+    activeRow,
+    rowProgress: progress[activeRow] ?? 0,
+    settledRows: progress.filter((value) => value >= 1).length,
+  };
+};
+
+const garbageSeatImpactAt = (
+  cue: GarbageRiseCue,
+  elapsedMs: number,
+  cadence: GarbageCadence,
+): GarbageSeatImpact | null => {
+  const rows = Math.max(1, Math.round(cue.rowCount));
+  const firstSeatMs = cadence.pressureMs + cadence.rowLiftMs;
+  if (elapsedMs < firstSeatMs) return null;
+  const row = Math.min(
+    rows - 1,
+    Math.floor((elapsedMs - firstSeatMs) / cadence.rowIntervalMs),
+  );
+  const sinceSeatMs = elapsedMs - firstSeatMs - row * cadence.rowIntervalMs;
+  if (sinceSeatMs < 0 || sinceSeatMs >= 70) return null;
+  return {
+    row,
+    pulse: 1 - sinceSeatMs / 70,
+    strength: rows <= 1 ? 0 : row / (rows - 1),
+  };
+};
+
 export class PresentationTimeline {
   readonly #scheduled: ScheduledCue[] = [];
   #reducedMotion = false;
@@ -317,7 +400,12 @@ export class PresentationTimeline {
   }
 
   schedule(cue: PresentationCue, startedAtMs: number): PresentationTiming {
-    const timing = timingFor(cue);
+    if (cue.kind === "garbage-rise") {
+      return this.scheduleGarbage(cue, startedAtMs).plan.timing;
+    }
+    const scheduledStartMs = startedAtMs;
+    const garbageCadence: GarbageCadence | undefined = undefined;
+    const timing = timingFor(cue, garbageCadence);
     const duplicate = this.#scheduled.findIndex(
       (scheduled) => scheduled.cue.id === cue.id,
     );
@@ -329,11 +417,69 @@ export class PresentationTimeline {
       }
       this.#scheduled.splice(duplicate, 1);
     }
-    this.#scheduled.push({ cue, startedAtMs, timing });
+    this.#scheduled.push({
+      cue,
+      startedAtMs: scheduledStartMs,
+      timing,
+      ...(garbageCadence === undefined ? {} : { garbageCadence }),
+    });
     if (this.#scheduled.length > MAX_SCHEDULED_CUES) {
       this.#scheduled.splice(0, this.#scheduled.length - MAX_SCHEDULED_CUES);
     }
     return timing;
+  }
+
+  scheduleGarbage(cue: GarbageRiseCue, requestedAtMs: number): GarbageScheduleResult {
+    const duplicate = this.#scheduled.findIndex((scheduled) =>
+      scheduled.cue.id === cue.id
+    );
+    const existing = duplicate >= 0 ? this.#scheduled[duplicate] : undefined;
+    if (existing?.cue.kind === "garbage-rise") {
+      this.#scheduled[duplicate] = { ...existing, cue };
+      return {
+        newlyScheduled: false,
+        plan: {
+          requestedAtMs: existing.requestedAtMs ?? existing.startedAtMs,
+          startedAtMs: existing.startedAtMs,
+          rowCount: Math.max(1, Math.round(cue.rowCount)),
+          cadence: existing.garbageCadence ?? DEFAULT_GARBAGE_CADENCE,
+          timing: existing.timing,
+        },
+      };
+    }
+    const tailBlockingAtMs = this.#scheduled.reduce((tail, scheduled) =>
+      scheduled.cue.kind === "garbage-rise" &&
+        scheduled.cue.board === cue.board &&
+        scheduled.startedAtMs + scheduled.timing.blockingUntilMs > requestedAtMs
+        ? Math.max(tail, scheduled.startedAtMs + scheduled.timing.blockingUntilMs)
+        : tail,
+    requestedAtMs);
+    const plan = planGarbageSequence(cue.rowCount, requestedAtMs, tailBlockingAtMs);
+    if (duplicate >= 0) this.#scheduled.splice(duplicate, 1);
+    this.#scheduled.push({
+      cue,
+      requestedAtMs: plan.requestedAtMs,
+      startedAtMs: plan.startedAtMs,
+      timing: plan.timing,
+      garbageCadence: plan.cadence,
+    });
+    if (this.#scheduled.length > MAX_SCHEDULED_CUES) {
+      this.#scheduled.splice(0, this.#scheduled.length - MAX_SCHEDULED_CUES);
+    }
+    return { plan, newlyScheduled: true };
+  }
+
+  cancelGarbage(board?: PresentationBoard): void {
+    for (let index = this.#scheduled.length - 1; index >= 0; index -= 1) {
+      const cue = this.#scheduled[index]?.cue;
+      if (cue?.kind === "garbage-rise" && (board === undefined || cue.board === board)) {
+        this.#scheduled.splice(index, 1);
+      }
+    }
+  }
+
+  clear(): void {
+    this.#scheduled.length = 0;
   }
 
   frameAt(atMs: number): PresentationFrame {
@@ -424,8 +570,58 @@ export class PresentationTimeline {
             : stage === "action"
               ? "impact"
             : "particles";
+      const garbageProgress = scheduled.cue.kind === "garbage-rise"
+        ? garbageProgressAt(
+            scheduled.cue,
+            elapsed,
+            scheduled.garbageCadence ?? DEFAULT_GARBAGE_CADENCE,
+          )
+        : null;
+      const garbageBoard = scheduled.cue.kind === "garbage-rise"
+        ? scheduled.cue.board
+        : null;
+      const garbageStack = scheduled.cue.kind === "garbage-rise"
+        ? this.#scheduled.reduce(
+            (stack, candidate) => {
+              if (
+                candidate.cue.kind !== "garbage-rise" ||
+                candidate.cue.board !== garbageBoard ||
+                (candidate.requestedAtMs ?? candidate.startedAtMs) > atMs
+              ) {
+                return stack;
+              }
+              const rows = Math.max(1, Math.round(candidate.cue.rowCount));
+              const elapsed = atMs - candidate.startedAtMs;
+              const lifted = elapsed < 0
+                ? 0
+                : elapsed >= candidate.timing.blockingUntilMs
+                  ? rows
+                  : garbageProgressAt(
+                      candidate.cue,
+                      elapsed,
+                      candidate.garbageCadence ?? DEFAULT_GARBAGE_CADENCE,
+                    ).liftRows;
+              return {
+                rows: stack.rows + rows,
+                liftRows: stack.liftRows + lifted,
+              };
+            },
+            { rows: 0, liftRows: 0 },
+          )
+        : null;
+      const garbageSeatImpact = scheduled.cue.kind === "garbage-rise"
+        ? garbageSeatImpactAt(
+            scheduled.cue,
+            elapsed,
+            scheduled.garbageCadence ?? DEFAULT_GARBAGE_CADENCE,
+          )
+        : null;
       const particleCount = this.#reducedMotion || scheduled.cue.kind === "barrier-hit"
         ? 0
+        : scheduled.cue.kind === "garbage-rise"
+          ? garbageSeatImpact === null
+            ? 0
+            : Math.round((8 + 8 * garbageSeatImpact.strength) * this.#particleScale)
         : Math.round(
             (scheduled.cue.kind === "nuke" && stage !== "anticipation"
               ? 48
@@ -439,6 +635,19 @@ export class PresentationTimeline {
         (scheduled.cue.kind === "line-clear" && scheduled.cue.rows.length >= 4) ||
         (scheduled.cue.kind === "garbage-rise" && scheduled.cue.rowCount >= 4);
       if (
+        shake === null &&
+        garbageSeatImpact !== null &&
+        this.#screenShake &&
+        !this.#reducedMotion
+      ) {
+        const magnitude = (0.28 + 0.27 * garbageSeatImpact.strength) *
+          garbageSeatImpact.pulse;
+        shake = {
+          x: Math.sin(elapsed * 0.31) * magnitude,
+          y: Math.cos(elapsed * 0.23) * magnitude,
+          magnitude,
+        };
+      } else if (
         shake === null &&
         this.#screenShake &&
         !this.#reducedMotion &&
@@ -464,7 +673,8 @@ export class PresentationTimeline {
         stageProgress,
         visualStyle: this.#reducedMotion ? "fade" : "motion",
         particleCount,
-        flash: !this.#reducedFlashes && stage === "action",
+        flash: scheduled.cue.kind !== "garbage-rise" &&
+          !this.#reducedFlashes && stage === "action",
         ...(scheduled.cue.kind === "line-clear"
           ? { rows: scheduled.cue.rows }
           : scheduled.cue.kind === "offensive-transfer"
@@ -495,7 +705,17 @@ export class PresentationTimeline {
                   ),
                 }
                 : scheduled.cue.kind === "garbage-rise"
-                  ? { rowCount: scheduled.cue.rowCount }
+                  ? {
+                      rowCount: scheduled.cue.rowCount,
+                      garbageLiftRows: garbageProgress?.liftRows ?? 0,
+                      garbageActiveRow: garbageProgress?.activeRow ?? 0,
+                      garbageRowProgress: garbageProgress?.rowProgress ?? 0,
+                      garbageSettledRows: garbageProgress?.settledRows ?? 0,
+                      garbageStackRows: garbageStack?.rows ?? scheduled.cue.rowCount,
+                      garbageStackLiftRows: garbageStack?.liftRows ??
+                        garbageProgress?.liftRows ?? 0,
+                      garbageSeatPulse: garbageSeatImpact?.pulse ?? 0,
+                    }
                   : scheduled.cue.kind === "collapse"
                     ? {
                         completedRows: scheduled.cue.completedRows,

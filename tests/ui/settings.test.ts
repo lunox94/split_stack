@@ -39,10 +39,14 @@ describe("local preferences", () => {
     });
   });
 
-  it("enables callouts at their independent default volume", () => {
+  it("starts with music as a background bed under crisp effects and callouts", () => {
     expect(loadPreferences(new MemoryStorage(), false)).toMatchObject({
+      effectsEnabled: true,
+      effectsVolume: 0.85,
+      musicEnabled: true,
+      musicVolume: 0.45,
       calloutsEnabled: true,
-      calloutsVolume: 0.8,
+      calloutsVolume: 0.85,
     });
   });
 

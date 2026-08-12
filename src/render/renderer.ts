@@ -210,7 +210,9 @@ export function presentationMotionTransform(
           ? 1.5 - effect.stageProgress * 0.1
           : 1.25;
   return {
-    garbageLift: effect.moment === "lift" ? effect.stageProgress : 0,
+    garbageLift: effect.kind === "garbage-rise"
+      ? effect.garbageRowProgress ?? (effect.moment === "lift" ? effect.stageProgress : 0)
+      : 0,
     transferTravel,
     nukeScale: effect.moment === "shockwave"
       ? 1 + effect.stageProgress * 0.38
@@ -249,15 +251,21 @@ export function collapseCellVisualRow(
 export function garbageCellVisualRow(
   effect: PresentationEffect,
   destinationRow: number,
+  role: RenderCellRole = "settled",
 ): number {
-  if (effect.kind !== "garbage-rise" || effect.visualStyle === "fade") {
+  if (
+    effect.kind !== "garbage-rise" ||
+    effect.visualStyle === "fade" ||
+    role !== "settled"
+  ) {
     return destinationRow;
   }
-  const rows = Math.max(0, effect.rowCount ?? 0);
-  const remaining = effect.moment === "pressure"
-    ? 1
-    : effect.moment === "lift" ? 1 - effect.stageProgress : 0;
-  return destinationRow + rows * remaining;
+  const rows = Math.max(0, effect.garbageStackRows ?? effect.rowCount ?? 0);
+  const liftedRows = Math.max(
+    0,
+    Math.min(rows, effect.garbageStackLiftRows ?? effect.garbageLiftRows ?? 0),
+  );
+  return destinationRow + rows - liftedRows;
 }
 
 function boardMovementEffectFor(
@@ -842,19 +850,32 @@ export class ThreeRenderer {
     viewport: BoardViewport,
     movementEffect?: PresentationEffect,
   ): { readonly x: number; readonly y: number } {
-    const visualRow = movementEffect?.kind === "collapse"
-      ? collapseCellVisualRow(movementEffect, cell.column, cell.row)
-      : movementEffect?.kind === "garbage-rise"
-        ? garbageCellVisualRow(movementEffect, cell.row)
-        : cell.row;
+    const visualRow = this.#cellVisualRow(cell, movementEffect);
     return this.#cellPoint(viewport, cell.column, visualRow);
   }
 
-  #cellIsVisible(cell: Pick<RenderCellModel, "column" | "row">): boolean {
+  #cellVisualRow(
+    cell: RenderCellModel,
+    movementEffect?: PresentationEffect,
+  ): number {
+    if (movementEffect?.kind === "collapse") {
+      return collapseCellVisualRow(movementEffect, cell.column, cell.row);
+    }
+    if (movementEffect?.kind === "garbage-rise") {
+      return garbageCellVisualRow(movementEffect, cell.row, cell.role);
+    }
+    return cell.row;
+  }
+
+  #cellIsVisible(
+    cell: RenderCellModel,
+    movementEffect?: PresentationEffect,
+  ): boolean {
+    const visualRow = this.#cellVisualRow(cell, movementEffect);
     return cell.column >= 0 &&
       cell.column < RULES.board.width &&
-      cell.row >= RULES.board.hiddenRows &&
-      cell.row < RULES.board.height;
+      visualRow >= RULES.board.hiddenRows &&
+      visualRow < RULES.board.height;
   }
 
   #cellDepthScale(kind: RenderCellKind): number {
@@ -878,7 +899,7 @@ export class ThreeRenderer {
     viewport: BoardViewport,
     movementEffect?: PresentationEffect,
   ): void {
-    if (!this.#cellIsVisible(cell)) return;
+    if (!this.#cellIsVisible(cell, movementEffect)) return;
     const presentation = this.#markedPresentation(cell);
     const pool = this.#poolFor(cell);
     if (pool.mesh.count >= MAX_INSTANCES_PER_POOL) return;
@@ -910,7 +931,9 @@ export class ThreeRenderer {
     movementEffect?: PresentationEffect,
   ): void {
     const targets = new Map<string, RenderCellModel>();
-    const visibleCells = board.cells.filter((cell) => this.#cellIsVisible(cell));
+    const visibleCells = board.cells.filter((cell) =>
+      this.#cellIsVisible(cell, movementEffect)
+    );
     for (const cell of visibleCells) {
       if (cell.role === "ghost") continue;
       const key = `${cell.column}:${cell.row}`;
@@ -985,7 +1008,7 @@ export class ThreeRenderer {
   ): void {
     const presentation = this.#markedPresentation(cell);
     if (cell.special === undefined || presentation === null) return;
-    if (!this.#cellIsVisible(cell)) return;
+    if (!this.#cellIsVisible(cell, movementEffect)) return;
     const { x, y } = this.#cellVisualPoint(cell, viewport, movementEffect);
     const overlayBaseZ = this.#markedOverlayBaseZ(cell, viewport);
     const span = viewport.cellSize * (cell.role === "ghost" ? 0.72 : 0.91);
@@ -1112,6 +1135,7 @@ export class ThreeRenderer {
       }
     } else if (effect.kind === "garbage-rise") {
       const rows = Math.max(1, effect.rowCount ?? 1);
+      const rowPulse = 1 - Math.abs((effect.garbageRowProgress ?? 0) * 2 - 1);
       this.#drawEffectRect(
         "garbage-rise",
         0xff755d,
@@ -1120,7 +1144,16 @@ export class ThreeRenderer {
           motion.garbageLift * rows * viewport.cellSize * 0.5,
         viewport.boardWidth,
         Math.min(rows, 4) * viewport.cellSize * 0.32,
-        0.58,
+        visualEffect.visualStyle === "fade"
+          ? 0.12 + (effect.garbageSeatPulse ?? 0) * 0.58
+          : 0.42 + rowPulse * 0.28,
+      );
+      this.#drawParticleBurst(
+        effect,
+        viewport,
+        centerX,
+        bottomY + viewport.cellSize * 0.12,
+        0xff9a70,
       );
     } else if (effect.kind === "offensive-transfer") {
       const sourceViewport = effect.source === "left"

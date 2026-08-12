@@ -30,6 +30,16 @@ describe("tracker match music", () => {
     expect(selectTrackForMatch("shared-match-seed", 4).id).toBe(firstCycle[0]);
   });
 
+  it("calibrates rendered tracker loudness to the quietest bundled module", () => {
+    // Fixed gains come from a full stereo 44.1kHz RMS render of each module.
+    expect(MODULE_TRACKS.map((track) => [track.id, track.mixGain])).toEqual([
+      ["bloody-tears", 1],
+      ["mountain-king", 0.6774],
+      ["bumblebee", 0.9363],
+      ["popcorn", 0.7766],
+    ]);
+  });
+
   it("keeps provenance next to every module asset", () => {
     expect(
       MODULE_TRACKS.map(({ fileName, modArchiveId, sha256 }) => ({

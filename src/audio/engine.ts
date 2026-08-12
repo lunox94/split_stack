@@ -4,7 +4,7 @@ import {
   CUE_DEFINITIONS,
   CUE_POLICIES,
   GLITCH_PREVIEW_STEP_MS,
-  garbageRiseCueForRows,
+  garbageRiseCueForRow,
   type AudioCue,
   type CalloutAsset,
   type CalloutCue,
@@ -18,6 +18,7 @@ import {
   type MusicIntensity,
   type MusicProgram,
 } from "./music";
+import type { GarbageSequencePlan } from "../app/garbage-sequence";
 
 export type ModuleLoader = (assetUrl: string) => Promise<ArrayBuffer>;
 export type CalloutLoader = (assetUrl: string) => Promise<ArrayBuffer>;
@@ -48,17 +49,22 @@ const MUSIC_LEAD_SECONDS = 0.025;
 const MUSIC_SCHEDULE_AHEAD_SECONDS = 0.85;
 const MUSIC_SCHEDULER_INTERVAL_MS = 100;
 const EFFECTS_MAKEUP_GAIN = 6;
-const CALLOUTS_MAKEUP_GAIN = 4;
+const CALLOUTS_MAKEUP_GAIN = 4.4;
+const RECORDED_CALLOUT_GAIN = 1.18;
 const EFFECTS_LIMIT = 0.8;
 const EFFECTS_LIMITER_CURVE_SIZE = 2_049;
 const MAX_ACTIVE_SFX_TONES = 24;
 const MASTER_LIMIT = 0.95;
+
+const perceptualGain = (volume: number): number => volume * volume;
 
 interface ActiveTone {
   readonly oscillator: OscillatorNode;
   readonly envelope: GainNode;
   readonly panner: StereoPannerNode;
   readonly priority: number;
+  readonly startsAt: number;
+  readonly endsAt: number;
 }
 
 interface ActiveCalloutSample {
@@ -71,6 +77,11 @@ interface CalloutRequest {
   readonly cue: CalloutCue;
   readonly options: PlayCueOptions;
   readonly notBeforeMs: number;
+}
+
+interface MusicDuckRequest {
+  readonly amount: number;
+  readonly timer: ReturnType<typeof setTimeout>;
 }
 
 function effectsLimiterCurve(): Float32Array<ArrayBuffer> {
@@ -134,11 +145,11 @@ export class AudioEngine {
   #calloutsBus: GainNode | null = null;
   #calloutsMakeup: GainNode | null = null;
   #effectsMuted = false;
-  #effectsVolume = 0.8;
+  #effectsVolume = 0.85;
   #musicMuted = false;
-  #musicVolume = 0.55;
+  #musicVolume = 0.45;
   #calloutsMuted = false;
-  #calloutsVolume = 0.8;
+  #calloutsVolume = 0.85;
   #musicMix = 1;
   #musicTrack: ModuleTrack | null = null;
   #musicProgram: MusicProgram | null = null;
@@ -160,6 +171,8 @@ export class AudioEngine {
   #calloutTimer: ReturnType<typeof setTimeout> | null = null;
   #calloutOverflowCount = 0;
   #glitchPreviewTimer: ReturnType<typeof setInterval> | null = null;
+  readonly #musicDucks = new Map<number, MusicDuckRequest>();
+  #musicDuckOrdinal = 0;
 
   constructor(options: AudioEngineOptions = {}) {
     this.#contextFactory =
@@ -250,6 +263,12 @@ export class AudioEngine {
     this.#applyEffectsVolume();
   }
 
+  stopEffects(): void {
+    for (const active of [...this.#activeSfxTones]) this.#finishTone(active, true);
+    this.#lastSfxAt.clear();
+    this.#clearMusicDucks();
+  }
+
   setMusicMuted(muted: boolean): void {
     if (muted && !this.#musicMuted && !this.#musicPaused) {
       this.#stopMusicScheduler();
@@ -301,6 +320,9 @@ export class AudioEngine {
       this.#effectsMuted,
       policy.priority,
     );
+    if (policy.musicDuck !== undefined) {
+      this.duckMusic(policy.musicDuck.durationMs, policy.musicDuck.amount);
+    }
   }
 
   playCallout(cue: CalloutCue, options: PlayCalloutOptions = {}): void {
@@ -318,7 +340,7 @@ export class AudioEngine {
       : 0;
     const request: CalloutRequest = {
       cue,
-      options,
+      options: { ...options, pan: 0 },
       notBeforeMs: Date.now() + delayMs,
     };
     if (this.#activeCallout === null) {
@@ -348,14 +370,44 @@ export class AudioEngine {
     }
   }
 
-  playGarbageRise(rowCount: number, options: PlayCueOptions = {}): void {
-    this.#playDefinition(
-      garbageRiseCueForRows(rowCount),
-      options,
-      this.#effectsMakeup,
-      this.#effectsMuted,
-      2,
-    );
+  playGarbageRise(
+    rowCount: number,
+    options: PlayCueOptions = {},
+    sequence?: GarbageSequencePlan,
+  ): void {
+    if (!Number.isFinite(rowCount) || rowCount <= 0) return;
+    const rows = Math.max(1, Math.min(4, Math.round(rowCount)));
+    const impactPan = Math.max(-0.2, Math.min(0.2, options.pan ?? 0));
+    const batchDelayMs = sequence === undefined
+      ? 0
+      : Math.max(0, sequence.startedAtMs - sequence.requestedAtMs);
+    let durationMs = 0;
+    for (let index = 0; index < rows; index += 1) {
+      const cue = garbageRiseCueForRow(
+        index,
+        rows,
+        sequence?.cadence,
+        batchDelayMs,
+      );
+      for (const tone of [...cue.rumble, ...cue.impact]) {
+        durationMs = Math.max(durationMs, (tone.delayMs ?? 0) + tone.durationMs);
+      }
+      this.#playDefinition(
+        cue.rumble,
+        { ...options, pan: 0 },
+        this.#effectsMakeup,
+        this.#effectsMuted,
+        3,
+      );
+      this.#playDefinition(
+        cue.impact,
+        { ...options, pan: impactPan },
+        this.#effectsMakeup,
+        this.#effectsMuted,
+        3,
+      );
+    }
+    this.duckMusic(durationMs, 0.88);
   }
 
   playGlitchPreviewStep(step: number, options: PlayCueOptions = {}): void {
@@ -409,8 +461,8 @@ export class AudioEngine {
 
   startMusicProgram(program: MusicProgram): ModuleTrack {
     this.stopMusic();
-    this.#musicMix = 1;
     const track = program.tracks[0];
+    this.#musicMix = track.mixGain;
     const generation = ++this.#musicLoadGeneration;
     this.#musicProgram = program;
     this.#musicTrack = track;
@@ -423,7 +475,7 @@ export class AudioEngine {
 
   startMenuMusic(): ModuleTrack {
     const track = this.startMusic("split-stack-menu", 0);
-    this.#musicMix = 0.42;
+    this.#musicMix = track.mixGain * 0.42;
     this.#applyMusicVolume();
     return track;
   }
@@ -495,17 +547,23 @@ export class AudioEngine {
     this.#musicAnchorTimeSeconds = null;
     this.#musicAnchorSample = 0;
     this.#stopMusicSources();
+    this.#clearMusicDucks();
   }
 
   duckMusic(durationMs = 350, amount = 0.68): void {
     const context = this.#context;
     const bus = this.#musicBus;
     if (context === null || bus === null || this.#musicMuted || this.#musicPaused) return;
-    const normal = this.#musicVolume * this.#musicMix;
-    const ducked = normal * Math.max(0, Math.min(1, amount));
-    bus.gain.cancelScheduledValues(context.currentTime);
-    bus.gain.setTargetAtTime(ducked, context.currentTime, 0.02);
-    bus.gain.setTargetAtTime(normal, context.currentTime + durationMs / 1_000, 0.08);
+    const id = ++this.#musicDuckOrdinal;
+    const timer = setTimeout(() => {
+      this.#musicDucks.delete(id);
+      this.#applyMusicVolume(0.08);
+    }, Math.max(0, durationMs));
+    this.#musicDucks.set(id, {
+      amount: Math.max(0, Math.min(1, amount)),
+      timer,
+    });
+    this.#applyMusicVolume();
   }
 
   async dispose(): Promise<void> {
@@ -530,25 +588,35 @@ export class AudioEngine {
 
   #applyEffectsVolume(): void {
     if (this.#context === null || this.#effectsBus === null) return;
-    const value = this.#effectsMuted ? 0 : this.#effectsVolume;
+    const value = this.#effectsMuted ? 0 : perceptualGain(this.#effectsVolume);
     this.#effectsBus.gain.cancelScheduledValues(this.#context.currentTime);
     this.#effectsBus.gain.setTargetAtTime(value, this.#context.currentTime, 0.01);
   }
 
-  #applyMusicVolume(): void {
+  #applyMusicVolume(timeConstant = 0.02): void {
     if (this.#context === null || this.#musicBus === null) return;
+    const duck = [...this.#musicDucks.values()].reduce(
+      (amount, request) => Math.min(amount, request.amount),
+      1,
+    );
     const value = this.#musicMuted || this.#musicPaused
       ? 0
-      : this.#musicVolume * this.#musicMix;
+      : perceptualGain(this.#musicVolume) * this.#musicMix * duck;
     this.#musicBus.gain.cancelScheduledValues(this.#context.currentTime);
-    this.#musicBus.gain.setTargetAtTime(value, this.#context.currentTime, 0.02);
+    this.#musicBus.gain.setTargetAtTime(value, this.#context.currentTime, timeConstant);
   }
 
   #applyCalloutsVolume(): void {
     if (this.#context === null || this.#calloutsBus === null) return;
-    const value = this.#calloutsMuted ? 0 : this.#calloutsVolume;
+    const value = this.#calloutsMuted ? 0 : perceptualGain(this.#calloutsVolume);
     this.#calloutsBus.gain.cancelScheduledValues(this.#context.currentTime);
     this.#calloutsBus.gain.setTargetAtTime(value, this.#context.currentTime, 0.01);
+  }
+
+  #clearMusicDucks(): void {
+    for (const request of this.#musicDucks.values()) clearTimeout(request.timer);
+    this.#musicDucks.clear();
+    this.#applyMusicVolume(0.08);
   }
 
   #preloadCalloutAssets(): void {
@@ -691,7 +759,14 @@ export class AudioEngine {
     const pan = Math.max(-1, Math.min(1, options.pan ?? 0));
     const cueGain = Math.max(0, Math.min(2, options.gain ?? 1));
     for (const cueTone of definition) {
-      if (priority !== null && !this.#reserveSfxTone(priority)) continue;
+      const startsAt = context.currentTime + (cueTone.delayMs ?? 0) / 1_000;
+      const endsAt = startsAt + cueTone.durationMs / 1_000;
+      if (
+        priority !== null &&
+        !this.#reserveSfxTone(priority, startsAt, endsAt)
+      ) {
+        continue;
+      }
       this.#scheduleTone(context, input, cueTone, pan, cueGain, priority);
     }
   }
@@ -758,6 +833,7 @@ export class AudioEngine {
       (duration, tone) => Math.max(duration, (tone.delayMs ?? 0) + tone.durationMs),
       0,
     );
+    this.duckMusic(durationMs);
     this.#calloutTimer = setTimeout(() => this.#finishActiveCallout(), durationMs);
   }
 
@@ -774,10 +850,13 @@ export class AudioEngine {
     if (next !== undefined) this.#activateCallout(next);
   }
 
-  #reserveSfxTone(priority: number): boolean {
-    if (this.#activeSfxTones.size < MAX_ACTIVE_SFX_TONES) return true;
+  #reserveSfxTone(priority: number, startsAt: number, endsAt: number): boolean {
+    const overlapping = [...this.#activeSfxTones].filter((active) =>
+      active.startsAt < endsAt && active.endsAt > startsAt
+    );
+    if (overlapping.length < MAX_ACTIVE_SFX_TONES) return true;
     let candidate: ActiveTone | null = null;
-    for (const active of this.#activeSfxTones) {
+    for (const active of overlapping) {
       if (candidate === null || active.priority < candidate.priority) candidate = active;
     }
     if (candidate === null || candidate.priority >= priority) return false;
@@ -798,7 +877,14 @@ export class AudioEngine {
     const panner = context.createStereoPanner();
     const startsAt = context.currentTime + (tone.delayMs ?? 0) / 1_000;
     const endsAt = startsAt + tone.durationMs / 1_000;
-    const active: ActiveTone = { oscillator, envelope, panner, priority: priority ?? 0 };
+    const active: ActiveTone = {
+      oscillator,
+      envelope,
+      panner,
+      priority: priority ?? 0,
+      startsAt,
+      endsAt,
+    };
     if (priority !== null) this.#activeSfxTones.add(active);
     else this.#activeCalloutTones.add(active);
     oscillator.type = tone.wave;
@@ -834,8 +920,11 @@ export class AudioEngine {
     const envelope = context.createGain();
     const panner = context.createStereoPanner();
     const active: ActiveCalloutSample = { source, envelope, panner };
-    const pan = Math.max(-1, Math.min(1, options.pan ?? 0));
-    const cueGain = Math.max(0, Math.min(2, options.gain ?? 1));
+    const pan = 0;
+    const cueGain = Math.max(
+      0,
+      Math.min(2, (options.gain ?? 1) * RECORDED_CALLOUT_GAIN),
+    );
     source.buffer = buffer;
     panner.pan.setValueAtTime(pan, context.currentTime);
     envelope.gain.setValueAtTime(cueGain, context.currentTime);

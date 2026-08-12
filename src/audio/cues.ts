@@ -1,4 +1,8 @@
 import { RULES } from "../config/rules";
+import {
+  DEFAULT_GARBAGE_CADENCE,
+  type GarbageCadence,
+} from "../app/garbage-sequence";
 
 export type AudioCue =
   | "move"
@@ -65,6 +69,10 @@ export interface CalloutAsset {
 export interface CuePolicy {
   readonly priority: number;
   readonly retriggerMs: number;
+  readonly musicDuck?: {
+    readonly durationMs: number;
+    readonly amount: number;
+  };
 }
 
 const tone = (
@@ -86,32 +94,47 @@ const tone = (
 
 export const GLITCH_PREVIEW_STEP_MS = RULES.special.glitchCycleMs;
 
-/**
- * Produces one layered garbage event for an applied batch. Larger batches are
- * longer, lower, and slightly heavier; they never repeat the cue per row.
- */
-export function garbageRiseCueForRows(rowCount: number): CueDefinition {
-  if (!Number.isFinite(rowCount) || rowCount <= 0) return [];
+export interface GarbageRowCue {
+  readonly rumble: CueDefinition;
+  readonly impact: CueDefinition;
+}
+
+/** Builds one deterministic lift-and-seat identity within a garbage batch. */
+export function garbageRiseCueForRow(
+  rowIndex: number,
+  rowCount: number,
+  cadence: GarbageCadence = DEFAULT_GARBAGE_CADENCE,
+  batchDelayMs = 0,
+): GarbageRowCue {
   const maxBatchRows = RULES.garbage.rowsPerLockCap;
   const rows = Math.max(1, Math.min(maxBatchRows, Math.round(rowCount)));
-  const strength = (rows - 1) / Math.max(1, maxBatchRows - 1);
-  return [
-    tone(
-      105 - strength * 23,
-      135 + strength * 65,
-      0.065 + strength * 0.02,
-      "triangle",
-      175 + strength * 25,
-    ),
-    tone(
-      72 - strength * 12,
-      145 + strength * 110,
-      0.09 + strength * 0.025,
-      "sawtooth",
-      44 - strength * 14,
-      70 + strength * 30,
-    ),
-  ];
+  const index = Math.max(0, Math.min(rows - 1, Math.round(rowIndex)));
+  const strength = rows <= 1 ? 0 : index / (rows - 1);
+  const startsAtMs = batchDelayMs + cadence.pressureMs +
+    index * cadence.rowIntervalMs;
+  const seatsAtMs = startsAtMs + cadence.rowLiftMs;
+  return {
+    rumble: [
+      tone(
+        76 - strength * 10,
+        265 + strength * 55,
+        0.11 + strength * 0.02,
+        "sawtooth",
+        48 - strength * 7,
+        startsAtMs,
+      ),
+    ],
+    impact: [
+      tone(
+        245 - strength * 30,
+        105 + strength * 25,
+        0.14 + strength * 0.028,
+        "square",
+        92 - strength * 12,
+        seatsAtMs,
+      ),
+    ],
+  };
 }
 
 export const CUE_DEFINITIONS: Readonly<Record<AudioCue, CueDefinition>> = {
@@ -145,7 +168,10 @@ export const CUE_DEFINITIONS: Readonly<Record<AudioCue, CueDefinition>> = {
   ],
   "t-spin": [tone(520, 80, 0.07, "square", 780), tone(1_040, 150, 0.06, "sine", 880, 65)],
   "garbage-warning": [tone(150, 130, 0.07, "square", 110), tone(150, 130, 0.065, "square", 110, 180)],
-  "garbage-rise": garbageRiseCueForRows(1),
+  "garbage-rise": [
+    ...garbageRiseCueForRow(0, 1).rumble,
+    ...garbageRiseCueForRow(0, 1).impact,
+  ],
   "special-trigger": [tone(700, 80, 0.065, "triangle", 1_100), tone(1_400, 120, 0.045, "sine", 900, 55)],
   "hollow-cross": [
     tone(310, 130, 0.05, "triangle", 265),
@@ -191,6 +217,16 @@ export const CUE_POLICIES: Readonly<Partial<Record<AudioCue, CuePolicy>>> = {
   rotate: { priority: 1, retriggerMs: 0 },
   hold: { priority: 1, retriggerMs: 0 },
   "hard-drop": { priority: 1, retriggerMs: 0 },
+  "nuke-impact": {
+    priority: 3,
+    retriggerMs: 0,
+    musicDuck: { durationMs: 300, amount: 0.88 },
+  },
+  "collapse-impact": {
+    priority: 3,
+    retriggerMs: 0,
+    musicDuck: { durationMs: 300, amount: 0.88 },
+  },
 };
 
 export const CALLOUT_DEFINITIONS: Readonly<Record<CalloutCue, CueDefinition>> = {

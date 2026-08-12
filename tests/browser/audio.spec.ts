@@ -4,6 +4,8 @@ interface RenderedLevel {
   readonly peak: number;
   readonly activeRms: number;
   readonly probeRms: number;
+  readonly activeDurationMs: number;
+  readonly highFrequencyRatio: number;
 }
 
 test("Music, SFX, and Callouts remain independent and retain safe headroom", async ({
@@ -27,7 +29,7 @@ test("Music, SFX, and Callouts remain independent and retain safe headroom", asy
         engine: InstanceType<typeof AudioEngine>,
         context: CaptureContext,
       ) => void | Promise<void>,
-      effectsVolume = 0.8,
+      effectsVolume = 0.85,
     ): Promise<RenderedLevel> => {
       let offlineContext: OfflineAudioContext | null = null;
 
@@ -111,13 +113,20 @@ test("Music, SFX, and Callouts remain independent and retain safe headroom", asy
       let peak = 0;
       let activeEnergy = 0;
       let activeSamples = 0;
-      for (const sample of samples) {
+      let differenceEnergy = 0;
+      let firstActive = samples.length;
+      let lastActive = 0;
+      for (let index = 0; index < samples.length; index += 1) {
+        const sample = samples[index] ?? 0;
         const magnitude = Math.abs(sample);
         peak = Math.max(peak, magnitude);
         if (magnitude > 0.000_01) {
           activeEnergy += sample * sample;
           activeSamples += 1;
+          firstActive = Math.min(firstActive, index);
+          lastActive = index;
         }
+        if (index > 0) differenceEnergy += (sample - (samples[index - 1] ?? 0)) ** 2;
       }
       const level = {
         peak,
@@ -128,6 +137,10 @@ test("Music, SFX, and Callouts remain independent and retain safe headroom", asy
             0,
           ) / (15_435 - 7_056),
         ),
+        activeDurationMs: Math.max(0, lastActive - firstActive) / 44.1,
+        highFrequencyRatio: Math.sqrt(
+          differenceEnergy / Math.max(1, activeEnergy),
+        ),
       };
       await engine.dispose();
       return level;
@@ -136,9 +149,10 @@ test("Music, SFX, and Callouts remain independent and retain safe headroom", asy
     const startMusic = async (
       engine: InstanceType<typeof AudioEngine>,
       context: CaptureContext,
+      rematchIndex = 0,
     ): Promise<void> => {
       engine.setMusicMuted(false);
-      engine.startMusic("collapse-continuity");
+      engine.startMusic("collapse-continuity", rematchIndex);
       for (let attempt = 0; attempt < 100 && context.bufferSourceCount === 0; attempt += 1) {
         await new Promise((resolve) => window.setTimeout(resolve, 10));
       }
@@ -192,6 +206,9 @@ test("Music, SFX, and Callouts remain independent and retain safe headroom", asy
         engine.playCallout("combo-5-plus");
       }, 1),
       musicOnly: await render((engine, context) => startMusic(engine, context)),
+      musicTracks: await Promise.all([0, 1, 2, 3].map((rematchIndex) =>
+        render((engine, context) => startMusic(engine, context, rematchIndex))
+      )),
       musicWithCollapse: await render(async (engine, context) => {
         await startMusic(engine, context);
         context.advanceTo(0.12);
@@ -219,6 +236,8 @@ test("Music, SFX, and Callouts remain independent and retain safe headroom", asy
     expect(impact.peak).toBeGreaterThanOrEqual(0.1);
     expect(impact.activeRms).toBeGreaterThanOrEqual(0.025);
   }
+  expect(levels.garbage.activeDurationMs).toBeGreaterThanOrEqual(500);
+  expect(levels.garbage.highFrequencyRatio).toBeGreaterThanOrEqual(0.08);
 
   expect(levels.hardDrop.peak).toBeGreaterThan(levels.move.peak);
   expect(levels.combo2Voice.peak).toBeGreaterThan(0.05);
@@ -236,11 +255,16 @@ test("Music, SFX, and Callouts remain independent and retain safe headroom", asy
   expect(levels.musicWithCollapse.peak).toBeLessThanOrEqual(0.95);
   const collapseMusicRatio = levels.musicWithCollapse.probeRms /
     levels.musicOnly.probeRms;
-  expect(collapseMusicRatio).toBeGreaterThanOrEqual(0.95);
-  expect(collapseMusicRatio).toBeLessThanOrEqual(1.05);
+  expect(collapseMusicRatio).toBeGreaterThanOrEqual(0.84);
+  expect(collapseMusicRatio).toBeLessThanOrEqual(0.92);
+  const renderedMusicRms = levels.musicTracks.map((track) => track.activeRms);
+  expect(Math.max(...renderedMusicRms) / Math.min(...renderedMusicRms))
+    .toBeLessThanOrEqual(1.6);
+  expect(levels.garbage.activeRms).toBeGreaterThan(levels.musicOnly.activeRms * 1.5);
+  expect(levels.combo2Voice.activeRms).toBeGreaterThan(levels.musicOnly.activeRms);
   expect(levels.stackedImpactFull.peak).toBeLessThanOrEqual(0.8);
   const quarterVolumeRatio = levels.stackedImpactQuarter.peak /
     levels.stackedImpactFull.peak;
-  expect(quarterVolumeRatio).toBeGreaterThanOrEqual(0.24);
-  expect(quarterVolumeRatio).toBeLessThanOrEqual(0.26);
+  expect(quarterVolumeRatio).toBeGreaterThanOrEqual(0.05);
+  expect(quarterVolumeRatio).toBeLessThanOrEqual(0.08);
 });

@@ -141,7 +141,7 @@ describe("renderer presentation motion", () => {
     expect(visualRows).toEqual([...visualRows].sort((left, right) => left - right));
   });
 
-  it("raises stack and new garbage cells from their pre-rise rows", () => {
+  it("raises settled stack cells one garbage row at a time without moving the live piece", () => {
     const timeline = new PresentationTimeline();
     timeline.schedule(
       {
@@ -152,11 +152,21 @@ describe("renderer presentation motion", () => {
       },
       0,
     );
-    const visualRows = [0, 100, 175, 250].map((atMs) =>
+    const visualRows = [0, 80, 150, 220, 330].map((atMs) =>
       garbageCellVisualRow(timeline.frameAt(atMs).effects[0]!, 19),
     );
 
-    expect(visualRows).toEqual([21, 21, 20, 19]);
+    expect(visualRows).toEqual([21, 21, 20.5, 19.785714285714285, 19]);
+    expect(garbageCellVisualRow(
+      timeline.frameAt(150).effects[0]!,
+      4,
+      "active",
+    )).toBe(4);
+    expect(garbageCellVisualRow(
+      timeline.frameAt(150).effects[0]!,
+      8,
+      "ghost",
+    )).toBe(8);
 
     const reduced = new PresentationTimeline({ reducedMotion: true });
     reduced.schedule(
@@ -169,5 +179,40 @@ describe("renderer presentation motion", () => {
       0,
     );
     expect(garbageCellVisualRow(reduced.frameAt(0).effects[0]!, 19)).toBe(19);
+  });
+
+  it("keeps one cumulative stack offset when extreme backlog overlaps batches", () => {
+    const timeline = new PresentationTimeline();
+    for (let index = 0; index < 3; index += 1) {
+      timeline.schedule(
+        {
+          id: `garbage-backlog-${index}`,
+          kind: "garbage-rise",
+          board: "left",
+          rowCount: 4,
+        },
+        0,
+      );
+    }
+
+    const initial = timeline.frameAt(0).effects[0]!;
+    expect(initial).toMatchObject({
+      garbageStackRows: 12,
+      garbageStackLiftRows: 0,
+    });
+    expect(garbageCellVisualRow(initial, 7)).toBe(19);
+
+    const beforeEffects = timeline.frameAt(644).effects;
+    const beforeOverlap = beforeEffects[beforeEffects.length - 1]!;
+    const beforeRow = garbageCellVisualRow(beforeOverlap, 12);
+    const overlap = timeline.frameAt(645).effects.filter((effect) =>
+      effect.kind === "garbage-rise"
+    );
+    expect(overlap).toHaveLength(2);
+    expect(overlap[0]!.garbageStackLiftRows).toBe(
+      overlap[1]!.garbageStackLiftRows,
+    );
+    expect(garbageCellVisualRow(overlap[overlap.length - 1]!, 12))
+      .toBeCloseTo(beforeRow, 1);
   });
 });

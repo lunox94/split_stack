@@ -7,9 +7,19 @@ import type {
   PresentationBoard,
   PresentationCue,
 } from "../render/presentation-timeline";
+import type {
+  GarbageScheduleResult,
+  GarbageSequencePlan,
+} from "./garbage-sequence";
 
 export interface PresentationScheduler {
   schedule(cue: PresentationCue, startedAtMs: number): unknown;
+  scheduleGarbage?(cue: Extract<PresentationCue, { kind: "garbage-rise" }>, startedAtMs: number): GarbageScheduleResult;
+}
+
+export interface ScheduledGarbageEffect {
+  readonly effect: SimulationEffect;
+  readonly plan: GarbageSequencePlan;
 }
 
 export type GhostCellsProvider = (
@@ -47,7 +57,8 @@ export class PresentationRouter {
   consumeSimulationEffects(
     effects: readonly SimulationEffect[],
     board: PresentationBoard,
-  ): void {
+  ): readonly ScheduledGarbageEffect[] {
+    const scheduledGarbage: ScheduledGarbageEffect[] = [];
     for (const effect of effects) {
       if (effect.kind === "special-trigger") continue;
       const id = effect.eventId ?? this.#nextId(effect.kind);
@@ -59,12 +70,18 @@ export class PresentationRouter {
         continue;
       }
       if (effect.kind === "garbage-rise") {
-        this.#schedule({
+        const cue = {
           id,
           kind: "garbage-rise",
           board,
           rowCount: Math.max(1, effect.rows ?? 1),
-        });
+        } as const;
+        const now = this.#now();
+        const result = this.#scheduler.scheduleGarbage?.(cue, now);
+        if (result === undefined) this.#scheduler.schedule(cue, now);
+        else if (result.newlyScheduled) {
+          scheduledGarbage.push({ effect, plan: result.plan });
+        }
         continue;
       }
       if (effect.kind === "barrier-block") {
@@ -184,6 +201,7 @@ export class PresentationRouter {
         triggers,
       });
     }
+    return scheduledGarbage;
   }
 
   consumeIncomingAttack(

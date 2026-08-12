@@ -26,11 +26,11 @@ const STORAGE_KEY = "split-stack/preferences/v1";
 
 export const DEFAULT_PREFERENCES: Preferences = {
   effectsEnabled: true,
-  effectsVolume: 0.8,
+  effectsVolume: 0.85,
   musicEnabled: true,
-  musicVolume: 0.55,
+  musicVolume: 0.45,
   calloutsEnabled: true,
-  calloutsVolume: 0.8,
+  calloutsVolume: 0.85,
   vibration: true,
   touchControls: "gestures",
   colorPalette: "standard",

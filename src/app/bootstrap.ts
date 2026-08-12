@@ -80,13 +80,18 @@ import { boardModelFromRemoteSnapshot, boardModelFromSimulation } from "./view-m
 import { GraphicsAutoController, resolveGraphicsPlan } from "./graphics-policy";
 import {
   audioPlanForLineClear,
+  audioPreviewForSetting,
   calloutForPower,
   cueForAcceptedInput,
   cueForIncomingAttack,
   cueForPhysicalEffect,
+  panForPhysicalBoard,
   panForPowerCue,
 } from "./audio-policy";
-import { hapticDurationForSimulationEffect } from "./haptic-policy";
+import {
+  GarbageHapticSequencer,
+  hapticDurationForSimulationEffect,
+} from "./haptic-policy";
 import { PresentationRouter } from "./presentation-router";
 import {
   createRuntimeId,
@@ -399,6 +404,7 @@ export async function bootstrap(): Promise<void> {
       .filter((cell) => cell.role === "ghost")
       .map((cell) => ({ column: cell.column, row: cell.row })) ?? [];
   let presentationTimeline = new PresentationTimeline();
+  const garbageHaptics = new GarbageHapticSequencer();
   let presentationRouter = new PresentationRouter(
     presentationTimeline,
     undefined,
@@ -526,12 +532,14 @@ export async function bootstrap(): Promise<void> {
       glitchPreviewLoopActive = false;
     } else if (staticFallback) {
       if (!glitchPreviewArrivalPlayed && audio.unlocked) {
-        audio.play("glitch-preview-arrival", { pan: -0.45 });
+        audio.play("glitch-preview-arrival", {
+          pan: panForPhysicalBoard(mode === "practice" ? "practice" : "versus", "left"),
+        });
         glitchPreviewArrivalPlayed = true;
       }
     } else if (!glitchPreviewLoopActive && audio.unlocked) {
       glitchPreviewLoopActive = audio.startGlitchPreviewLoop({
-        pan: -0.45,
+        pan: panForPhysicalBoard(mode === "practice" ? "practice" : "versus", "left"),
         elapsedMs: Math.max(0, now - primaryGlitchStartedAtMs),
       });
     }
@@ -554,6 +562,9 @@ export async function bootstrap(): Promise<void> {
   });
 
   const resetPresentation = (): void => {
+    audio.stopEffects();
+    navigator.vibrate?.(0);
+    garbageHaptics.clear();
     resetHudBarrierCapacityPresentation(shell.left);
     resetHudBarrierCapacityPresentation(shell.right);
     presentationTimeline = new PresentationTimeline({
@@ -1094,7 +1105,20 @@ export async function bootstrap(): Promise<void> {
     effects: readonly SimulationEffect[],
     board: PresentationBoard = "left",
   ): void => {
-    const pan = board === "left" ? -0.45 : 0.45;
+    if (effects.some((effect) => effect.kind === "top-out")) {
+      audio.stopEffects();
+      presentationTimeline.clear();
+      garbageHaptics.clear();
+      navigator.vibrate?.(0);
+      if (mode === "practice" && practice !== null) {
+        showPracticeResult(practice.readSnapshot());
+      }
+      return;
+    }
+    const pan = panForPhysicalBoard(
+      mode === "practice" ? "practice" : "versus",
+      board,
+    );
     const barrierActivated = effects.some((effect) => effect.kind === "barrier-start");
     const barrierBlockedRows = effects.reduce(
       (total, effect) => total +
@@ -1108,7 +1132,21 @@ export async function bootstrap(): Promise<void> {
         animate: !graphicsPlan().staticLegibilityCues,
       });
     }
-    presentationRouter.consumeSimulationEffects(effects, board);
+    const settledGridMutated = effects.some((effect) =>
+      effect.kind === "piece-locked" ||
+      effect.kind === "acid-lock" ||
+      (effect.kind === "nuke" && effect.phase === "impact") ||
+      (effect.kind === "collapse" && effect.phase === "drop") ||
+      (effect.kind === "acid-dissolve" && effect.phase === "dissolve")
+    );
+    if (settledGridMutated) presentationTimeline.cancelGarbage(board);
+    const garbagePresentations = presentationRouter.consumeSimulationEffects(
+      effects,
+      board,
+    );
+    const garbagePlans = new Map(
+      garbagePresentations.map(({ effect, plan }) => [effect, plan]),
+    );
     const comboCalloutRequested = board === "left" && effects.some((effect) =>
       effect.kind === "line-clear" &&
       effect.phase === "impact" &&
@@ -1116,11 +1154,15 @@ export async function bootstrap(): Promise<void> {
       (effect.comboCount ?? 0) >= 2
     );
     for (const effect of effects) {
-      const hapticDuration = hapticDurationForSimulationEffect(
-        effect,
-        preferences.vibration,
-        board,
-      );
+      const garbagePlan = garbagePlans.get(effect);
+      const hapticDuration = garbagePlan === undefined
+        ? hapticDurationForSimulationEffect(effect, preferences.vibration, board)
+        : garbageHaptics.schedule(
+            garbagePlan,
+            preferences.vibration,
+            board,
+            performance.now(),
+          );
       if (hapticDuration !== null) navigator.vibrate?.(hapticDuration);
       if (effect.kind === "piece-locked") audio.play("lock", { pan });
       else if (effect.kind === "t-spin") audio.play("t-spin", { pan });
@@ -1135,7 +1177,7 @@ export async function bootstrap(): Promise<void> {
           audio.playCallout(plan.callout, { pan, delayMs: plan.calloutDelayMs });
         }
       } else if (effect.kind === "garbage-rise") {
-        audio.playGarbageRise(effect.rows ?? 1, { pan });
+        audio.playGarbageRise(effect.rows ?? 1, { pan }, garbagePlan);
       }
       else if (effect.kind === "hollow-cross") audio.play("hollow-cross", { pan });
       else if (effect.kind === "glitch-piece") audio.play("special-trigger", { pan });
@@ -1164,13 +1206,17 @@ export async function bootstrap(): Promise<void> {
 
   const processSnapshotAudio = (snapshot: SimulationSnapshot | undefined): void => {
     if (snapshot === undefined) return;
-    if (snapshot.level > lastLocalLevel) audio.play("level-up", { pan: -0.45 });
+    const localPan = panForPhysicalBoard(
+      mode === "practice" ? "practice" : "versus",
+      "left",
+    );
+    if (snapshot.level > lastLocalLevel) audio.play("level-up", { pan: localPan });
     lastLocalLevel = snapshot.level;
     const warningThreshold = Math.max(1, RULES.power.threshold - 5);
     if (snapshot.player.powerCharge >= warningThreshold) {
       if (warnedUpcomingPower !== snapshot.player.upcomingPower) {
         warnedUpcomingPower = snapshot.player.upcomingPower;
-        audio.play("power-warning", { pan: -0.45 });
+        audio.play("power-warning", { pan: localPan });
       }
       maybeShowPowerTip(snapshot.player.upcomingPower);
     } else if (snapshot.player.powerCharge < warningThreshold) {
@@ -1194,7 +1240,11 @@ export async function bootstrap(): Promise<void> {
       : competitive?.dispatchWithResult(action);
     if (result === undefined) return;
     const cue = cueForAcceptedInput(action, result.accepted);
-    if (cue !== null) audio.play(cue, { pan: -0.45 });
+    if (cue !== null) {
+      audio.play(cue, {
+        pan: panForPhysicalBoard(mode === "practice" ? "practice" : "versus", "left"),
+      });
+    }
     processEffects(result.effects);
   };
 
@@ -1854,16 +1904,16 @@ export async function bootstrap(): Promise<void> {
           if (view !== undefined) applyCompetitivePresentation(view);
         },
         onRemoteBlackout: () => {
-          audio.play("power-blackout", { pan: 0.45 });
+          audio.play("power-blackout", { pan: 0.18 });
         },
         onIncomingGarbage: () => {
-          audio.play("garbage-warning", { pan: 0.45 });
+          audio.play("garbage-warning", { pan: 0.18 });
         },
         onIncomingAttack: (kind, eventId, value) => {
           presentationRouter.consumeIncomingAttack(kind, eventId, value);
           const cue = cueForIncomingAttack(kind);
           if (cue !== null) {
-            audio.play(cue, { pan: -0.45 });
+            audio.play(cue, { pan: -0.18 });
           }
         },
         onTransportRecoveryNeeded: () => {
@@ -2224,6 +2274,39 @@ export async function bootstrap(): Promise<void> {
     savePreferences(storage, preferences);
     applyPreferences();
     shell.show("home");
+  });
+  const auditionAudioSetting = (
+    setting: "effects-volume" | "callouts-volume",
+  ): void => {
+    const effects = setting === "effects-volume";
+    const enabled = effects
+      ? shell.settingsInputs.effectsEnabled.checked
+      : shell.settingsInputs.calloutsEnabled.checked;
+    const preview = audioPreviewForSetting(setting, enabled);
+    if (preview === null) return;
+    const volume = Number(
+      effects
+        ? shell.settingsInputs.effectsVolume.value
+        : shell.settingsInputs.calloutsVolume.value,
+    );
+    void audio.unlock().then((unlocked) => {
+      if (!unlocked) return;
+      if (preview.kind === "sfx") {
+        audio.setEffectsMuted(false);
+        audio.setEffectsVolume(volume);
+        audio.play(preview.cue, { gain: preview.gain });
+      } else {
+        audio.setCalloutsMuted(false);
+        audio.setCalloutsVolume(volume);
+        audio.playCallout(preview.cue, { gain: preview.gain });
+      }
+    });
+  };
+  shell.settingsInputs.effectsVolume.addEventListener("change", () => {
+    auditionAudioSetting("effects-volume");
+  });
+  shell.settingsInputs.calloutsVolume.addEventListener("change", () => {
+    auditionAudioSetting("callouts-volume");
   });
   for (const input of Object.values(shell.settingsInputs)) {
     input.addEventListener("change", () => {

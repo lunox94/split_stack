@@ -347,6 +347,21 @@ rules version 2 and must change together with the peer rules hash.
 - The presentation timeline consumes deterministic simulation cues but never
   changes authoritative state. Reduced-motion/reduced-effects variants keep the
   same gameplay timing while removing shake, large travel, or repeated flashes.
+- Garbage rise remains a receiver-local presentation of an already applied
+  Simulation effect. After 80 ms of pressure, successfully inserted rows lift
+  from the floor at 110 ms intervals with 140 ms overlapping travel; settled
+  cells move while the active and Ghost pieces remain live and stationary.
+  Each seated row receives deterministic debris, an escalating optional shake,
+  a short 18/22/26/30 ms vibration pulse, and its own lift-and-impact SFX. A
+  shared visual/audio/haptic sequencer normally waits for the prior lift and
+  compresses toward 70 ms row spacing; extreme backlog may overlap batches and
+  tighten further so presentation remains bounded near 900 ms. Overlapping
+  batches expose one cumulative admitted-row offset, preserving authoritative
+  row order and hole positions instead of layering incompatible slab transforms.
+  A later settled grid mutation fast-forwards stale travel to authoritative
+  state. Reduced motion replaces travel and shake with pulsed static row beats
+  while retaining audio and optional haptics. Top-out interrupts this
+  presentation immediately.
 - Competitive and spectator state projection is capped at 30 FPS while their
   input and 50 ms networking pump remain independent. Remote board models are
   rebuilt only for a new snapshot sequence, unchanged HUD values do not rewrite
@@ -359,13 +374,19 @@ rules version 2 and must change together with the peer rules hash.
 - Music uses four bundled 4-channel ProTracker modules. A match chooses one
   deterministically and rematches rotate the choice. The replay core renders
   short stereo PCM chunks into scheduled Web Audio buffer sources rather than
-  retaining a full decoded song, which bounds memory use on phones.
+  retaining a full decoded song, which bounds memory use on phones. Fixed
+  per-track gains derived from complete 44.1 kHz stereo renders calibrate the
+  modules to the quietest bundled track before the user volume is applied.
 - Music, SFX, and Callouts use independent buses followed by a transparent
-  master safety ceiling. SFX never duck music. Callouts have independent mute
-  and volume controls; the reserved voice-callout duck lowers music only to
-  68% of its normal gain. Metered-power activation identities and local combo
-  milestones are Callouts, while marked triggers and physical board events
-  remain SFX.
+  master safety ceiling. The user-facing volumes use perceptual gain curves;
+  first-run values are Music 0.45, Effects 0.85, and Callouts 0.85. Ordinary
+  SFX never duck music, while Garbage rise, Nuke impact, and Collapse impact
+  may lower it briefly to 88% for physical emphasis. Every recorded or
+  procedural Callout uses the stronger reserved duck to 68% and is centered.
+  Metered-power activation identities and local combo milestones are Callouts,
+  while marked triggers and physical board events remain SFX. Practice SFX are
+  centered; competitive board SFX use restrained 0.18 panning, and Garbage
+  keeps its rumble centered while panning only its upper impact layers.
 - The tracker scheduler runs independently of rendering at a 100 ms cadence
   and keeps approximately 850 ms queued. A one-track music program preserves
   current match selection while leaving a bounded seam for future playlists.
@@ -375,15 +396,19 @@ rules version 2 and must change together with the peer rules hash.
   combo count. Audio combines the normal row-count SFX with Callouts only for
   piece-created clears: Combo 2, Combo 3, and Combo 4 use bundled recorded
   voices, while Combo 5+ remains procedural. Recorded callouts preload after
-  audio unlock, retain their procedural fallback, and alone use the reserved
-  music duck.
+  audio unlock, retain their procedural fallback, and receive an independent
+  sample calibration because they bypass procedural Callout makeup gain.
   Collapse participation would be a future gameplay-rules change rather than
   an audio-policy change.
-- Synthesized SFX are bounded to 24 active tones. Movement and soft-drop cues
-  coalesce within 30 ms and yield before unique clears, powers, warnings, and
-  results. Callouts allow one active item plus three pending items; overflow
+- Synthesized SFX are bounded to 24 simultaneously audible tones; future row
+  beats reserve against their scheduled interval so a bounded queue does not
+  discard later impacts. Movement and soft-drop cues coalesce within 30 ms and
+  yield before unique clears, powers, warnings, and results. Callouts allow one
+  active item plus three pending items; overflow
   removes the oldest pending combo first and otherwise the oldest pending
   callout. Pause, suspension, teardown, and disposal discard stale Callouts.
+- Effects and Callouts volume sliders play one reduced-gain, non-looping preview
+  after adjustment so their independent balance can be judged in Settings.
 - Pausing, backgrounding, muting, track replacement, and Web Audio suspension
   stop queued module buffers and resume from the audible sample position. The
   modules keep their authored tempo and arrangement; gameplay intensity does

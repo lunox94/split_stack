@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   audioPlanForLineClear,
+  audioPreviewForSetting,
   calloutForPower,
   cueForAcceptedInput,
   cueForIncomingAttack,
   cueForPhysicalEffect,
   panForPowerCue,
+  panForPhysicalBoard,
 } from "../../src/app/audio-policy";
 
 describe("app audio policy", () => {
@@ -76,4 +78,26 @@ describe("app audio policy", () => {
     expect(panForPowerCue("nuke", -0.45)).toBe(-0.45);
     expect(panForPowerCue("collapse", 0.45)).toBe(0.45);
   });
+
+  it("centers Practice and keeps competitive board panning restrained", () => {
+    expect(panForPhysicalBoard("practice", "left")).toBe(0);
+    expect(panForPhysicalBoard("versus", "left")).toBe(-0.18);
+    expect(panForPhysicalBoard("versus", "right")).toBe(0.18);
+  });
+
+  it("auditions only enabled Effects and Callouts volume controls", () => {
+    expect(audioPreviewForSetting("effects-volume", true)).toEqual({
+      kind: "sfx",
+      cue: "rotate",
+      gain: 0.7,
+    });
+    expect(audioPreviewForSetting("callouts-volume", true)).toEqual({
+      kind: "callout",
+      cue: "combo-2",
+      gain: 0.65,
+    });
+    expect(audioPreviewForSetting("effects-volume", false)).toBeNull();
+    expect(audioPreviewForSetting("music-volume", true)).toBeNull();
+  });
+
 });

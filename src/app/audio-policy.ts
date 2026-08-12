@@ -15,6 +15,25 @@ export interface LineClearAudioPlan {
   readonly calloutDelayMs: number;
 }
 
+export type AudioSetting = "effects-volume" | "music-volume" | "callouts-volume";
+export type AudioSettingPreview =
+  | { readonly kind: "sfx"; readonly cue: AudioCue; readonly gain: number }
+  | { readonly kind: "callout"; readonly cue: CalloutCue; readonly gain: number };
+
+export function audioPreviewForSetting(
+  setting: AudioSetting,
+  enabled: boolean,
+): AudioSettingPreview | null {
+  if (!enabled) return null;
+  if (setting === "effects-volume") {
+    return { kind: "sfx", cue: "rotate", gain: 0.7 };
+  }
+  if (setting === "callouts-volume") {
+    return { kind: "callout", cue: "combo-2", gain: 0.65 };
+  }
+  return null;
+}
+
 export function audioPlanForLineClear(
   input: LineClearAudioInput,
 ): LineClearAudioPlan {
@@ -76,4 +95,12 @@ export function panForPowerCue(power: PowerKind, sourceBoardPan: number): number
   return power === "scramble" || power === "oversize" || power === "ghost-jam"
     ? -sourceBoardPan
     : sourceBoardPan;
+}
+
+export function panForPhysicalBoard(
+  mode: "practice" | "versus",
+  board: "left" | "right",
+): number {
+  if (mode === "practice") return 0;
+  return board === "left" ? -0.18 : 0.18;
 }

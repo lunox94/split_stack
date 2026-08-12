@@ -78,6 +78,10 @@ events; Callouts announce local combo milestones and metered-power activation.
 Callouts have their own mute and volume settings. Procedural combo identities
 cover consecutive clearing placements 2, 3, 4, and 5+, while the ordinary
 Single, Double, Triple, and Four-Line sounds continue to describe rows cleared.
+Bundled tracker tracks are loudness-calibrated into a comfortable background
+bed; first-run Music is 45%, while Effects and Callouts start at 85% so physical
+events and announcements remain crisp. Incoming garbage rises one row at a time
+with synchronized impact audio, optional vibration, debris, and screen shake.
 
 ## Development
 

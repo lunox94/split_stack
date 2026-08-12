@@ -199,23 +199,126 @@ describe("presentation timeline", () => {
     });
   });
 
-  it("warns about garbage pressure without exposing holes before the rise", () => {
+  it("stages garbage rows as overlapping ground-up beats", () => {
     const timeline = new PresentationTimeline();
-    timeline.schedule(
+    const timing = timeline.schedule(
       { id: "garbage", kind: "garbage-rise", board: "left", rowCount: 4 },
       0,
     );
 
+    expect(timing).toEqual({
+      impactAtMs: 80,
+      blockingUntilMs: 550,
+      durationMs: 600,
+    });
     expect(timeline.frameAt(50).effects[0]).toMatchObject({
       moment: "pressure",
       rowCount: 4,
+      garbageLiftRows: 0,
+      garbageActiveRow: 0,
+      garbageRowProgress: 0,
+      garbageSettledRows: 0,
     });
-    expect(timeline.frameAt(175).effects[0]).toMatchObject({
+    expect(timeline.frameAt(150).effects[0]).toMatchObject({
       stage: "action",
       moment: "lift",
       rowCount: 4,
+      garbageActiveRow: 0,
+      garbageRowProgress: 0.5,
+      garbageSettledRows: 0,
+      garbageLiftRows: 0.5,
+    });
+    expect(timeline.frameAt(220).effects[0]).toMatchObject({
+      stage: "action",
+      moment: "lift",
+      garbageActiveRow: 1,
+      garbageSettledRows: 1,
     });
     expect(timeline.frameAt(50).effects[0]).not.toHaveProperty("holeColumns");
+    expect(timeline.frameAt(550).effects[0]).toMatchObject({
+      stage: "follow-through",
+      garbageActiveRow: 3,
+      garbageRowProgress: 1,
+      garbageSettledRows: 4,
+      garbageLiftRows: 4,
+    });
+  });
+
+  it("accents every seated garbage row without full-screen flashes", () => {
+    const timeline = new PresentationTimeline();
+    timeline.schedule(
+      { id: "garbage-impact", kind: "garbage-rise", board: "left", rowCount: 2 },
+      0,
+    );
+
+    expect(timeline.frameAt(219).shake).toBeNull();
+    const first = timeline.frameAt(220);
+    expect(first.shake?.magnitude).toBeGreaterThan(0);
+    expect(first.effects[0]).toMatchObject({ flash: false });
+    expect(first.effects[0]!.particleCount).toBeGreaterThan(0);
+    expect(timeline.frameAt(300).shake).toBeNull();
+    const second = timeline.frameAt(330);
+    expect(second.shake!.magnitude).toBeGreaterThan(first.shake!.magnitude);
+
+    const reduced = new PresentationTimeline({ reducedMotion: true });
+    reduced.schedule(
+      { id: "garbage-impact-reduced", kind: "garbage-rise", board: "left", rowCount: 2 },
+      0,
+    );
+    expect(reduced.frameAt(220).shake).toBeNull();
+    expect(reduced.frameAt(220).effects[0]!.particleCount).toBe(0);
+    expect(reduced.frameAt(220).effects[0]!.garbageSeatPulse).toBe(1);
+    expect(reduced.frameAt(300).effects[0]!.garbageSeatPulse).toBe(0);
+  });
+
+  it("serializes back-to-back garbage batches within a bounded presentation window", () => {
+    const timeline = new PresentationTimeline();
+    timeline.schedule(
+      { id: "garbage-first", kind: "garbage-rise", board: "left", rowCount: 4 },
+      0,
+    );
+    const queuedTiming = timeline.schedule(
+      { id: "garbage-second", kind: "garbage-rise", board: "left", rowCount: 4 },
+      0,
+    );
+    const thirdTiming = timeline.schedule(
+      { id: "garbage-third", kind: "garbage-rise", board: "left", rowCount: 4 },
+      0,
+    );
+
+    expect(queuedTiming).toEqual({
+      impactAtMs: 0,
+      blockingUntilMs: 300,
+      durationMs: 350,
+    });
+    expect(timeline.frameAt(549).effects.map((effect) => effect.id)).toEqual([
+      "garbage-first",
+    ]);
+    expect(timeline.frameAt(550).effects.find((effect) =>
+      effect.id === "garbage-second"
+    )).toMatchObject({ stage: "action", garbageActiveRow: 0 });
+    expect(timeline.frameAt(899).effects.map((effect) => effect.id)).toContain(
+      "garbage-second",
+    );
+    expect(timeline.frameAt(900).effects.map((effect) => effect.id)).not.toContain(
+      "garbage-second",
+    );
+
+    expect(thirdTiming.durationMs).toBeLessThanOrEqual(350);
+    expect(timeline.frameAt(900).effects.map((effect) => effect.id)).not.toContain(
+      "garbage-third",
+    );
+  });
+
+  it("fast-forwards garbage travel when authoritative board state changes", () => {
+    const timeline = new PresentationTimeline();
+    timeline.schedule(
+      { id: "garbage-cancelled", kind: "garbage-rise", board: "left", rowCount: 4 },
+      0,
+    );
+    expect(timeline.frameAt(150).effects).toHaveLength(1);
+    timeline.cancelGarbage("left");
+    expect(timeline.frameAt(150).effects).toHaveLength(0);
   });
 
   it("drops Collapse cells before using the standard row-clear anticipation", () => {

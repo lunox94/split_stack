@@ -5,7 +5,10 @@ import {
   type PresentationScheduler,
 } from "../../src/app/presentation-router";
 import type { SimulationEffect } from "../../src/domain/simulation";
-import type { PresentationCue } from "../../src/render/presentation-timeline";
+import {
+  PresentationTimeline,
+  type PresentationCue,
+} from "../../src/render/presentation-timeline";
 
 class RecordingScheduler implements PresentationScheduler {
   readonly cues: PresentationCue[] = [];
@@ -16,6 +19,31 @@ class RecordingScheduler implements PresentationScheduler {
 }
 
 describe("PresentationRouter", () => {
+  it("returns the exact garbage plan scheduled on the visual timeline", () => {
+    const timeline = new PresentationTimeline();
+    const router = new PresentationRouter(timeline, () => 100);
+    const effect: SimulationEffect = {
+      kind: "garbage-rise",
+      rows: 4,
+      eventId: "garbage-rise-1",
+    };
+
+    const [scheduled] = router.consumeSimulationEffects([effect], "left");
+
+    expect(scheduled?.effect).toBe(effect);
+    expect(scheduled?.plan).toMatchObject({
+      requestedAtMs: 100,
+      startedAtMs: 100,
+      rowCount: 4,
+      cadence: { pressureMs: 80, rowIntervalMs: 110, rowLiftMs: 140 },
+    });
+    expect(timeline.frameAt(320).effects[0]).toMatchObject({
+      id: "garbage-rise-1",
+      garbageSettledRows: 1,
+    });
+    expect(router.consumeSimulationEffects([effect], "left")).toEqual([]);
+  });
+
   it("routes one authoritative local effect batch without duplicating impact events", () => {
     const scheduler = new RecordingScheduler();
     const router = new PresentationRouter(scheduler);
