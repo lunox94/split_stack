@@ -1,0 +1,174 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Split Stack ambient mesh Hollow Cross logo</title>
+  <desc>Eight equal cells on a strict five-by-five grid. The four outer tips are marked power cells and the center grid cell is intentionally empty.</desc>
+
+  <defs>
+    <!-- The construction grid uses 160 px cells and a 170 px pitch. -->
+    <clipPath id="cell-clip">
+      <rect width="160" height="160" rx="29"/>
+    </clipPath>
+
+    <linearGradient id="purple-face" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#dc8cff"/>
+      <stop offset="0.42" stop-color="#b95eeb"/>
+      <stop offset="1" stop-color="#7134a0"/>
+    </linearGradient>
+    <linearGradient id="green-face" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#86f3ad"/>
+      <stop offset="0.42" stop-color="#45dc80"/>
+      <stop offset="1" stop-color="#16864b"/>
+    </linearGradient>
+    <linearGradient id="red-face" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff95a0"/>
+      <stop offset="0.42" stop-color="#f05b6d"/>
+      <stop offset="1" stop-color="#a12642"/>
+    </linearGradient>
+    <linearGradient id="yellow-face" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fff27b"/>
+      <stop offset="0.42" stop-color="#f2d13f"/>
+      <stop offset="1" stop-color="#b07b10"/>
+    </linearGradient>
+
+    <linearGradient id="barrier-face" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#b9f8ff"/>
+      <stop offset="0.42" stop-color="#57e6ff"/>
+      <stop offset="1" stop-color="#168ba7"/>
+    </linearGradient>
+    <linearGradient id="garbage-face" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffb2aa"/>
+      <stop offset="0.42" stop-color="#ff6f61"/>
+      <stop offset="1" stop-color="#aa2c31"/>
+    </linearGradient>
+    <linearGradient id="blackout-face" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#cbbaff"/>
+      <stop offset="0.42" stop-color="#9b7bff"/>
+      <stop offset="1" stop-color="#5431a9"/>
+    </linearGradient>
+    <linearGradient id="column-face" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffd58b"/>
+      <stop offset="0.42" stop-color="#ffb33f"/>
+      <stop offset="1" stop-color="#a85a08"/>
+    </linearGradient>
+
+    <linearGradient id="face-shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.46"/>
+      <stop offset="0.36" stop-color="#ffffff" stop-opacity="0.08"/>
+      <stop offset="0.62" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="vignette" cx="50%" cy="48%" r="72%">
+      <stop offset="0.54" stop-color="#020713" stop-opacity="0"/>
+      <stop offset="1" stop-color="#01040c" stop-opacity="0.58"/>
+    </radialGradient>
+
+    <filter id="cell-shadow" x="-30%" y="-30%" width="160%" height="170%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#01040b" flood-opacity="0.72"/>
+    </filter>
+    <filter id="barrier-glow" x="-35%" y="-35%" width="170%" height="180%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#01040b" flood-opacity="0.72"/>
+      <feDropShadow dx="0" dy="0" stdDeviation="7" flood-color="#57e6ff" flood-opacity="0.28"/>
+    </filter>
+    <filter id="garbage-glow" x="-35%" y="-35%" width="170%" height="180%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#01040b" flood-opacity="0.72"/>
+      <feDropShadow dx="0" dy="0" stdDeviation="7" flood-color="#ff6f61" flood-opacity="0.24"/>
+    </filter>
+    <filter id="blackout-glow" x="-35%" y="-35%" width="170%" height="180%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#01040b" flood-opacity="0.72"/>
+      <feDropShadow dx="0" dy="0" stdDeviation="7" flood-color="#9b7bff" flood-opacity="0.26"/>
+    </filter>
+    <filter id="column-glow" x="-35%" y="-35%" width="170%" height="180%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#01040b" flood-opacity="0.72"/>
+      <feDropShadow dx="0" dy="0" stdDeviation="7" flood-color="#ffb33f" flood-opacity="0.26"/>
+    </filter>
+  </defs>
+
+  <image href="05a-ambient-mesh-background.png" xlink:href="05a-ambient-mesh-background.png" width="1024" height="1024" preserveAspectRatio="xMidYMid slice"/>
+  <rect width="1024" height="1024" fill="url(#vignette)"/>
+
+  <!-- Top marked Barrier cell: grid column 3, row 1. -->
+  <g transform="translate(432 92)" filter="url(#barrier-glow)">
+    <rect width="160" height="160" rx="29" fill="url(#barrier-face)" stroke="#c7fbff" stroke-width="4"/>
+    <rect x="6" y="6" width="148" height="148" rx="24" fill="none" stroke="#ffffff" stroke-opacity="0.40" stroke-width="3"/>
+    <rect x="7" y="7" width="146" height="72" rx="22" fill="url(#face-shine)"/>
+    <svg x="35" y="35" width="90" height="90" viewBox="0 0 64 64" overflow="visible">
+      <path d="M32 7 50 14v16c0 12-7 21-18 27C21 51 14 42 14 30V14zM32 17v31" fill="none" stroke="#030711" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M32 7 50 14v16c0 12-7 21-18 27C21 51 14 42 14 30V14zM32 17v31" fill="none" stroke="#fff8df" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </g>
+
+  <!-- Inner T cell: grid column 3, row 2. -->
+  <g transform="translate(432 262)" filter="url(#cell-shadow)">
+    <rect width="160" height="160" rx="29" fill="url(#purple-face)" stroke="#e3a6ff" stroke-width="4"/>
+    <g clip-path="url(#cell-clip)" stroke="#541873" stroke-width="10" stroke-linecap="round" opacity="0.48">
+      <path d="M40 22v36M22 40h36M120 22v36M102 40h36M40 102v36M22 120h36M120 102v36M102 120h36"/>
+    </g>
+    <rect x="6" y="6" width="148" height="148" rx="24" fill="none" stroke="#ffffff" stroke-opacity="0.36" stroke-width="3"/>
+    <rect x="7" y="7" width="146" height="72" rx="22" fill="url(#face-shine)"/>
+  </g>
+
+  <!-- Left marked Garbage Core cell: grid column 1, row 3. -->
+  <g transform="translate(92 432)" filter="url(#garbage-glow)">
+    <rect width="160" height="160" rx="29" fill="url(#garbage-face)" stroke="#ffc3bb" stroke-width="4"/>
+    <rect x="6" y="6" width="148" height="148" rx="24" fill="none" stroke="#ffffff" stroke-opacity="0.40" stroke-width="3"/>
+    <rect x="7" y="7" width="146" height="72" rx="22" fill="url(#face-shine)"/>
+    <svg x="35" y="35" width="90" height="90" viewBox="0 0 64 64" overflow="visible">
+      <path d="M14 14h36v36H14zM14 32h36M32 14v36" fill="none" stroke="#030711" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M14 14h36v36H14zM14 32h36M32 14v36" fill="none" stroke="#fff8df" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </g>
+
+  <!-- Inner S cell: grid column 2, row 3. -->
+  <g transform="translate(262 432)" filter="url(#cell-shadow)">
+    <rect width="160" height="160" rx="29" fill="url(#green-face)" stroke="#a5f8c3" stroke-width="4"/>
+    <g clip-path="url(#cell-clip)" fill="none" stroke="#0b773c" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" opacity="0.50">
+      <path d="M-12 28 24 80-12 132M36 28 72 80 36 132M84 28 120 80 84 132M132 28 168 80 132 132"/>
+    </g>
+    <rect x="6" y="6" width="148" height="148" rx="24" fill="none" stroke="#ffffff" stroke-opacity="0.36" stroke-width="3"/>
+    <rect x="7" y="7" width="146" height="72" rx="22" fill="url(#face-shine)"/>
+  </g>
+
+  <!-- The cell at grid column 3, row 3 is deliberately absent. -->
+
+  <!-- Inner Z cell: grid column 4, row 3. -->
+  <g transform="translate(602 432)" filter="url(#cell-shadow)">
+    <rect width="160" height="160" rx="29" fill="url(#red-face)" stroke="#ffacb5" stroke-width="4"/>
+    <g clip-path="url(#cell-clip)" fill="none" stroke="#9a1939" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" opacity="0.50">
+      <path d="M172 28 136 80 172 132M124 28 88 80 124 132M76 28 40 80 76 132M28 28-8 80 28 132"/>
+    </g>
+    <rect x="6" y="6" width="148" height="148" rx="24" fill="none" stroke="#ffffff" stroke-opacity="0.36" stroke-width="3"/>
+    <rect x="7" y="7" width="146" height="72" rx="22" fill="url(#face-shine)"/>
+  </g>
+
+  <!-- Right marked Blackout cell: grid column 5, row 3. -->
+  <g transform="translate(772 432)" filter="url(#blackout-glow)">
+    <rect width="160" height="160" rx="29" fill="url(#blackout-face)" stroke="#d6caff" stroke-width="4"/>
+    <rect x="6" y="6" width="148" height="148" rx="24" fill="none" stroke="#ffffff" stroke-opacity="0.40" stroke-width="3"/>
+    <rect x="7" y="7" width="146" height="72" rx="22" fill="url(#face-shine)"/>
+    <svg x="35" y="35" width="90" height="90" viewBox="0 0 64 64" overflow="visible">
+      <path d="M12 31c6-9 13-13 20-13s14 4 20 13c-6 9-13 13-20 13S18 40 12 31zM25 31a7 7 0 1 0 14 0 7 7 0 1 0-14 0M15 49 49 15" fill="none" stroke="#030711" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M12 31c6-9 13-13 20-13s14 4 20 13c-6 9-13 13-20 13S18 40 12 31zM25 31a7 7 0 1 0 14 0 7 7 0 1 0-14 0M15 49 49 15" fill="none" stroke="#fff8df" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </g>
+
+  <!-- Inner O cell: grid column 3, row 4. -->
+  <g transform="translate(432 602)" filter="url(#cell-shadow)">
+    <rect width="160" height="160" rx="29" fill="url(#yellow-face)" stroke="#fff59b" stroke-width="4"/>
+    <g clip-path="url(#cell-clip)" fill="#936111" opacity="0.48">
+      <circle cx="32" cy="32" r="9"/><circle cx="80" cy="32" r="9"/><circle cx="128" cy="32" r="9"/>
+      <circle cx="32" cy="80" r="9"/><circle cx="80" cy="80" r="9"/><circle cx="128" cy="80" r="9"/>
+      <circle cx="32" cy="128" r="9"/><circle cx="80" cy="128" r="9"/><circle cx="128" cy="128" r="9"/>
+    </g>
+    <rect x="6" y="6" width="148" height="148" rx="24" fill="none" stroke="#ffffff" stroke-opacity="0.36" stroke-width="3"/>
+    <rect x="7" y="7" width="146" height="72" rx="22" fill="url(#face-shine)"/>
+  </g>
+
+  <!-- Bottom marked Column Bomb cell: grid column 3, row 5. -->
+  <g transform="translate(432 772)" filter="url(#column-glow)">
+    <rect width="160" height="160" rx="29" fill="url(#column-face)" stroke="#ffe0a4" stroke-width="4"/>
+    <rect x="6" y="6" width="148" height="148" rx="24" fill="none" stroke="#ffffff" stroke-opacity="0.40" stroke-width="3"/>
+    <rect x="7" y="7" width="146" height="72" rx="22" fill="url(#face-shine)"/>
+    <svg x="35" y="35" width="90" height="90" viewBox="0 0 64 64" overflow="visible">
+      <path d="M32 8v31m-9-9 9 9 9-9M32 44a7 7 0 1 0 0 14 7 7 0 1 0 0-14z" fill="none" stroke="#030711" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M32 8v31m-9-9 9 9 9-9M32 44a7 7 0 1 0 0 14 7 7 0 1 0 0-14z" fill="none" stroke="#fff8df" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </g>
+</svg>
