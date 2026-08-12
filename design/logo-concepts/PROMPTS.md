@@ -4,20 +4,13 @@ The logo directions were generated with the built-in image tool. The in-game
 practice screenshot was the authoritative reference for tile colors, patterns,
 and embedded-special iconography.
 
-## Selected: Ambient Mesh Marked Cells
+## Selected: Solid Charcoal Marked Cells
 
-The selected logo uses image generation for the background plate only. Its
-production prompt was:
-
-> Create a square, edge-to-edge ambient-mesh app-icon background with a deep
-> midnight navy base, a restrained cyan atmospheric bloom in the upper-left,
-> a restrained violet atmospheric bloom in the lower-right, a quieter dark
-> center, gentle corner vignette, and exceptionally fine grain. Include no
-> logo, cross, blocks, cells, symbols, text, objects, frame, diagonal split,
-> seam, or central spotlight ring.
+The selected logo uses a uniform `#111827` charcoal-navy background constructed
+directly in the SVG master. No generated imagery is used in its background.
 
 `05b-ambient-mesh-cell-master.svg` deterministically composites the approved
-Hollow Cross over that plate:
+Hollow Cross over that solid color:
 
 - Eight equal 160 px cells occupy `(3,1)`, `(3,2)`, `(1,3)`, `(2,3)`,
   `(4,3)`, `(5,3)`, `(3,4)`, and `(3,5)` on a 170 px-pitch 5-by-5 grid.
@@ -28,6 +21,18 @@ Hollow Cross over that plate:
   restrained resting-state rim glow.
 - Marked tips remain Barrier at top, Garbage Core at left, Blackout at right,
   and Column Bomb at bottom.
+
+## Retained: Ambient Mesh Marked Cells
+
+The retained ambient-mesh background plate used the built-in image tool with
+this prompt:
+
+> Create a square, edge-to-edge ambient-mesh app-icon background with a deep
+> midnight navy base, a restrained cyan atmospheric bloom in the upper-left,
+> a restrained violet atmospheric bloom in the lower-right, a quieter dark
+> center, gentle corner vignette, and exceptionally fine grain. Include no
+> logo, cross, blocks, cells, symbols, text, objects, frame, diagonal split,
+> seam, or central spotlight ring.
 
 ## Retained directions: shared identity
 

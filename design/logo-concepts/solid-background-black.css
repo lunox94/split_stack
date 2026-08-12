@@ -1,0 +1,8 @@
+#ambient-background {
+  display: none;
+}
+
+#solid-background {
+  display: inline;
+  fill: #000000;
+}

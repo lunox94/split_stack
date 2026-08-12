@@ -81,8 +81,11 @@
     </filter>
   </defs>
 
-  <image href="05a-ambient-mesh-background.png" xlink:href="05a-ambient-mesh-background.png" width="1024" height="1024" preserveAspectRatio="xMidYMid slice"/>
-  <rect width="1024" height="1024" fill="url(#vignette)"/>
+  <g id="ambient-background" display="none">
+    <image href="05a-ambient-mesh-background.png" xlink:href="05a-ambient-mesh-background.png" width="1024" height="1024" preserveAspectRatio="xMidYMid slice"/>
+    <rect width="1024" height="1024" fill="url(#vignette)"/>
+  </g>
+  <rect id="solid-background" width="1024" height="1024" fill="#111827"/>
 
   <!-- Top marked Barrier cell: grid column 3, row 1. -->
   <g transform="translate(432 92)" filter="url(#barrier-glow)">
