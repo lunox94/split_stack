@@ -65,13 +65,15 @@ legibility treatment; they do not select a graphics tier. Old saved
 `reducedEffects: true` migrates to Very Low, while false or absent legacy values
 migrate to Auto.
 
-Each match deterministically selects one of four bundled 4-channel ProTracker
-modules and rotates the choice on rematches. A small local replay engine streams
-short PCM chunks into Web Audio, so the tracker music stays offline without
-retaining an entire decoded song in memory. Music pauses with the game and has
-independent mute and volume controls. A dedicated scheduler keeps roughly
-850 ms of PCM queued independently of rendering so expensive visual frames do
-not interrupt playback.
+Each game deterministically shuffles all four bundled 4-channel ProTracker
+modules into a playlist. Complete authored arrangements advance through an
+800 ms equal-power crossfade, and the same seeded order repeats after all four
+tracks. A small local replay engine streams short PCM chunks into Web Audio, so
+the tracker music stays offline without retaining entire decoded songs in
+memory. Music pauses with the game and has independent mute and volume controls;
+both pauses and muting preserve the exact audible playlist position. A dedicated
+scheduler keeps roughly 850 ms of PCM queued independently of rendering so
+expensive visual frames do not interrupt playback.
 
 Gameplay audio separates Music, SFX, and Callouts. SFX describe physical board
 events; Callouts announce local combo milestones and metered-power activation.

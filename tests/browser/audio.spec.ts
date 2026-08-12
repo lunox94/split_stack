@@ -20,6 +20,10 @@ test("Music, SFX, and Callouts remain independent and retain safe headroom", asy
     const { AudioEngine } = await import(
       /* @vite-ignore */ audioEngineModuleUrl
     ) as typeof import("../../src/audio/engine");
+    const musicModuleUrl = "/src/audio/music.ts";
+    const { MODULE_TRACKS } = await import(
+      /* @vite-ignore */ musicModuleUrl
+    ) as typeof import("../../src/audio/music");
     const cueModuleUrl = "/src/audio/cues.ts";
     const { CUE_DEFINITIONS } = await import(
       /* @vite-ignore */ cueModuleUrl
@@ -163,10 +167,10 @@ test("Music, SFX, and Callouts remain independent and retain safe headroom", asy
     const startMusic = async (
       engine: InstanceType<typeof AudioEngine>,
       context: CaptureContext,
-      rematchIndex = 0,
+      track = MODULE_TRACKS[0],
     ): Promise<void> => {
       engine.setMusicMuted(false);
-      engine.startMusic("collapse-continuity", rematchIndex);
+      engine.startMusicProgram({ tracks: [track!] });
       for (let attempt = 0; attempt < 100 && context.bufferSourceCount === 0; attempt += 1) {
         await new Promise((resolve) => window.setTimeout(resolve, 10));
       }
@@ -258,8 +262,8 @@ test("Music, SFX, and Callouts remain independent and retain safe headroom", asy
         engine.playCallout("combo-5-plus");
       }, 1),
       musicOnly: await render((engine, context) => startMusic(engine, context)),
-      musicTracks: await Promise.all([0, 1, 2, 3].map((rematchIndex) =>
-        render((engine, context) => startMusic(engine, context, rematchIndex))
+      musicTracks: await Promise.all(MODULE_TRACKS.map((track) =>
+        render((engine, context) => startMusic(engine, context, track))
       )),
       musicWithCollapse: await render(async (engine, context) => {
         await startMusic(engine, context);

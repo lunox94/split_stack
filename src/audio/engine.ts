@@ -49,6 +49,8 @@ const MUSIC_CHUNK_SAMPLES = 8_192;
 const MUSIC_LEAD_SECONDS = 0.025;
 const MUSIC_SCHEDULE_AHEAD_SECONDS = 0.85;
 const MUSIC_SCHEDULER_INTERVAL_MS = 100;
+const MUSIC_CROSSFADE_SECONDS = 0.8;
+const MUSIC_STOP_FADE_MS = 300;
 const EFFECTS_MAKEUP_GAIN = 6;
 const CALLOUTS_MAKEUP_GAIN = 4.4;
 const RECORDED_CALLOUT_GAIN = 1.18;
@@ -86,6 +88,25 @@ interface CalloutRequest {
 interface MusicDuckRequest {
   readonly amount: number;
   readonly timer: ReturnType<typeof setTimeout>;
+}
+
+interface MusicCursorSnapshot {
+  readonly trackIndex: number;
+  readonly positionSamples: number;
+  readonly transitionTrackIndex: number | null;
+  readonly transitionPositionSamples: number;
+}
+
+interface MusicRenderSpan extends MusicCursorSnapshot {
+  readonly offsetSamples: number;
+  readonly lengthSamples: number;
+}
+
+interface ScheduledMusicChunk {
+  readonly startsAt: number;
+  readonly endsAt: number;
+  readonly spans: readonly MusicRenderSpan[];
+  readonly end: MusicCursorSnapshot;
 }
 
 function effectsLimiterCurve(): Float32Array<ArrayBuffer> {
@@ -154,6 +175,7 @@ export class AudioEngine {
   readonly #moduleLoader: ModuleLoader;
   readonly #calloutLoader: CalloutLoader;
   readonly #moduleCache = new Map<string, Promise<ArrayBuffer>>();
+  readonly #loadedModules = new Map<string, ArrayBuffer>();
   readonly #calloutBufferCache = new Map<string, Promise<AudioBuffer>>();
   #context: AudioContext | null = null;
   #effectsBus: GainNode | null = null;
@@ -170,17 +192,24 @@ export class AudioEngine {
   #calloutsMuted = false;
   #calloutsVolume = 0.85;
   #musicMix = 1;
+  #musicTrackIndex = 0;
   #musicTrack: ModuleTrack | null = null;
   #musicProgram: MusicProgram | null = null;
   #musicReplay: ModReplay | null = null;
+  #nextMusicTrackIndex: number | null = null;
+  #nextMusicReplay: ModReplay | null = null;
+  #musicTransitioning = false;
+  readonly #failedMusicTracks = new Set<ModuleTrack["id"]>();
   #musicLoadGeneration = 0;
   #musicScheduledUntilSeconds = 0;
   #musicAnchorTimeSeconds: number | null = null;
-  #musicAnchorSample = 0;
   #musicPaused = false;
   #musicResumeRequested = false;
+  #musicStopping = false;
   readonly #musicSources = new Set<AudioBufferSourceNode>();
+  readonly #scheduledMusicChunks: ScheduledMusicChunk[] = [];
   #musicSchedulerTimer: ReturnType<typeof setInterval> | null = null;
+  #musicStopTimer: ReturnType<typeof setTimeout> | null = null;
   readonly #activeSfxTones = new Set<ActiveTone>();
   readonly #activeCalloutTones = new Set<ActiveTone>();
   readonly #activeCalloutSamples = new Set<ActiveCalloutSample>();
@@ -486,16 +515,23 @@ export class AudioEngine {
   }
 
   startMusicProgram(program: MusicProgram): ModuleTrack {
-    this.stopMusic();
+    this.#stopMusicImmediately();
     const track = program.tracks[0];
-    this.#musicMix = track.mixGain;
     const generation = ++this.#musicLoadGeneration;
     this.#musicProgram = program;
+    this.#musicMix = 1;
+    this.#musicTrackIndex = 0;
     this.#musicTrack = track;
+    this.#musicReplay = null;
+    this.#nextMusicTrackIndex = null;
+    this.#nextMusicReplay = null;
+    this.#musicTransitioning = false;
+    this.#failedMusicTracks.clear();
     this.#musicPaused = false;
     this.#musicResumeRequested = false;
+    this.#musicStopping = false;
     this.#applyMusicVolume();
-    void this.#loadMusic(track, generation);
+    void this.#loadCurrentMusicTrack(0, generation);
     return track;
   }
 
@@ -509,33 +545,38 @@ export class AudioEngine {
   updateMusic(_intensity: MusicIntensity = "calm"): void {
     const context = this.#context;
     const musicBus = this.#musicBus;
-    const replay = this.#musicReplay;
     if (
       context === null ||
       musicBus === null ||
-      replay === null ||
+      this.#musicReplay === null ||
       this.#musicMuted ||
       context.state !== "running" ||
-      this.#musicPaused
+      this.#musicPaused ||
+      this.#musicStopping
     ) {
       return;
     }
 
     const now = context.currentTime;
+    while (
+      this.#scheduledMusicChunks.length > 0 &&
+      this.#scheduledMusicChunks[0]!.endsAt < now
+    ) {
+      this.#scheduledMusicChunks.shift();
+    }
     if (this.#musicScheduledUntilSeconds <= now) {
       this.#musicScheduledUntilSeconds = now + MUSIC_LEAD_SECONDS;
       this.#musicAnchorTimeSeconds = this.#musicScheduledUntilSeconds;
-      this.#musicAnchorSample = replay.positionSamples;
     }
     const horizon = now + MUSIC_SCHEDULE_AHEAD_SECONDS;
     while (this.#musicScheduledUntilSeconds < horizon) {
       this.#scheduleMusicChunk(
         context,
         musicBus,
-        replay,
         this.#musicScheduledUntilSeconds,
       );
-      this.#musicScheduledUntilSeconds += MUSIC_CHUNK_SAMPLES / replay.samplingRate;
+      this.#musicScheduledUntilSeconds +=
+        MUSIC_CHUNK_SAMPLES / this.#musicReplay.samplingRate;
     }
   }
 
@@ -562,17 +603,46 @@ export class AudioEngine {
 
   stopMusic(): void {
     this.clearCallouts();
+    if (this.#musicStopping) return;
+    if (
+      this.#musicTrack === null ||
+      this.#musicMuted ||
+      this.#musicPaused ||
+      this.#context === null ||
+      this.#musicBus === null
+    ) {
+      this.#stopMusicImmediately();
+      return;
+    }
     this.#stopMusicScheduler();
+    this.#musicStopping = true;
+    this.#applyMusicVolume(0.05);
+    this.#musicStopTimer = setTimeout(
+      () => this.#stopMusicImmediately(),
+      MUSIC_STOP_FADE_MS,
+    );
+  }
+
+  #stopMusicImmediately(): void {
+    this.clearCallouts();
+    if (this.#musicStopTimer !== null) clearTimeout(this.#musicStopTimer);
+    this.#musicStopTimer = null;
+    this.#musicStopping = false;
     this.#musicLoadGeneration += 1;
     this.#musicProgram = null;
+    this.#musicTrackIndex = 0;
     this.#musicTrack = null;
     this.#musicReplay = null;
+    this.#nextMusicTrackIndex = null;
+    this.#nextMusicReplay = null;
+    this.#musicTransitioning = false;
+    this.#failedMusicTracks.clear();
     this.#musicPaused = false;
     this.#musicResumeRequested = false;
     this.#musicScheduledUntilSeconds = 0;
     this.#musicAnchorTimeSeconds = null;
-    this.#musicAnchorSample = 0;
     this.#stopMusicSources();
+    this.#scheduledMusicChunks.length = 0;
     this.#clearMusicDucks();
   }
 
@@ -596,7 +666,7 @@ export class AudioEngine {
     const context = this.#context;
     this.stopGlitchPreviewLoop();
     this.clearCallouts();
-    this.stopMusic();
+    this.#stopMusicImmediately();
     this.#context = null;
     this.#effectsBus = null;
     this.#effectsMakeup = null;
@@ -608,6 +678,7 @@ export class AudioEngine {
     for (const active of [...this.#activeSfxTones]) this.#finishTone(active, true);
     this.#lastSfxAt.clear();
     this.#moduleCache.clear();
+    this.#loadedModules.clear();
     this.#calloutBufferCache.clear();
     if (context !== null && context.state !== "closed") await context.close();
   }
@@ -625,7 +696,7 @@ export class AudioEngine {
       (amount, request) => Math.min(amount, request.amount),
       1,
     );
-    const value = this.#musicMuted || this.#musicPaused
+    const value = this.#musicMuted || this.#musicPaused || this.#musicStopping
       ? 0
       : musicGain(this.#musicVolume) * this.#musicMix * duck;
     this.#musicBus.gain.cancelScheduledValues(this.#context.currentTime);
@@ -668,36 +739,122 @@ export class AudioEngine {
     return pending;
   }
 
-  async #loadMusic(track: ModuleTrack, generation: number): Promise<void> {
+  async #loadCurrentMusicTrack(index: number, generation: number): Promise<void> {
+    const program = this.#musicProgram;
+    const track = program?.tracks[index];
+    if (program === null || track === undefined) return;
     try {
       const data = await this.#loadModule(track.assetUrl);
+      if (generation !== this.#musicLoadGeneration || this.#musicProgram !== program) return;
+      const samplingRate = this.#context?.sampleRate ?? DEFAULT_MUSIC_SAMPLE_RATE;
+      this.#musicTrackIndex = index;
+      this.#musicTrack = track;
+      this.#musicReplay = new ModReplay(data, samplingRate);
+      this.#nextMusicTrackIndex = null;
+      this.#nextMusicReplay = null;
+      this.#musicTransitioning = false;
+      this.#musicScheduledUntilSeconds = 0;
+      this.#musicAnchorTimeSeconds = null;
+      this.#prepareNextMusicTrack(generation);
+      this.#startMusicScheduler();
+    } catch {
+      if (generation !== this.#musicLoadGeneration || this.#musicProgram !== program) return;
+      this.#evictModule(track.assetUrl);
+      this.#failedMusicTracks.add(track.id);
+      const nextIndex = this.#nextPlayableTrackIndex(index);
+      if (nextIndex === null || nextIndex === index) {
+        // Music is optional. Effects and gameplay remain available if every
+        // bundled module fails on a particular host.
+        this.#musicTrack = null;
+        this.#musicReplay = null;
+        return;
+      }
+      await this.#loadCurrentMusicTrack(nextIndex, generation);
+    }
+  }
+
+  #prepareNextMusicTrack(generation: number): void {
+    const program = this.#musicProgram;
+    const currentIndex = this.#musicTrackIndex;
+    const nextIndex = this.#nextPlayableTrackIndex(currentIndex);
+    if (program === null || nextIndex === null || nextIndex === currentIndex) {
+      this.#nextMusicTrackIndex = null;
+      this.#nextMusicReplay = null;
+      return;
+    }
+    const track = program.tracks[nextIndex];
+    if (track === undefined) return;
+    this.#nextMusicTrackIndex = nextIndex;
+    this.#nextMusicReplay = null;
+    const install = (data: ArrayBuffer): void => {
       if (
         generation !== this.#musicLoadGeneration ||
-        this.#musicTrack?.id !== track.id
+        this.#musicProgram !== program ||
+        this.#musicTrackIndex !== currentIndex ||
+        this.#nextMusicTrackIndex !== nextIndex
       ) {
         return;
       }
       const samplingRate = this.#context?.sampleRate ?? DEFAULT_MUSIC_SAMPLE_RATE;
-      this.#musicReplay = new ModReplay(data, samplingRate);
-      this.#musicScheduledUntilSeconds = 0;
-      this.#musicAnchorTimeSeconds = null;
-      this.#startMusicScheduler();
-    } catch {
-      // Music is optional. Effects and gameplay remain available if a module
-      // cannot be fetched or decoded on a particular host.
-      if (generation === this.#musicLoadGeneration) this.#musicReplay = null;
+      try {
+        this.#nextMusicReplay = new ModReplay(data, samplingRate);
+      } catch {
+        this.#rejectNextMusicTrack(track, generation);
+      }
+    };
+    const loaded = this.#loadedModules.get(track.assetUrl);
+    if (loaded !== undefined) {
+      install(loaded);
+      return;
     }
+    void this.#loadModule(track.assetUrl).then(install).catch(() => {
+      if (
+        generation === this.#musicLoadGeneration &&
+        this.#musicProgram === program &&
+        this.#musicTrackIndex === currentIndex &&
+        this.#nextMusicTrackIndex === nextIndex
+      ) {
+        this.#rejectNextMusicTrack(track, generation);
+      }
+    });
+  }
+
+  #rejectNextMusicTrack(track: ModuleTrack, generation: number): void {
+    this.#evictModule(track.assetUrl);
+    this.#failedMusicTracks.add(track.id);
+    this.#nextMusicTrackIndex = null;
+    this.#nextMusicReplay = null;
+    this.#prepareNextMusicTrack(generation);
+  }
+
+  #nextPlayableTrackIndex(afterIndex: number): number | null {
+    const program = this.#musicProgram;
+    if (program === null) return null;
+    for (let offset = 1; offset <= program.tracks.length; offset += 1) {
+      const index = (afterIndex + offset) % program.tracks.length;
+      const track = program.tracks[index];
+      if (track !== undefined && !this.#failedMusicTracks.has(track.id)) return index;
+    }
+    return null;
   }
 
   #loadModule(assetUrl: string): Promise<ArrayBuffer> {
     const cached = this.#moduleCache.get(assetUrl);
     if (cached !== undefined) return cached;
-    const pending = this.#moduleLoader(assetUrl).catch((error: unknown) => {
-      this.#moduleCache.delete(assetUrl);
+    const pending = this.#moduleLoader(assetUrl).then((data) => {
+      this.#loadedModules.set(assetUrl, data);
+      return data;
+    }).catch((error: unknown) => {
+      this.#evictModule(assetUrl);
       throw error;
     });
     this.#moduleCache.set(assetUrl, pending);
     return pending;
+  }
+
+  #evictModule(assetUrl: string): void {
+    this.#moduleCache.delete(assetUrl);
+    this.#loadedModules.delete(assetUrl);
   }
 
   #resumeModuleMusic(): void {
@@ -727,7 +884,8 @@ export class AudioEngine {
       context.state !== "running" ||
       this.#musicReplay === null ||
       this.#musicMuted ||
-      this.#musicPaused
+      this.#musicPaused ||
+      this.#musicStopping
     ) {
       return;
     }
@@ -747,23 +905,88 @@ export class AudioEngine {
   #haltScheduledMusic(): void {
     const context = this.#context;
     const replay = this.#musicReplay;
-    const anchorTime = this.#musicAnchorTimeSeconds;
-    if (context !== null && replay !== null && anchorTime !== null) {
+    if (context !== null && replay !== null && this.#scheduledMusicChunks.length > 0) {
+      const first = this.#scheduledMusicChunks[0]!;
+      const last = this.#scheduledMusicChunks[this.#scheduledMusicChunks.length - 1]!;
       const audibleUntil = Math.min(
-        Math.max(context.currentTime, anchorTime),
-        this.#musicScheduledUntilSeconds,
+        Math.max(context.currentTime, first.startsAt),
+        last.endsAt,
       );
+      const chunk = this.#scheduledMusicChunks.find((candidate) =>
+        candidate.endsAt >= audibleUntil
+      ) ?? last;
       const elapsedSamples = Math.max(
         0,
-        Math.round((audibleUntil - anchorTime) * replay.samplingRate),
+        Math.min(
+          MUSIC_CHUNK_SAMPLES,
+          Math.round((audibleUntil - chunk.startsAt) * replay.samplingRate),
+        ),
       );
-      replay.seek(
-        (this.#musicAnchorSample + elapsedSamples) % replay.durationSamples,
+      const span = chunk.spans.find((candidate) =>
+        elapsedSamples < candidate.offsetSamples + candidate.lengthSamples
       );
+      if (span === undefined) {
+        this.#restoreMusicCursor(chunk.end);
+      } else {
+        const offset = Math.max(0, elapsedSamples - span.offsetSamples);
+        this.#restoreMusicCursor({
+          trackIndex: span.trackIndex,
+          positionSamples: span.positionSamples + offset,
+          transitionTrackIndex: span.transitionTrackIndex,
+          transitionPositionSamples: span.transitionPositionSamples + offset,
+        });
+      }
     }
     this.#stopMusicSources();
+    this.#scheduledMusicChunks.length = 0;
     this.#musicScheduledUntilSeconds = 0;
     this.#musicAnchorTimeSeconds = null;
+  }
+
+  #captureMusicCursor(): MusicCursorSnapshot {
+    return {
+      trackIndex: this.#musicTrackIndex,
+      positionSamples: this.#musicReplay?.positionSamples ?? 0,
+      transitionTrackIndex: this.#musicTransitioning
+        ? this.#nextMusicTrackIndex
+        : null,
+      transitionPositionSamples: this.#musicTransitioning
+        ? this.#nextMusicReplay?.positionSamples ?? 0
+        : 0,
+    };
+  }
+
+  #restoreMusicCursor(cursor: MusicCursorSnapshot): void {
+    const program = this.#musicProgram;
+    const track = program?.tracks[cursor.trackIndex];
+    const data = track === undefined
+      ? undefined
+      : this.#loadedModules.get(track.assetUrl);
+    if (program === null || track === undefined || data === undefined) return;
+    const samplingRate = this.#context?.sampleRate ?? DEFAULT_MUSIC_SAMPLE_RATE;
+    const replay = new ModReplay(data, samplingRate);
+    replay.seek(cursor.positionSamples);
+    this.#musicTrackIndex = cursor.trackIndex;
+    this.#musicTrack = track;
+    this.#musicReplay = replay;
+    this.#nextMusicTrackIndex = null;
+    this.#nextMusicReplay = null;
+    this.#musicTransitioning = false;
+    if (cursor.transitionTrackIndex !== null) {
+      const nextTrack = program.tracks[cursor.transitionTrackIndex];
+      const nextData = nextTrack === undefined
+        ? undefined
+        : this.#loadedModules.get(nextTrack.assetUrl);
+      if (nextTrack !== undefined && nextData !== undefined) {
+        const nextReplay = new ModReplay(nextData, samplingRate);
+        nextReplay.seek(cursor.transitionPositionSamples);
+        this.#nextMusicTrackIndex = cursor.transitionTrackIndex;
+        this.#nextMusicReplay = nextReplay;
+        this.#musicTransitioning = true;
+        return;
+      }
+    }
+    this.#prepareNextMusicTrack(this.#musicLoadGeneration);
   }
 
   #playDefinition(
@@ -995,12 +1218,122 @@ export class AudioEngine {
   #scheduleMusicChunk(
     context: AudioContext,
     musicBus: GainNode,
-    replay: ModReplay,
     startsAt: number,
   ): void {
+    const replay = this.#musicReplay;
+    const program = this.#musicProgram;
+    if (replay === null || program === null) return;
     const left = new Float32Array(MUSIC_CHUNK_SAMPLES);
     const right = new Float32Array(MUSIC_CHUNK_SAMPLES);
-    replay.render(left, right);
+    const spans: MusicRenderSpan[] = [];
+    let offset = 0;
+    while (offset < MUSIC_CHUNK_SAMPLES && this.#musicReplay !== null) {
+      const currentReplay = this.#musicReplay;
+      const currentTrack = program.tracks[this.#musicTrackIndex];
+      if (currentTrack === undefined) break;
+      const crossfadeSamples = Math.min(
+        currentReplay.durationSamples,
+        Math.round(MUSIC_CROSSFADE_SECONDS * currentReplay.samplingRate),
+      );
+      const crossfadeStart = currentReplay.durationSamples - crossfadeSamples;
+      const nextReady =
+        this.#nextMusicTrackIndex !== null &&
+        this.#nextMusicTrackIndex !== this.#musicTrackIndex &&
+        this.#nextMusicReplay !== null;
+      if (
+        !this.#musicTransitioning &&
+        nextReady &&
+        currentReplay.positionSamples >= crossfadeStart
+      ) {
+        this.#musicTransitioning = true;
+      }
+
+      if (!this.#musicTransitioning) {
+        const boundary = nextReady ? crossfadeStart : currentReplay.durationSamples;
+        const count = Math.min(
+          MUSIC_CHUNK_SAMPLES - offset,
+          Math.max(0, boundary - currentReplay.positionSamples),
+        );
+        if (count === 0) {
+          if (nextReady) {
+            this.#musicTransitioning = true;
+          } else {
+            currentReplay.reset();
+          }
+          continue;
+        }
+        spans.push({
+          offsetSamples: offset,
+          lengthSamples: count,
+          trackIndex: this.#musicTrackIndex,
+          positionSamples: currentReplay.positionSamples,
+          transitionTrackIndex: null,
+          transitionPositionSamples: 0,
+        });
+        const end = offset + count;
+        currentReplay.render(left.subarray(offset, end), right.subarray(offset, end));
+        for (let sample = offset; sample < end; sample += 1) {
+          left[sample] = (left[sample] ?? 0) * currentTrack.mixGain;
+          right[sample] = (right[sample] ?? 0) * currentTrack.mixGain;
+        }
+        offset = end;
+        continue;
+      }
+
+      const nextReplay = this.#nextMusicReplay;
+      const nextTrackIndex = this.#nextMusicTrackIndex;
+      const nextTrack = nextTrackIndex === null
+        ? undefined
+        : program.tracks[nextTrackIndex];
+      if (nextReplay === null || nextTrackIndex === null || nextTrack === undefined) {
+        this.#musicTransitioning = false;
+        continue;
+      }
+      const count = Math.min(
+        MUSIC_CHUNK_SAMPLES - offset,
+        currentReplay.durationSamples - currentReplay.positionSamples,
+      );
+      const currentStart = currentReplay.positionSamples;
+      const nextStart = nextReplay.positionSamples;
+      spans.push({
+        offsetSamples: offset,
+        lengthSamples: count,
+        trackIndex: this.#musicTrackIndex,
+        positionSamples: currentStart,
+        transitionTrackIndex: nextTrackIndex,
+        transitionPositionSamples: nextStart,
+      });
+      const currentLeft = new Float32Array(count);
+      const currentRight = new Float32Array(count);
+      const nextLeft = new Float32Array(count);
+      const nextRight = new Float32Array(count);
+      currentReplay.render(currentLeft, currentRight);
+      nextReplay.render(nextLeft, nextRight);
+      for (let sample = 0; sample < count; sample += 1) {
+        const progress = Math.max(
+          0,
+          Math.min(1, (currentStart - crossfadeStart + sample) / crossfadeSamples),
+        );
+        const outgoing = Math.cos(progress * Math.PI / 2) * currentTrack.mixGain;
+        const incoming = Math.sin(progress * Math.PI / 2) * nextTrack.mixGain;
+        left[offset + sample] =
+          (currentLeft[sample] ?? 0) * outgoing +
+          (nextLeft[sample] ?? 0) * incoming;
+        right[offset + sample] =
+          (currentRight[sample] ?? 0) * outgoing +
+          (nextRight[sample] ?? 0) * incoming;
+      }
+      offset += count;
+      if (count === currentReplay.durationSamples - currentStart) {
+        this.#musicTrackIndex = nextTrackIndex;
+        this.#musicTrack = nextTrack;
+        this.#musicReplay = nextReplay;
+        this.#nextMusicTrackIndex = null;
+        this.#nextMusicReplay = null;
+        this.#musicTransitioning = false;
+        this.#prepareNextMusicTrack(this.#musicLoadGeneration);
+      }
+    }
     const buffer = context.createBuffer(
       2,
       MUSIC_CHUNK_SAMPLES,
@@ -1011,9 +1344,18 @@ export class AudioEngine {
     const source = context.createBufferSource();
     source.buffer = buffer;
     source.connect(musicBus);
+    const chunk: ScheduledMusicChunk = {
+      startsAt,
+      endsAt: startsAt + MUSIC_CHUNK_SAMPLES / replay.samplingRate,
+      spans,
+      end: this.#captureMusicCursor(),
+    };
+    this.#scheduledMusicChunks.push(chunk);
     this.#musicSources.add(source);
     source.onended = () => {
       this.#musicSources.delete(source);
+      const chunkIndex = this.#scheduledMusicChunks.indexOf(chunk);
+      if (chunkIndex >= 0) this.#scheduledMusicChunks.splice(chunkIndex, 1);
       disconnectNode(source);
     };
     source.start(startsAt);

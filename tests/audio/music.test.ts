@@ -7,27 +7,26 @@ import {
 } from "../../src/audio/music";
 
 describe("tracker match music", () => {
-  it("represents current playback as a one-track music program", () => {
+  it("builds a deterministic playlist containing every bundled track once", () => {
     const program = musicProgramForMatch("shared-match-seed", 2);
 
-    expect(program.tracks).toHaveLength(1);
+    expect(program.tracks).toHaveLength(MODULE_TRACKS.length);
+    expect(new Set(program.tracks.map((track) => track.id))).toEqual(
+      new Set(MODULE_TRACKS.map((track) => track.id)),
+    );
+    expect(musicProgramForMatch("shared-match-seed", 2)).toEqual(program);
     expect(program.tracks[0]).toBe(selectTrackForMatch("shared-match-seed", 2));
   });
 
-  it("selects all four supplied modules deterministically before repeating", () => {
-    const firstCycle = [0, 1, 2, 3].map(
-      (rematch) => selectTrackForMatch("shared-match-seed", rematch).id,
-    );
-
+  it("keeps the complete supplied module catalog available for every game", () => {
     expect(MODULE_TRACKS.map((track) => [track.id, track.title])).toEqual([
       ["bloody-tears", "Bloody Tears"],
       ["mountain-king", "In the Hall of the Mountain King"],
       ["bumblebee", "Flight of the Bumblebee"],
       ["popcorn", "Popcorn"],
     ]);
-    expect(new Set(firstCycle).size).toBe(4);
-    expect(selectTrackForMatch("shared-match-seed", 0).id).toBe(firstCycle[0]);
-    expect(selectTrackForMatch("shared-match-seed", 4).id).toBe(firstCycle[0]);
+    expect(musicProgramForMatch("shared-match-seed", 0).tracks.map(({ id }) => id))
+      .not.toEqual(musicProgramForMatch("shared-match-seed", 1).tracks.map(({ id }) => id));
   });
 
   it("calibrates rendered tracker loudness to the quietest bundled module", () => {

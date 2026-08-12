@@ -5197,7 +5197,7 @@ test("load and Practice make no external HTTP requests", async ({ page }) => {
   expect(externalRequests).toEqual([]);
 });
 
-test("menu actions stay silent until gameplay requests a track", async ({ page }) => {
+test("menu actions stay silent until gameplay requests its playlist", async ({ page }) => {
   const moduleRequests: string[] = [];
   page.on("request", (request) => {
     if (new URL(request.url()).pathname.endsWith(".mod")) {
@@ -5217,7 +5217,7 @@ test("menu actions stay silent until gameplay requests a track", async ({ page }
   expect(moduleRequests).toEqual([]);
 
   await page.getByRole("button", { name: "Practice", exact: true }).click();
-  await expect.poll(() => moduleRequests.length).toBe(1);
+  await expect.poll(() => moduleRequests.length).toBe(2);
 });
 
 test("Practice pauses for a real WebGL context loss and survives restoration", async ({ page }) => {

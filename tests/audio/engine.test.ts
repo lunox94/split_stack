@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 
 import { AudioEngine } from "../../src/audio/engine";
 import { MODULE_TRACKS } from "../../src/audio/music";
+import { ModReplay } from "../../src/audio/mod-replay";
 import { planGarbageSequence } from "../../src/app/garbage-sequence";
 import {
   CALLOUT_DEFINITIONS,
@@ -248,7 +249,7 @@ describe("audio engine lifecycle", () => {
     await engine.dispose();
   });
 
-  it("applies the selected tracker track calibration below the user volume", async () => {
+  it("applies tracker calibration in streamed PCM below the shared user volume", async () => {
     const context = fakeAudioContext();
     const engine = new AudioEngine({
       contextFactory: () => context,
@@ -259,12 +260,184 @@ describe("audio engine lifecycle", () => {
     vi.mocked(musicBus?.gain.setTargetAtTime).mockClear();
 
     engine.startMusicProgram({ tracks: [MODULE_TRACKS[1]!] });
+    await vi.waitFor(() => expect(context.createBuffer).toHaveBeenCalled());
 
     expect(musicBus?.gain.setTargetAtTime).toHaveBeenLastCalledWith(
-      0.45 ** 2 * 0.6774,
+      0.45 ** 2,
       context.currentTime,
       0.02,
     );
+    const expectedLeft = new Float32Array(8_192);
+    const expectedRight = new Float32Array(8_192);
+    new ModReplay(trackerModule(), context.sampleRate).render(expectedLeft, expectedRight);
+    const rendered = vi.mocked(context.createBuffer).mock.results[0]?.value;
+    expect(rendered).toBeDefined();
+    for (const sample of [64, 1_024, 4_096, 8_000]) {
+      expect(rendered?.getChannelData(0)[sample]).toBeCloseTo(
+        (expectedLeft[sample] ?? 0) * 0.6774,
+        6,
+      );
+      expect(rendered?.getChannelData(1)[sample]).toBeCloseTo(
+        (expectedRight[sample] ?? 0) * 0.6774,
+        6,
+      );
+    }
+    await engine.dispose();
+  });
+
+  it("preloads one successor and advances through the fixed playlist order", async () => {
+    const context = fakeAudioContext();
+    const loader = vi.fn(async (_assetUrl: string) => trackerModule());
+    const engine = new AudioEngine({
+      contextFactory: () => context,
+      moduleLoader: loader,
+    });
+    expect(await engine.unlock()).toBe(true);
+    const tracks = [MODULE_TRACKS[0]!, MODULE_TRACKS[1]!, MODULE_TRACKS[2]!] as const;
+
+    engine.startMusicProgram({ tracks });
+    await vi.waitFor(() => expect(loader).toHaveBeenCalledTimes(2));
+    expect(loader.mock.calls.map(([assetUrl]) => assetUrl)).toEqual([
+      tracks[0].assetUrl,
+      tracks[1].assetUrl,
+    ]);
+
+    for (let step = 0; step < 130 && loader.mock.calls.length < 3; step += 1) {
+      context.currentTime += 0.75;
+      engine.updateMusic();
+      await Promise.resolve();
+    }
+    await vi.waitFor(() => expect(loader).toHaveBeenCalledTimes(3));
+    expect(loader.mock.calls[2]?.[0]).toBe(tracks[2].assetUrl);
+
+    const scheduledBeforePause = vi.mocked(context.createBufferSource).mock.calls.length;
+    const chunkSeconds = 8_192 / context.sampleRate;
+    const activeSourceIndex = vi.mocked(context.createBufferSource).mock.results.findIndex(
+      ({ value: source }) => {
+        const startsAt = vi.mocked(source.start).mock.calls[0]?.[0] ?? -1;
+        return startsAt <= context.currentTime && startsAt + chunkSeconds > context.currentTime;
+      },
+    );
+    expect(activeSourceIndex).toBeGreaterThanOrEqual(0);
+    const activeSource = vi.mocked(context.createBufferSource).mock.results[
+      activeSourceIndex
+    ]?.value;
+    const activeStartsAt = vi.mocked(activeSource?.start).mock.calls[0]?.[0] ?? 0;
+    const activeOffset = Math.round(
+      (context.currentTime - activeStartsAt) * context.sampleRate,
+    );
+    const activeBuffer = vi.mocked(context.createBuffer).mock.results[
+      activeSourceIndex
+    ]?.value;
+
+    engine.pauseMusic();
+    engine.resumeMusic();
+    await vi.waitFor(() => {
+      expect(vi.mocked(context.createBufferSource).mock.calls.length)
+        .toBeGreaterThan(scheduledBeforePause);
+    });
+    const resumedBuffer = vi.mocked(context.createBuffer).mock.results[
+      scheduledBeforePause
+    ]?.value;
+    const comparableSamples = Math.min(1_024, 8_192 - activeOffset - 64);
+    expect(comparableSamples).toBeGreaterThan(256);
+    expect(resumedBuffer?.getChannelData(0).slice(64, 64 + comparableSamples)).toEqual(
+      activeBuffer?.getChannelData(0).slice(
+        activeOffset + 64,
+        activeOffset + 64 + comparableSamples,
+      ),
+    );
+    expect(resumedBuffer?.getChannelData(1).slice(64, 64 + comparableSamples)).toEqual(
+      activeBuffer?.getChannelData(1).slice(
+        activeOffset + 64,
+        activeOffset + 64 + comparableSamples,
+      ),
+    );
+    await engine.dispose();
+  });
+
+  it("quarantines a failed successor for one game and retries it next game", async () => {
+    const context = fakeAudioContext();
+    const failedTrack = MODULE_TRACKS[1]!;
+    const loader = vi.fn(async (assetUrl: string) => {
+      if (assetUrl === failedTrack.assetUrl) throw new Error("broken module");
+      return trackerModule();
+    });
+    const engine = new AudioEngine({
+      contextFactory: () => context,
+      moduleLoader: loader,
+    });
+    expect(await engine.unlock()).toBe(true);
+    const tracks = [MODULE_TRACKS[0]!, failedTrack, MODULE_TRACKS[2]!] as const;
+
+    engine.startMusicProgram({ tracks });
+    await vi.waitFor(() => {
+      expect(loader.mock.calls.filter(([assetUrl]) => assetUrl === failedTrack.assetUrl))
+        .toHaveLength(1);
+      expect(loader).toHaveBeenCalledWith(tracks[2].assetUrl);
+    });
+    for (let step = 0; step < 130; step += 1) {
+      context.currentTime += 0.75;
+      engine.updateMusic();
+      await Promise.resolve();
+    }
+    expect(loader.mock.calls.filter(([assetUrl]) => assetUrl === failedTrack.assetUrl))
+      .toHaveLength(1);
+
+    engine.startMusicProgram({ tracks });
+    await vi.waitFor(() => {
+      expect(loader.mock.calls.filter(([assetUrl]) => assetUrl === failedTrack.assetUrl))
+        .toHaveLength(2);
+    });
+    await engine.dispose();
+  });
+
+  it("keeps gameplay audio available when every playlist track fails", async () => {
+    const context = fakeAudioContext();
+    const loader = vi.fn(async (_assetUrl: string) => {
+      throw new Error("broken module");
+    });
+    const engine = new AudioEngine({
+      contextFactory: () => context,
+      moduleLoader: loader,
+    });
+    expect(await engine.unlock()).toBe(true);
+
+    engine.startMusicProgram({
+      tracks: [MODULE_TRACKS[0]!, MODULE_TRACKS[1]!, MODULE_TRACKS[2]!],
+    });
+    await vi.waitFor(() => expect(loader).toHaveBeenCalledTimes(3));
+    engine.updateMusic();
+    expect(context.createBufferSource).not.toHaveBeenCalled();
+
+    engine.play("move");
+    expect(context.createOscillator).toHaveBeenCalled();
+    await engine.dispose();
+  });
+
+  it("fades gameplay music before retiring its scheduled sources", async () => {
+    const context = fakeAudioContext();
+    const engine = new AudioEngine({
+      contextFactory: () => context,
+      moduleLoader: async () => trackerModule(),
+    });
+    expect(await engine.unlock()).toBe(true);
+    engine.startMusicProgram({ tracks: [MODULE_TRACKS[0]!] });
+    await vi.waitFor(() => expect(context.createBufferSource).toHaveBeenCalled());
+    const musicBus = vi.mocked(context.createGain).mock.results[2]?.value;
+    const source = vi.mocked(context.createBufferSource).mock.results[0]?.value;
+    vi.mocked(musicBus?.gain.setTargetAtTime).mockClear();
+
+    engine.stopMusic();
+
+    expect(musicBus?.gain.setTargetAtTime).toHaveBeenLastCalledWith(
+      0,
+      context.currentTime,
+      0.05,
+    );
+    expect(source?.stop).not.toHaveBeenCalled();
+    await new Promise((resolve) => setTimeout(resolve, 320));
+    expect(source?.stop).toHaveBeenCalled();
     await engine.dispose();
   });
 

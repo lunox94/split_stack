@@ -89,14 +89,20 @@ export function selectTrackForMatch(
   matchSeed: string,
   rematchIndex: number,
 ): ModuleTrack {
-  const offset = Math.max(0, Math.floor(rematchIndex));
-  const index = (stableHash(matchSeed) + offset) % MODULE_TRACKS.length;
-  return MODULE_TRACKS[index] as ModuleTrack;
+  return musicProgramForMatch(matchSeed, rematchIndex).tracks[0];
 }
 
 export function musicProgramForMatch(
   matchSeed: string,
   rematchIndex: number,
 ): MusicProgram {
-  return { tracks: [selectTrackForMatch(matchSeed, rematchIndex)] };
+  const round = Math.max(0, Math.floor(rematchIndex));
+  let state = stableHash(`${matchSeed}:${round}`);
+  const tracks = [...MODULE_TRACKS];
+  for (let index = tracks.length - 1; index > 0; index -= 1) {
+    state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+    const target = state % (index + 1);
+    [tracks[index], tracks[target]] = [tracks[target]!, tracks[index]!];
+  }
+  return { tracks: tracks as [ModuleTrack, ...ModuleTrack[]] };
 }

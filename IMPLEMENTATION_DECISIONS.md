@@ -371,12 +371,16 @@ rules version 2 and must change together with the peer rules hash.
   Rejected movement does not create a rollback checkpoint or audio node, touch
   repeat timers are released whenever input is disabled, and a severe visible
   frame stall drives adaptive quality down instead of looking like suspension.
-- Music uses four bundled 4-channel ProTracker modules. A match chooses one
-  deterministically and rematches rotate the choice. The replay core renders
-  short stereo PCM chunks into scheduled Web Audio buffer sources rather than
-  retaining a full decoded song, which bounds memory use on phones. Fixed
-  per-track gains derived from complete 44.1 kHz stereo renders calibrate the
-  modules to the quietest bundled track before the user volume is applied.
+- Music uses four bundled 4-channel ProTracker modules. Every game derives a
+  deterministic shuffle containing all four, and repeats that fixed order for
+  the life of the game. Competitive players and spectators share the order but
+  do not network their local playback position; Practice derives its order from
+  its existing fresh seed. Complete authored arrangements overlap through an
+  800 ms equal-power crossfade. The replay core renders short stereo PCM chunks
+  into scheduled Web Audio buffer sources rather than retaining full decoded
+  songs, which bounds memory use on phones. Fixed per-track gains derived from
+  complete 44.1 kHz stereo renders calibrate the modules to the quietest bundled
+  track before the user volume is applied.
 - Music, SFX, and Callouts use independent buses followed by a transparent
   master safety ceiling. The user-facing volumes use perceptual gain curves;
   first-run values are Music 0.45, Effects 0.85, and Callouts 0.85. Ordinary
@@ -388,9 +392,13 @@ rules version 2 and must change together with the peer rules hash.
   centered; competitive board SFX use restrained 0.18 panning, and Garbage
   keeps its rumble centered while panning only its upper impact layers.
 - The tracker scheduler runs independently of rendering at a 100 ms cadence
-  and keeps approximately 850 ms queued. A one-track music program preserves
-  current match selection while leaving a bounded seam for future playlists.
-  This is presentation-only and remains outside the rules hash.
+  and keeps approximately 850 ms queued. It prepares only the next raw module;
+  resolved module bytes remain in the bounded local cache while decoded PCM
+  remains chunked. If a successor is not ready, the current arrangement loops
+  until a transition is possible. A failed module is skipped for the rest of
+  that game and tried again in the next game; one surviving module loops and a
+  fully failed playlist becomes silent without affecting SFX or gameplay. This
+  is presentation-only and remains outside the rules hash.
 - Normal line-clear impact effects carry a one-based combo count and `piece`
   origin. Collapse clear impacts carry `power-collapse` and the unchanged
   combo count. Audio combines the normal row-count SFX with Callouts only for
@@ -424,9 +432,11 @@ rules version 2 and must change together with the peer rules hash.
   individual calibration trims so their speaker-range presence approaches the
   bundled recorded voices without forcing the whole Callouts bus louder.
 - Pausing, backgrounding, muting, track replacement, and Web Audio suspension
-  stop queued module buffers and resume from the audible sample position. The
-  modules keep their authored tempo and arrangement; gameplay intensity does
-  not rewrite tracker data.
+  stop queued module buffers and resume from the audible sample and crossfade
+  position. An in-progress local preload may finish while playback is frozen.
+  Leaving gameplay fades the music bus for 300 ms before retiring queued
+  sources; disposal may stop immediately. The modules keep their authored tempo
+  and arrangement; gameplay intensity does not rewrite tracker data.
 - The module files remain byte-exact and their source IDs and hashes are pinned.
   They are separate from the MIT license, and the unresolved game-bundling
   permission is stated explicitly in `THIRD_PARTY_NOTICES.md`.
