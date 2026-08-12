@@ -39,6 +39,7 @@ import { createPowerTipTracker } from "../persistence/power-tips";
 import {
   loadPreferences,
   savePreferences,
+  type Preferences,
   type StoragePort,
 } from "../persistence/settings";
 import {
@@ -2211,6 +2212,89 @@ export async function bootstrap(): Promise<void> {
   shell.controlsHelpButton.addEventListener("click", () => showHelp(shell, "controls"));
   shell.helpBack.addEventListener("click", () => shell.show("home"));
   shell.settingsButton.addEventListener("click", () => shell.show("settings"));
+  const preferencesFromSettings = (): Preferences => ({
+    effectsEnabled: shell.settingsInputs.effectsEnabled.checked,
+    effectsVolume: Number(shell.settingsInputs.effectsVolume.value),
+    musicEnabled: shell.settingsInputs.musicEnabled.checked,
+    musicVolume: Number(shell.settingsInputs.musicVolume.value),
+    calloutsEnabled: shell.settingsInputs.calloutsEnabled.checked,
+    calloutsVolume: Number(shell.settingsInputs.calloutsVolume.value),
+    vibration: shell.settingsInputs.vibration.checked,
+    touchControls: shell.settingsInputs.touchControls.value === "buttons"
+      ? "buttons"
+      : "gestures",
+    colorPalette: shell.settingsInputs.colorPalette.value === "colorblind"
+      ? "colorblind"
+      : "standard",
+    reducedMotion: shell.settingsInputs.reducedMotion.checked,
+    reducedFlashes: shell.settingsInputs.reducedFlashes.checked,
+    graphics: shell.settingsInputs.graphics.value === "normal" ||
+        shell.settingsInputs.graphics.value === "low" ||
+        shell.settingsInputs.graphics.value === "very-low"
+      ? shell.settingsInputs.graphics.value
+      : "auto",
+    screenShake: shell.settingsInputs.screenShake.checked,
+    gameplayTips: shell.settingsInputs.gameplayTips.checked,
+    debugTools: shell.settingsInputs.debugTools.checked,
+  });
+  shell.soundLibraryButton.addEventListener("click", () => {
+    if (!shell.settingsInputs.debugTools.checked) return;
+    shell.soundLibraryStatus.textContent = "";
+    shell.show("sound-library");
+  });
+  const auditionLibrarySfx = (
+    label: string,
+    cue: Parameters<AudioEngine["play"]>[0] | null,
+    garbageRows = 0,
+  ): void => {
+    void audio.unlock().then((unlocked) => {
+      if (!unlocked) return;
+      audio.setEffectsMuted(false);
+      audio.setEffectsVolume(Number(shell.settingsInputs.effectsVolume.value));
+      if (garbageRows > 0) audio.playGarbageRise(garbageRows, { pan: 0 });
+      else if (cue !== null) audio.play(cue, { pan: 0 });
+      shell.soundLibraryStatus.textContent = formatString(
+        "soundLibrary.playing",
+        { sound: label },
+      );
+    });
+  };
+  for (const { cue, button } of shell.soundLibraryCueButtons) {
+    button.addEventListener("click", () => {
+      auditionLibrarySfx(
+        button.textContent ?? cue,
+        cue === "garbage-rise" ? null : cue,
+        cue === "garbage-rise" ? 1 : 0,
+      );
+    });
+  }
+  for (const { rows, button } of shell.soundLibraryGarbageButtons) {
+    button.addEventListener("click", () => {
+      auditionLibrarySfx(button.textContent ?? `Garbage Rise ×${rows}`, null, rows);
+    });
+  }
+  for (const { cue, button } of shell.soundLibraryCalloutButtons) {
+    button.addEventListener("click", () => {
+      void audio.unlock().then((unlocked) => {
+        if (!unlocked) return;
+        audio.setCalloutsMuted(false);
+        audio.setCalloutsVolume(
+          Number(shell.settingsInputs.calloutsVolume.value),
+        );
+        audio.playCallout(cue, { pan: 0 });
+        shell.soundLibraryStatus.textContent = formatString(
+          "soundLibrary.playing",
+          { sound: button.textContent ?? cue },
+        );
+      });
+    });
+  }
+  shell.soundLibraryBack.addEventListener("click", () => {
+    const draftPreferences = preferencesFromSettings();
+    applyPreferences();
+    shell.setPreferences(draftPreferences);
+    shell.show("settings");
+  });
   shell.diagnosticsCopyButton.addEventListener("click", () => {
     const copy = async (): Promise<boolean> => {
       const text = networkDiagnostics.copyText();
@@ -2250,26 +2334,7 @@ export async function bootstrap(): Promise<void> {
   });
   shell.settingsBack.addEventListener("click", () => {
     const previousGraphics = preferences.graphics;
-    preferences = {
-      effectsEnabled: shell.settingsInputs.effectsEnabled.checked,
-      effectsVolume: Number(shell.settingsInputs.effectsVolume.value),
-      musicEnabled: shell.settingsInputs.musicEnabled.checked,
-      musicVolume: Number(shell.settingsInputs.musicVolume.value),
-      calloutsEnabled: shell.settingsInputs.calloutsEnabled.checked,
-      calloutsVolume: Number(shell.settingsInputs.calloutsVolume.value),
-      vibration: shell.settingsInputs.vibration.checked,
-      touchControls: shell.settingsInputs.touchControls.value === "buttons" ? "buttons" : "gestures",
-      colorPalette: shell.settingsInputs.colorPalette.value === "colorblind" ? "colorblind" : "standard",
-      reducedMotion: shell.settingsInputs.reducedMotion.checked,
-      reducedFlashes: shell.settingsInputs.reducedFlashes.checked,
-      graphics: shell.settingsInputs.graphics.value === "normal" ||
-        shell.settingsInputs.graphics.value === "low" ||
-        shell.settingsInputs.graphics.value === "very-low"
-        ? shell.settingsInputs.graphics.value
-        : "auto",
-      screenShake: shell.settingsInputs.screenShake.checked,
-      gameplayTips: shell.settingsInputs.gameplayTips.checked,
-    };
+    preferences = preferencesFromSettings();
     if (preferences.graphics === "auto" && previousGraphics !== "auto") autoGraphics.reset();
     savePreferences(storage, preferences);
     applyPreferences();

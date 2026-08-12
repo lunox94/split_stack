@@ -407,8 +407,22 @@ rules version 2 and must change together with the peer rules hash.
   active item plus three pending items; overflow
   removes the oldest pending combo first and otherwise the oldest pending
   callout. Pause, suspension, teardown, and disposal discard stale Callouts.
+- Procedural SFX and Callouts use continuous sine/triangle oscillators rather
+  than phase-discontinuous square/saw waves. The Effects shaper remains linear
+  through ordinary cue levels and applies a Hermite soft knee only above 0.55,
+  with a 0.795 ceiling margin for oversampling. This preserves transient clarity
+  without audible waveform clicks or always-on saturation.
 - Effects and Callouts volume sliders play one reduced-gain, non-looping preview
   after adjustment so their independent balance can be judged in Settings.
+- Music volume retains a quadratic response for comfortable background control.
+  Effects and Callouts use a 1.4-power response so low-medium slider positions
+  preserve gameplay presence. Per-cue trims group movement, placement, clears,
+  garbage, and powers into explicit loudness tiers. Music sidechain depth follows
+  the same hierarchy: movement never ducks, placement ducks briefly, and clears,
+  garbage, powers, and Callouts receive progressively stronger space.
+- Procedural power Callouts add restrained, continuous upper-harmonic layers and
+  individual calibration trims so their speaker-range presence approaches the
+  bundled recorded voices without forcing the whole Callouts bus louder.
 - Pausing, backgrounding, muting, track replacement, and Web Audio suspension
   stop queued module buffers and resume from the audible sample position. The
   modules keep their authored tempo and arrangement; gameplay intensity does

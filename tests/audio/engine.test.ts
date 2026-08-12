@@ -92,6 +92,28 @@ function fakeAudioContext(): AudioContext & {
 }
 
 describe("audio engine lifecycle", () => {
+  it("keeps procedural effects and callouts on continuous oscillator waves", () => {
+    const tones = [
+      ...Object.values(CUE_DEFINITIONS).flat(),
+      ...Object.values(CALLOUT_DEFINITIONS).flat(),
+    ];
+    expect(tones.every((tone) => tone.wave === "sine" || tone.wave === "triangle"))
+      .toBe(true);
+  });
+
+  it("keeps ordinary effects linear before a gentle 0.8 limiter knee", async () => {
+    const context = fakeAudioContext();
+    const engine = new AudioEngine({ contextFactory: () => context });
+    expect(await engine.unlock()).toBe(true);
+
+    const effectsLimiter = vi.mocked(context.createWaveShaper).mock.results[0]?.value;
+    const curve = effectsLimiter?.curve as Float32Array | null;
+    expect(curve).toBeInstanceOf(Float32Array);
+    const positiveHalf = curve?.[Math.round((curve.length - 1) * 0.75)] ?? 0;
+    expect(positiveHalf).toBeCloseTo(0.5, 2);
+    expect(Math.max(...(curve ?? []))).toBeCloseTo(0.795, 5);
+  });
+
   it("keeps recorded combo callouts bundled and compact", () => {
     for (const fileName of ["good.mp3", "excellent.mp3", "incredible.mp3"]) {
       const bytes = readFileSync(resolve("public/audio/callouts", fileName));
@@ -113,7 +135,7 @@ describe("audio engine lifecycle", () => {
     expect(Math.min(...(curve ?? []))).toBeCloseTo(-0.95, 5);
   });
 
-  it("maps user volume controls through a perceptual gain curve", async () => {
+  it("preserves Effects and Callout presence at medium volume while keeping Music gentle", async () => {
     const context = fakeAudioContext();
     const engine = new AudioEngine({ contextFactory: () => context });
     expect(await engine.unlock()).toBe(true);
@@ -129,7 +151,7 @@ describe("audio engine lifecycle", () => {
     engine.setCalloutsVolume(0.5);
 
     expect(effectsBus?.gain.setTargetAtTime).toHaveBeenCalledWith(
-      0.25,
+      0.5 ** 1.4,
       context.currentTime,
       0.01,
     );
@@ -139,7 +161,7 @@ describe("audio engine lifecycle", () => {
       0.02,
     );
     expect(calloutsBus?.gain.setTargetAtTime).toHaveBeenCalledWith(
-      0.25,
+      0.5 ** 1.4,
       context.currentTime,
       0.01,
     );
@@ -281,7 +303,7 @@ describe("audio engine lifecycle", () => {
     );
   });
 
-  it("ducks music only for exceptional physical effects", async () => {
+  it("uses tiered ducking while leaving ordinary movement outside the sidechain", async () => {
     const context = fakeAudioContext();
     const engine = new AudioEngine({ contextFactory: () => context });
     expect(await engine.unlock()).toBe(true);
@@ -290,9 +312,15 @@ describe("audio engine lifecycle", () => {
 
     engine.play("move");
     expect(musicBus?.gain.setTargetAtTime).not.toHaveBeenCalled();
+    engine.play("single");
+    expect(musicBus?.gain.setTargetAtTime).toHaveBeenLastCalledWith(
+      0.45 ** 2 * 0.78,
+      context.currentTime,
+      0.02,
+    );
     engine.play("nuke-impact");
     expect(musicBus?.gain.setTargetAtTime).toHaveBeenLastCalledWith(
-      0.45 ** 2 * 0.88,
+      0.45 ** 2 * 0.68,
       context.currentTime,
       0.02,
     );
@@ -334,7 +362,7 @@ describe("audio engine lifecycle", () => {
       await vi.advanceTimersByTimeAsync(1_227);
       expect(context.createOscillator).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
-      expect(context.createOscillator).toHaveBeenCalledTimes(1);
+      expect(context.createOscillator).toHaveBeenCalledTimes(2);
       expect(vi.mocked(context.createOscillator).mock.results[0]?.value.frequency
         .setValueAtTime).toHaveBeenCalledWith(110, context.currentTime);
     } finally {

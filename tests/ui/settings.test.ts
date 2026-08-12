@@ -47,7 +47,15 @@ describe("local preferences", () => {
       musicVolume: 0.45,
       calloutsEnabled: true,
       calloutsVolume: 0.85,
+      debugTools: false,
     });
+  });
+
+  it("persists Debug tools as an opt-in local preference", () => {
+    const storage = new MemoryStorage();
+    savePreferences(storage, { ...DEFAULT_PREFERENCES, debugTools: true });
+
+    expect(loadPreferences(storage, false).debugTools).toBe(true);
   });
 
   it("defaults graphics to Auto without letting first-run media preferences change it", () => {

@@ -2852,6 +2852,22 @@ test("Home keeps help opt-in and exposes the complete settings surface", async (
   await expect(page.getByLabel("Gameplay tips")).not.toBeChecked();
   await page.getByRole("button", { name: "Clear diagnostics" }).click();
   await expect(page.getByText("Diagnostics cleared.")).toBeVisible();
+  const soundLibraryButton = page.getByRole("button", {
+    name: "Sound library",
+    includeHidden: true,
+  });
+  await expect(page.getByLabel("Debug tools")).not.toBeChecked();
+  await expect(soundLibraryButton).toBeHidden();
+  await page.getByLabel("Debug tools").check();
+  await expect(soundLibraryButton).toBeVisible();
+  await soundLibraryButton.click();
+  await expect(page.getByRole("heading", { name: "Sound library" })).toBeVisible();
+  await page.getByRole("button", { name: "Back" }).click();
+  await expect(page.getByLabel("Debug tools")).toBeChecked();
+  await page.getByRole("button", { name: "Back" }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
+  await expect(page.getByLabel("Debug tools")).toBeChecked();
+  await expect(soundLibraryButton).toBeVisible();
 });
 
 test("dense renderer cell art survives palette switches at common sizes", DEVICE_MATRIX, async ({

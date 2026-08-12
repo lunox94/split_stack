@@ -7,6 +7,12 @@ import { createSpecialIcon } from "../render/special-icons";
 import type { BoardViewport, RendererLayout } from "../render/renderer";
 import { BARRIER_CAPACITY_TRANSITION_MS } from "./barrier-capacity";
 import {
+  AUDIO_CUES,
+  CALLOUT_CUES,
+  type AudioCue,
+  type CalloutCue,
+} from "../audio/cues";
+import {
   renderPiecePreviewSlot,
   type PiecePreviewOptions,
 } from "./piece-preview";
@@ -414,6 +420,7 @@ export interface SettingsInputs {
   graphics: HTMLSelectElement;
   screenShake: HTMLInputElement;
   gameplayTips: HTMLInputElement;
+  debugTools: HTMLInputElement;
 }
 
 export type AppScreen =
@@ -421,6 +428,7 @@ export type AppScreen =
   | "lobby"
   | "help"
   | "settings"
+  | "sound-library"
   | "match"
   | "results";
 
@@ -539,6 +547,22 @@ export interface AppShell {
   diagnosticsClearButton: HTMLButtonElement;
   diagnosticsStatus: HTMLElement;
   settingsBack: HTMLButtonElement;
+  soundLibrary: HTMLElement;
+  soundLibraryButton: HTMLButtonElement;
+  soundLibraryBack: HTMLButtonElement;
+  soundLibraryStatus: HTMLElement;
+  soundLibraryCueButtons: readonly {
+    readonly cue: AudioCue;
+    readonly button: HTMLButtonElement;
+  }[];
+  soundLibraryGarbageButtons: readonly {
+    readonly rows: number;
+    readonly button: HTMLButtonElement;
+  }[];
+  soundLibraryCalloutButtons: readonly {
+    readonly cue: CalloutCue;
+    readonly button: HTMLButtonElement;
+  }[];
   match: HTMLElement;
   arena: HTMLElement;
   left: HudElements;
@@ -1055,8 +1079,87 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
   const diagnosticsStatus = element(document, "p", "muted");
   diagnosticsStatus.setAttribute("aria-live", "polite");
   diagnostics.append(diagnosticsActions, diagnosticsStatus);
+  const debugToolsSection = element(document, "div", "debug-tools-settings");
+  const debugTools = checkboxSetting(
+    document,
+    debugToolsSection,
+    STRINGS["settings.debugTools"],
+  );
+  const soundLibraryButton = button(document, STRINGS["settings.soundLibrary"]);
+  soundLibraryButton.hidden = true;
+  debugToolsSection.append(soundLibraryButton);
+  debugTools.addEventListener("change", () => {
+    soundLibraryButton.hidden = !debugTools.checked;
+  });
   const settingsBack = button(document, STRINGS["common.back"]);
-  settingsParts.panel.append(settingsList, diagnostics, settingsBack);
+  const settingsNavigation = element(document, "div", "secondary-actions");
+  settingsNavigation.append(settingsBack);
+  settingsParts.panel.append(
+    settingsList,
+    diagnostics,
+    debugToolsSection,
+    settingsNavigation,
+  );
+
+  const soundLibraryParts = menuScreen(document, STRINGS["soundLibrary.heading"]);
+  soundLibraryParts.panel.classList.add("sound-library-panel");
+  const soundLibraryIntro = element(
+    document,
+    "p",
+    "muted",
+    STRINGS["soundLibrary.intro"],
+  );
+  const humanizeCue = (cue: AudioCue | CalloutCue): string => {
+    if (cue === "t-spin") return "T-Spin";
+    return cue.split("-").map((part) =>
+      part.length === 0 ? part : `${part[0]?.toUpperCase()}${part.slice(1)}`
+    ).join(" ");
+  };
+  const soundLibraryList = element(document, "div", "sound-library-list");
+  const soundLibraryCueButtons = AUDIO_CUES.map((cue) => {
+    const label = humanizeCue(cue);
+    const playButton = button(document, label, "sound-library-cue");
+    playButton.dataset.audioCue = cue;
+    soundLibraryList.append(playButton);
+    return { cue, button: playButton };
+  });
+  const soundLibraryGarbageButtons = [2, 3, 4].map((rows) => {
+    const label = formatString("soundLibrary.garbageRows", { rows });
+    const playButton = button(document, label, "sound-library-cue");
+    playButton.dataset.garbageRows = String(rows);
+    soundLibraryList.append(playButton);
+    return { rows, button: playButton };
+  });
+  const calloutHeading = element(
+    document,
+    "h3",
+    "sound-library-section-heading",
+    STRINGS["settings.callouts"],
+  );
+  const soundLibraryCalloutList = element(
+    document,
+    "div",
+    "sound-library-list",
+  );
+  const soundLibraryCalloutButtons = CALLOUT_CUES.map((cue) => {
+    const label = humanizeCue(cue);
+    const playButton = button(document, label, "sound-library-cue");
+    playButton.dataset.calloutCue = cue;
+    soundLibraryCalloutList.append(playButton);
+    return { cue, button: playButton };
+  });
+  const soundLibraryStatus = element(document, "p", "muted sound-library-status");
+  soundLibraryStatus.setAttribute("role", "status");
+  soundLibraryStatus.setAttribute("aria-live", "polite");
+  const soundLibraryBack = button(document, STRINGS["common.back"]);
+  soundLibraryParts.panel.append(
+    soundLibraryIntro,
+    soundLibraryList,
+    calloutHeading,
+    soundLibraryCalloutList,
+    soundLibraryStatus,
+    soundLibraryBack,
+  );
 
   const match = element(document, "section", "screen");
   match.hidden = true;
@@ -1412,6 +1515,7 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     lobbyParts.screen,
     helpParts.screen,
     settingsParts.screen,
+    soundLibraryParts.screen,
     match,
     resultsParts.screen,
     pairingInterruption,
@@ -1425,12 +1529,14 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
     lobby: lobbyParts.screen,
     help: helpParts.screen,
     settings: settingsParts.screen,
+    "sound-library": soundLibraryParts.screen,
     match,
     results: resultsParts.screen,
   } as const;
   lobbyParts.screen.hidden = true;
   helpParts.screen.hidden = true;
   settingsParts.screen.hidden = true;
+  soundLibraryParts.screen.hidden = true;
   resultsParts.screen.hidden = true;
   let readinessSignature: string | null = null;
   let helpPreviewTimer: number | null = null;
@@ -1519,11 +1625,19 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
       graphics,
       screenShake,
       gameplayTips,
+      debugTools,
     },
     diagnosticsCopyButton,
     diagnosticsClearButton,
     diagnosticsStatus,
     settingsBack,
+    soundLibrary: soundLibraryParts.screen,
+    soundLibraryButton,
+    soundLibraryBack,
+    soundLibraryStatus,
+    soundLibraryCueButtons,
+    soundLibraryGarbageButtons,
+    soundLibraryCalloutButtons,
     match,
     arena,
     left,
@@ -1872,6 +1986,8 @@ export function createAppShell(document: Document, mount: HTMLElement): AppShell
       }
       screenShake.checked = preferences.screenShake;
       gameplayTips.checked = preferences.gameplayTips;
+      debugTools.checked = preferences.debugTools;
+      soundLibraryButton.hidden = !preferences.debugTools;
     },
     setGraphicsStatus(setting, tier): void {
       if (setting !== "auto") {

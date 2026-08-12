@@ -1693,6 +1693,26 @@ button.destructive:focus-visible {
   margin-block: 1rem;
 }
 
+.sound-library-panel {
+  width: min(100%, 48rem);
+}
+
+.sound-library-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr));
+  gap: 0.65rem;
+  margin-block: 1.25rem;
+}
+
+.sound-library-cue {
+  min-height: 3rem;
+  text-align: left;
+}
+
+.sound-library-status {
+  min-height: 1.5rem;
+}
+
 .setting-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1774,6 +1794,18 @@ svg[data-power-icon="monomino-rush"] {
   margin-block: 1.25rem;
   padding-block: 0.25rem 1rem;
   border-bottom: 1px solid rgba(147, 174, 217, 0.14);
+}
+
+.debug-tools-settings {
+  display: grid;
+  gap: 0.7rem;
+  margin-block: 1.25rem;
+  padding-block: 0.25rem 1rem;
+  border-bottom: 1px solid rgba(147, 174, 217, 0.14);
+}
+
+.debug-tools-settings > button {
+  justify-self: start;
 }
 
 .control-help-section[data-control-scheme="touch"] {

@@ -4,6 +4,7 @@ import {
   CUE_DEFINITIONS,
   CUE_POLICIES,
   GLITCH_PREVIEW_STEP_MS,
+  PROCEDURAL_CALLOUT_GAIN,
   garbageRiseCueForRow,
   type AudioCue,
   type CalloutAsset,
@@ -51,12 +52,15 @@ const MUSIC_SCHEDULER_INTERVAL_MS = 100;
 const EFFECTS_MAKEUP_GAIN = 6;
 const CALLOUTS_MAKEUP_GAIN = 4.4;
 const RECORDED_CALLOUT_GAIN = 1.18;
-const EFFECTS_LIMIT = 0.8;
+// A small interpolation margin keeps the oversampled shaper below the 0.8 bus ceiling.
+const EFFECTS_LIMIT = 0.795;
+const EFFECTS_LIMITER_KNEE = 0.55;
 const EFFECTS_LIMITER_CURVE_SIZE = 2_049;
 const MAX_ACTIVE_SFX_TONES = 24;
 const MASTER_LIMIT = 0.95;
 
-const perceptualGain = (volume: number): number => volume * volume;
+const musicGain = (volume: number): number => volume * volume;
+const presenceGain = (volume: number): number => volume ** 1.4;
 
 interface ActiveTone {
   readonly oscillator: OscillatorNode;
@@ -90,7 +94,22 @@ function effectsLimiterCurve(): Float32Array<ArrayBuffer> {
   );
   for (let index = 0; index < curve.length; index += 1) {
     const input = index / (curve.length - 1) * 2 - 1;
-    curve[index] = EFFECTS_LIMIT * Math.tanh(input / EFFECTS_LIMIT);
+    const sign = Math.sign(input);
+    const magnitude = Math.abs(input);
+    if (magnitude <= EFFECTS_LIMITER_KNEE) {
+      curve[index] = input;
+      continue;
+    }
+    const span = 1 - EFFECTS_LIMITER_KNEE;
+    const t = (magnitude - EFFECTS_LIMITER_KNEE) / span;
+    const t2 = t * t;
+    const t3 = t2 * t;
+    const kneeContribution = (2 * t3 - 3 * t2 + 1) * EFFECTS_LIMITER_KNEE;
+    const slopeContribution = (t3 - 2 * t2 + t) * span;
+    const limitContribution = (-2 * t3 + 3 * t2) * EFFECTS_LIMIT;
+    curve[index] = sign * (
+      kneeContribution + slopeContribution + limitContribution
+    );
   }
   return curve;
 }
@@ -315,7 +334,10 @@ export class AudioEngine {
     }
     this.#playDefinition(
       CUE_DEFINITIONS[cue],
-      options,
+      {
+        ...options,
+        gain: (options.gain ?? 1) * (policy.gain ?? 1),
+      },
       this.#effectsMakeup,
       this.#effectsMuted,
       policy.priority,
@@ -378,6 +400,10 @@ export class AudioEngine {
     if (!Number.isFinite(rowCount) || rowCount <= 0) return;
     const rows = Math.max(1, Math.min(4, Math.round(rowCount)));
     const impactPan = Math.max(-0.2, Math.min(0.2, options.pan ?? 0));
+    const garbageOptions = {
+      ...options,
+      gain: (options.gain ?? 1) * 1.14,
+    };
     const batchDelayMs = sequence === undefined
       ? 0
       : Math.max(0, sequence.startedAtMs - sequence.requestedAtMs);
@@ -394,20 +420,20 @@ export class AudioEngine {
       }
       this.#playDefinition(
         cue.rumble,
-        { ...options, pan: 0 },
+        { ...garbageOptions, pan: 0 },
         this.#effectsMakeup,
         this.#effectsMuted,
         3,
       );
       this.#playDefinition(
         cue.impact,
-        { ...options, pan: impactPan },
+        { ...garbageOptions, pan: impactPan },
         this.#effectsMakeup,
         this.#effectsMuted,
         3,
       );
     }
-    this.duckMusic(durationMs, 0.88);
+    this.duckMusic(durationMs, 0.74);
   }
 
   playGlitchPreviewStep(step: number, options: PlayCueOptions = {}): void {
@@ -588,7 +614,7 @@ export class AudioEngine {
 
   #applyEffectsVolume(): void {
     if (this.#context === null || this.#effectsBus === null) return;
-    const value = this.#effectsMuted ? 0 : perceptualGain(this.#effectsVolume);
+    const value = this.#effectsMuted ? 0 : presenceGain(this.#effectsVolume);
     this.#effectsBus.gain.cancelScheduledValues(this.#context.currentTime);
     this.#effectsBus.gain.setTargetAtTime(value, this.#context.currentTime, 0.01);
   }
@@ -601,14 +627,14 @@ export class AudioEngine {
     );
     const value = this.#musicMuted || this.#musicPaused
       ? 0
-      : perceptualGain(this.#musicVolume) * this.#musicMix * duck;
+      : musicGain(this.#musicVolume) * this.#musicMix * duck;
     this.#musicBus.gain.cancelScheduledValues(this.#context.currentTime);
     this.#musicBus.gain.setTargetAtTime(value, this.#context.currentTime, timeConstant);
   }
 
   #applyCalloutsVolume(): void {
     if (this.#context === null || this.#calloutsBus === null) return;
-    const value = this.#calloutsMuted ? 0 : perceptualGain(this.#calloutsVolume);
+    const value = this.#calloutsMuted ? 0 : presenceGain(this.#calloutsVolume);
     this.#calloutsBus.gain.cancelScheduledValues(this.#context.currentTime);
     this.#calloutsBus.gain.setTargetAtTime(value, this.#context.currentTime, 0.01);
   }
@@ -824,7 +850,10 @@ export class AudioEngine {
     const definition = CALLOUT_DEFINITIONS[active.cue];
     this.#playDefinition(
       definition,
-      active.options,
+      {
+        ...active.options,
+        gain: (active.options.gain ?? 1) * PROCEDURAL_CALLOUT_GAIN[active.cue],
+      },
       this.#calloutsMakeup,
       this.#calloutsMuted,
       null,

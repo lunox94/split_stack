@@ -3,6 +3,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_PREFERENCES } from "../../src/persistence/settings";
+import {
+  CALLOUT_DEFINITIONS,
+  CUE_DEFINITIONS,
+} from "../../src/audio/cues";
 import { calculateRendererLayout } from "../../src/render/renderer";
 import {
   SPECIAL_ACCENT_COLORS,
@@ -946,6 +950,39 @@ describe("application shell", () => {
     expect(shell.settings.textContent).toContain("Music volume");
     expect(shell.settings.textContent).toContain("Effects volume");
     expect(shell.settings.textContent).toContain("Callout volume");
+  });
+
+  it("keeps the production sound library behind the Debug tools preference", () => {
+    const shell = createAppShell(document, document.createElement("div"));
+
+    expect(shell.settingsInputs.debugTools.checked).toBe(false);
+    expect(shell.soundLibraryButton.hidden).toBe(true);
+
+    shell.settingsInputs.debugTools.checked = true;
+    shell.settingsInputs.debugTools.dispatchEvent(new Event("change"));
+    expect(shell.soundLibraryButton.hidden).toBe(false);
+
+    shell.setPreferences({ ...DEFAULT_PREFERENCES, debugTools: false });
+    expect(shell.soundLibraryButton.hidden).toBe(true);
+    shell.setPreferences({ ...DEFAULT_PREFERENCES, debugTools: true });
+    expect(shell.soundLibraryButton.hidden).toBe(false);
+
+    expect(shell.soundLibraryCueButtons.map(({ cue }) => cue).sort()).toEqual(
+      Object.keys(CUE_DEFINITIONS).sort(),
+    );
+    expect(shell.soundLibraryGarbageButtons.map(({ rows }) => rows)).toEqual([
+      2,
+      3,
+      4,
+    ]);
+    expect(shell.soundLibraryCalloutButtons.map(({ cue }) => cue).sort()).toEqual(
+      Object.keys(CALLOUT_DEFINITIONS).sort(),
+    );
+    expect(shell.soundLibraryStatus.getAttribute("aria-live")).toBe("polite");
+
+    shell.show("sound-library");
+    expect(shell.soundLibrary.hidden).toBe(false);
+    expect(shell.settings.hidden).toBe(true);
   });
 
   it("exposes bounded connection-diagnostic actions with polite feedback", () => {

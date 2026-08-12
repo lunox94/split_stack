@@ -20,6 +20,7 @@ export interface Preferences {
   graphics: GraphicsSetting;
   screenShake: boolean;
   gameplayTips: boolean;
+  debugTools: boolean;
 }
 
 const STORAGE_KEY = "split-stack/preferences/v1";
@@ -39,6 +40,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   graphics: "auto",
   screenShake: true,
   gameplayTips: false,
+  debugTools: false,
 };
 
 function boolean(value: unknown, fallback: boolean): boolean {
@@ -81,6 +83,7 @@ function parsePreferences(value: unknown, firstRunReducedMotion: boolean): Prefe
     graphics: graphics(record.graphics, record.reducedEffects),
     screenShake: boolean(record.screenShake, !reducedMotion),
     gameplayTips: boolean(record.gameplayTips, false),
+    debugTools: boolean(record.debugTools, false),
   };
 }
 
